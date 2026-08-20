@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="player_head_preview">Player skin head preview</string>
+    <string name="button_select_custom_skin">Custom skin</string>
+    <string name="button_clear_custom_skin">Clear skin</string>
+    <string name="custom_skin_status_none">No custom skin selected.</string>
+    <string name="custom_skin_status_microsoft">Using Microsoft skin for the signed-in account.</string>
+    <string name="custom_skin_status_enabled">Using custom skin (%1$s model).</string>
+    <string name="custom_skin_imported">Custom skin imported (%1$s model).</string>
+    <string name="custom_skin_import_failed">Could not import this skin.</string>
+    <string name="account_required_title">Microsoft sign-in required</string>
+    <string name="account_required_before_install_message">Please sign in with Microsoft at least once before installing Minecraft. After that, offline mode stays unlocked.</string>
+    <string name="offline_locked_title">Offline mode locked</string>
+    <string name="offline_locked_message">Offline mode becomes available after this device has completed Microsoft sign-in at least once.</string>
+</resources>

@@ -1,0 +1,90 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black">
+
+    <ImageView
+        android:id="@+id/imageScreenshotFullscreen"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:contentDescription="@string/instance_screenshot_fullscreen_description"
+        android:scaleType="fitCenter" />
+
+    <ProgressBar
+        android:id="@+id/progressScreenshotFullscreen"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_gravity="center"
+        android:indeterminate="true" />
+
+    <com.google.android.material.button.MaterialButton
+        android:id="@+id/buttonScreenshotBack"
+        style="@style/Widget.Material3.Button.TextButton.Icon"
+        android:layout_width="52dp"
+        android:layout_height="52dp"
+        android:layout_gravity="top|start"
+        android:layout_marginStart="16dp"
+        android:layout_marginTop="16dp"
+        android:contentDescription="@string/instance_screenshot_back"
+        android:minWidth="52dp"
+        android:minHeight="52dp"
+        android:padding="0dp"
+        app:backgroundTint="#CC1B1B1F"
+        app:icon="@drawable/ic_arrow_back_24"
+        app:iconGravity="textStart"
+        app:iconTint="@android:color/white"
+        app:iconPadding="0dp" />
+
+    <LinearLayout
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_gravity="bottom|center_horizontal"
+        android:layout_marginStart="12dp"
+        android:layout_marginEnd="12dp"
+        android:layout_marginBottom="20dp"
+        android:background="@drawable/bg_screenshot_viewer_controls"
+        android:gravity="center"
+        android:orientation="horizontal"
+        android:padding="6dp">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonScreenshotShare"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:minWidth="0dp"
+            android:minHeight="48dp"
+            android:text="@string/instance_screenshot_share"
+            android:textColor="@android:color/white"
+            app:icon="@drawable/ic_share_24"
+            app:iconTint="@android:color/white" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonScreenshotDownload"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:layout_marginStart="2dp"
+            android:minWidth="0dp"
+            android:minHeight="48dp"
+            android:text="@string/instance_screenshot_download"
+            android:textColor="@android:color/white"
+            app:icon="@drawable/ic_download_24"
+            app:iconTint="@android:color/white" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonScreenshotDelete"
+            style="@style/Widget.Material3.Button.TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="48dp"
+            android:layout_marginStart="2dp"
+            android:minWidth="0dp"
+            android:minHeight="48dp"
+            android:text="@string/instance_screenshot_delete"
+            android:textColor="@android:color/white"
+            app:icon="@drawable/ic_delete_24"
+            app:iconTint="@android:color/white" />
+    </LinearLayout>
+</FrameLayout>

@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="microsoft_skin_change_button">Change Microsoft skin</string>
+    <string name="microsoft_skin_change_title">Change Microsoft skin</string>
+    <string name="microsoft_skin_change_message">This will update the real Minecraft: Java Edition skin for %1$s. The change can appear in Minecraft, the official launcher, and other launchers after Minecraft Services refreshes.</string>
+    <string name="microsoft_skin_pick">Choose skin</string>
+    <string name="microsoft_skin_upload_title">Upload Microsoft skin</string>
+    <string name="microsoft_skin_upload_message">Choose the skin model to use for this Minecraft account. Use Classic for Steve-style arms, or Slim for Alex-style arms.</string>
+    <string name="microsoft_skin_variant_classic">Classic / Steve</string>
+    <string name="microsoft_skin_variant_slim">Slim / Alex</string>
+    <string name="microsoft_skin_upload">Upload</string>
+    <string name="microsoft_skin_uploading">Uploading Microsoft skin…</string>
+    <string name="microsoft_skin_upload_success">Microsoft skin uploaded. Refreshing profile…</string>
+    <string name="microsoft_skin_upload_failed">Skin upload failed: %1$s</string>
+    <string name="microsoft_skin_requires_account">Sign in with a Microsoft account before changing the Microsoft skin.</string>
+    <string name="microsoft_skin_invalid">Invalid skin. Use a 64x64 or 64x32 PNG skin.</string>
+</resources>

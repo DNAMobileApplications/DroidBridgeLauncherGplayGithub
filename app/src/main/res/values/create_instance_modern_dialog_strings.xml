@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="create_instance_dialog_subtitle">Create a clean instance with its own loader, version, icon, saves, and mods.</string>
+    <string name="create_instance_loader_section_summary">Choose the mod loader for this instance. Vanilla has no loader.</string>
+    <string name="create_instance_game_version_summary">Pick the Minecraft version first. Loader versions update automatically.</string>
+    <string name="create_instance_loader_version_label">Loader version</string>
+    <string name="create_instance_loader_version_summary">Choose the exact loader build to install.</string>
+    <string name="create_instance_loader_version_vanilla">Vanilla / no loader</string>
+    <string name="create_instance_loader_version_auto">Vanilla uses the selected Minecraft version directly.</string>
+    <string name="create_instance_loader_version_loading">Loading loader versions…</string>
+    <string name="create_instance_loader_version_loaded">%1$d loader versions loaded.</string>
+    <string name="create_instance_loader_version_selected">Selected loader version: %1$s</string>
+    <string name="create_instance_loader_version_none">No %1$s versions found for Minecraft %2$s.</string>
+    <string name="create_instance_loader_version_error">Unable to load loader versions: %1$s</string>
+    <string name="create_instance_loader_version_required">Pick a loader version before creating this instance.</string>
+    <string name="create_instance_neoforge_summary">NeoForge uses the selected Minecraft version plus the selected NeoForge build. Isolated mode separates saves/mods/config/options while version files can still be kept in the protected shared cache.</string>
+    <string name="create_instance_neoforge_not_ready">NeoForge installer support is not available for this build.</string>
+</resources>

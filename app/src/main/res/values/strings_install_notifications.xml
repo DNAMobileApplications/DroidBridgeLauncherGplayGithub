@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="notification_permission_launch_title">Allow install notifications?</string>
+    <string name="notification_permission_launch_message">DroidBridge can show Minecraft, Fabric, Forge, and NeoForge install progress while the app is in the background. This is useful for slower downloads and long loader installs.</string>
+    <string name="notification_permission_allow">Allow notifications</string>
+    <string name="notification_permission_not_now">Not now</string>
+    <string name="notification_permission_enabled_toast">Install notifications enabled.</string>
+    <string name="notification_permission_denied_toast">Install notifications are disabled.</string>
+    <string name="notification_permission_denied_title">Notifications are still off</string>
+    <string name="notification_permission_denied_message">Android is blocking DroidBridge notifications. Open app notification settings and allow notifications if you want visible background install progress.</string>
+    <string name="notification_permission_open_settings">Open settings</string>
+    <string name="install_dialog_background_notifications">Keep installing in background and show notification</string>
+    <string name="install_notifications_on">Background install notifications: On</string>
+    <string name="install_notifications_off">Background install notifications: Off</string>
+    <string name="install_notifications_summary_enabled">Shows an ongoing progress notification while Minecraft, Fabric, Forge, or NeoForge installs continue in the background.</string>
+    <string name="install_notifications_summary_permission_needed">Android notification permission is off. Turn this on to approve notifications and show background install progress.</string>
+    <string name="install_notifications_summary_old_android">Shows an ongoing progress notification while loader installs continue in the background.</string>
+</resources>

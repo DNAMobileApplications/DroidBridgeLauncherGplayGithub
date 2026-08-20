@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="create_instance_fabric_summary">Fabric creates a modded loader profile and a mods folder for the selected instance. With isolated mode on, saves/mods/config stay in the instance folder while version files are cached and protected by the launcher.</string>
+</resources>

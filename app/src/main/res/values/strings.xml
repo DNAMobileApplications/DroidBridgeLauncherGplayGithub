@@ -1,0 +1,190 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">DroidBridge</string>
+    <string name="status_signed_out">Microsoft account: not connected</string>
+    <string name="status_signed_in">Microsoft account: %1$s</string>
+    <string name="button_sign_in">Sign in</string>
+    <string name="button_sign_out">Sign out</string>
+    <string name="msg_configure_client_id">Microsoft sign-in is not included in this public source snapshot.</string>
+    <string name="msg_sign_in_success">Sign-in completed.</string>
+    <string name="msg_sign_out_success">Signed out.</string>
+    <string name="version_section_title">Minecraft versions</string>
+    <string name="version_section_desc">Choose a version type, pick a version from the list on the right, then install it.</string>
+    <string name="version_list_title">Available versions</string>
+    <string name="version_count_value">%1$d versions shown</string>
+    <string name="version_count_value_default">Loading versions…</string>
+    <string name="version_tab_release">Release</string>
+    <string name="version_tab_installed">Installed</string>
+    <string name="version_tab_snapshot">Snapshot</string>
+    <string name="version_tab_beta">Beta</string>
+    <string name="version_tab_alpha">Alpha</string>
+    <string name="version_meta_value">%1$s • %2$s</string>
+    <string name="version_state_installed">Installed</string>
+    <string name="version_state_not_installed">Not installed</string>
+    <string name="selected_version_empty">No version selected.</string>
+    <string name="selected_version_value">Selected: %1$s\nType: %2$s\nReleased: %3$s</string>
+    <string name="selected_version_value_installed">Selected: %1$s\nType: %2$s\nReleased: %3$s\nStatus: installed</string>
+    <string name="button_refresh_versions">Refresh</string>
+    <string name="button_install_version">Install Vanilla</string>
+    <string name="button_open_folder">Folder</string>
+    <string name="launcher_folder_value">Game folder: %1$s</string>
+    <string name="main_status_ready">Ready.</string>
+    <string name="hint_select_version">Select a version first.</string>
+    <string name="msg_fetching_versions">Fetching Minecraft version manifest…</string>
+    <string name="msg_versions_loaded">Loaded %1$d Minecraft versions.</string>
+    <string name="msg_installed_versions_loaded">%1$d installed versions found.</string>
+    <string name="msg_versions_failed">Could not load Minecraft versions: %1$s</string>
+    <string name="msg_installing_version_named">Installing Vanilla %1$s…</string>
+    <string name="msg_version_metadata_install_complete">%1$s vanilla files installed.</string>
+    <string name="msg_version_install_failed">Version install failed: %1$s</string>
+    <string name="msg_version_install_complete_named">Vanilla %1$s installed. You can launch it now.</string>
+    <string name="msg_launcher_folder_location">Launcher game folder: %1$s</string>
+    <string name="button_share_logs">Share Logs</string>
+    <string name="button_launch">Install / Launch selected version</string>
+    <string name="launch_log_title">Launch log</string>
+    <string name="msg_launch_requires_login">Sign in before online launch.</string>
+    <string name="msg_launch_stub">Native launch bridge invoked. Replace LauncherBridge with your real JVM/LWJGL renderer backend to execute Minecraft.</string>
+    <string name="msg_installing_version">Installing selected version…</string>
+    <string name="msg_version_install_complete">Version install complete.</string>
+    <string name="msg_building_launch_plan">Building launch plan…</string>
+    <string name="game_surface_waiting">Waiting for render surface…</string>
+    <string name="splash_screen_checking">Checking launcher components…</string>
+    <string name="splash_screen_checking_item">Checking %3$s (%1$d/%2$d)…</string>
+    <string name="splash_screen_installing_item">Installing %3$s (%1$d/%2$d)…</string>
+    <string name="splash_screen_finalizing">Finalizing launcher files…</string>
+    <string name="splash_screen_done">Launcher files are ready.</string>
+    <string name="splash_screen_failed">Launcher preparation failed:\n%1$s</string>
+    <string name="splash_screen_storage_unavailable">Storage is not mounted. Please check app storage access and restart DroidBridge.</string>
+    <string name="component_installer_checking_title">Checking launcher files</string>
+    <string name="component_installer_checking_message">DroidBridge is checking its Java runtimes, LWJGL libraries, and launcher support components.</string>
+    <string name="component_installer_first_launch_title">Install launcher components</string>
+    <string name="component_installer_first_launch_message">DroidBridge needs to install Java runtimes, LWJGL libraries, launcher patches, and other support components before Minecraft can run. This process does not install Minecraft, game files, accounts, worlds, mods, resource packs, or shader packs.</string>
+    <string name="component_installer_repair_title">Launcher components need attention</string>
+    <string name="component_installer_repair_message">One or more required launcher components are missing or incomplete. Minecraft versions that depend on them may not launch until they are installed again.</string>
+    <string name="component_installer_installing_title">Installing launcher components</string>
+    <string name="component_installer_installing_message">Keep DroidBridge open while it installs each item once. If an item fails, DroidBridge will skip it and continue instead of repeatedly retrying.</string>
+    <string name="component_installer_incomplete_title">Some components are still missing</string>
+    <string name="component_installer_incomplete_message">DroidBridge installed everything it could and skipped the items that failed. You can retry the missing items now or continue to the launcher, but Minecraft versions that require them may not start.</string>
+    <string name="component_installer_storage_title">Storage is unavailable</string>
+    <string name="component_installer_storage_advice">Keep at least 1 GB of free device storage available for the bundled Java runtimes, LWJGL libraries, temporary extraction files, and launcher components.</string>
+    <string name="component_installer_storage_status">Recommended free space: at least 1 GB
+Available device storage: %1$s</string>
+    <string name="component_installer_storage_unknown">Unknown</string>
+    <string name="component_installer_storage_retry_message">Check storage access, free space if needed, and try again.</string>
+    <string name="component_installer_pending_prefix">Ready to install:</string>
+    <string name="component_installer_missing_prefix">Still missing:</string>
+    <string name="component_installer_pending_count">%1$d launcher components need to be installed.</string>
+    <string name="component_installer_skipped_count">%1$d component items were skipped or are still incomplete.</string>
+    <string name="component_installer_starting">Starting component installation…</string>
+    <string name="component_installer_complete">Launcher components are ready.</string>
+    <string name="component_installer_install_button">Install Components</string>
+    <string name="component_installer_reinstall_button">Reinstall Missing Components</string>
+    <string name="component_installer_continue_button">Continue to Launcher</string>
+    <string name="component_installer_working_button">Installing…</string>
+    <string name="component_installer_check_again_button">Check Again</string>
+    <string name="component_installer_missing_dialog_title">Components are still missing</string>
+    <string name="component_installer_missing_dialog_message">The failed items were skipped so DroidBridge would not remain stuck on the installation screen. Try reinstalling the missing components before launching a Minecraft version that requires them.</string>
+    <string name="component_installer_troubleshooting">If installation still fails, clear DroidBridge’s cache, restart the phone, and try again. Make sure the device has at least 1 GB of free storage before reinstalling components.</string>
+    <string name="splash_screen_cacio">Unpacks the Cacio/Caciocavallo desktop compatibility files.</string>
+    <string name="splash_screen_lwjgl">Unpacks LWJGL classes and natives into the app-private files directory.</string>
+    <string name="splash_screen_components">Unpacks launcher support jars and patch files into the app data components directory.</string>
+    <string name="splash_screen_jre_8">Unpacks the bundled Java 8 runtime.</string>
+    <string name="splash_screen_jre_17">Unpacks the bundled Java 17 runtime.</string>
+    <string name="splash_screen_jre_21">Unpacks the bundled Java 21 runtime.</string>
+    <string name="splash_screen_jre_25">Unpacks the bundled Java 25 runtime.</string>
+    <string name="button_launch_version">Launch</string>
+    <string name="msg_launch_install_first">Install this version before launching it.</string>
+    <string name="msg_launching_version_named">Launching %1$s…</string>
+    <string name="msg_launch_failed">Launch failed: %1$s</string>
+    <string name="msg_launch_finished">Minecraft exited with code %1$d.</string>
+    <string name="game_status_preparing">Preparing launch…</string>
+    <string name="game_status_surface_ready">Surface ready. Starting JVM…</string>
+    <string name="game_status_starting_minecraft">Starting Minecraft…</string>
+    <string name="game_status_running">Minecraft JVM is running.</string>
+    <string name="log_keep_history">Keep a copy of game logs</string>
+    <string name="button_share_latest_log">Share Latestlog</string>
+    <string name="launcher_logs_on">Launcher logs: On</string>
+    <string name="launcher_logs_off">Launcher logs: Off</string>
+    <string name="launcher_logs_summary">Keeps DroidBridge launcher diagnostics such as instance creation, jar installs, modpack installs, renderer setup, and launcher errors. Turn this off if you do not want launcher diagnostics saved.</string>
+    <string name="button_share_launcher_logs">Share Launcher Logs</string>
+    <string name="launcher_logs_missing">launcherlog.txt does not exist yet.</string>
+    <string name="launcher_logs_share_failed">Unable to share launcher logs.</string>
+    <string name="log_latest_missing">latestlog.txt does not exist yet. Launch the game once first.</string>
+    <string name="log_history_enabled">Game log history enabled.</string>
+    <string name="log_history_disabled">Game log history disabled.</string>
+    <string name="game_status_rendering">Minecraft is rendering.</string>
+    <string name="storage_location_delete_action">Remove storage location</string>
+    <string name="storage_location_delete_title">Remove %1$s?</string>
+    <string name="storage_location_delete_message">This only removes the storage location from DroidBridge. It will not delete any Minecraft files from the folder.</string>
+    <string name="storage_location_delete_confirm">Remove</string>
+    <string name="storage_location_deleted">Removed storage location: %1$s</string>
+    <string name="storage_location_default_cannot_delete">The default storage location cannot be removed.</string>
+    <string name="storage_location_delete_failed">Unable to remove storage location.</string>
+    <string name="create_instance_name_already_exists">An instance named "%1$s" already exists. Choose another name.</string>
+    <string name="inherited_vanilla_keep_on">Keep base Minecraft version</string>
+    <string name="inherited_vanilla_keep_off">Remove base Minecraft version after loader install</string>
+    <string name="inherited_vanilla_keep_summary">Recommended: keep this on so Fabric, Forge, and NeoForge can keep using their inherited Minecraft base version. Turn it off only if you intentionally want to remove the inherited base version after installing a loader.</string>
+
+    <!-- Game file cleanup -->
+    <string name="button_cleanup_game_files">Clean unnecessary game files</string>
+    <string name="cleanup_game_files_title">Clean unnecessary game files?</string>
+    <string name="cleanup_game_files_message">This removes downloaded Minecraft asset files that are no longer referenced by installed game versions. It does not delete saves, mods, resource packs, shader packs, instances, versions, libraries, accounts, or logs.</string>
+    <string name="cleanup_game_files_confirm">Clean</string>
+    <string name="cleanup_game_files_running">Cleaning...</string>
+    <string name="cleanup_game_files_complete_title">Cleanup complete</string>
+    <string name="cleanup_game_files_failed_title">Cleanup failed</string>
+    <string name="cleanup_game_files_failed_message">Unable to clean unnecessary game files:\n%1$s</string>
+
+    // Privacy policy
+    <!-- Privacy / Legal settings section -->
+    <string name="settings_privacy_policy_title">Privacy Policy</string>
+    <string name="settings_privacy_policy_summary">Legal links for Minecraft usage terms, DroidBridge privacy information, and DroidBridge terms of service.</string>
+
+    <string name="button_open_minecraft_eula">Minecraft EULA</string>
+    <string name="button_open_droidbridge_privacy_policy">DroidBridge Privacy Policy</string>
+    <string name="button_open_droidbridge_terms">DroidBridge Terms of Service</string>
+    <string name="button_open_droidbridge_license">DroidBridge Licensing Info</string>
+
+    <string name="legal_link_unavailable">This link is not available yet.</string>
+    <string name="legal_link_open_failed">Unable to open this link.</string>
+
+    <!-- First-run EULA acceptance dialog -->
+    <string name="eula_acceptance_title">Minecraft EULA Required</string>
+    <string name="eula_acceptance_message">Before using DroidBridge, you must accept that Minecraft usage is subject to the official Minecraft EULA and related usage guidelines. You do not need to read the EULA now, but it is available below for review.</string>
+    <string name="button_open_eula">Open Minecraft EULA</string>
+    <string name="button_accept_eula">Accept and Continue</string>
+    <!-- URLs: keep these non-translatable -->
+    <string name="url_minecraft_eula" translatable="false">https://www.minecraft.net/en-us/eula</string>
+    <string name="url_droidbridge_privacy_policy" translatable="false">https://dnamobileapplications.com/droidbridge/privacy</string>
+    <string name="url_droidbridge_terms" translatable="false">https://dnamobileapplications.com/droidbridge/terms</string>
+
+    <!-- FPS: FPS Counter options -->
+    <string name="game_fps_counter_on">FPS counter: On</string>
+    <string name="game_fps_counter_off">FPS counter: Off</string>
+    <string name="game_fps_counter_summary">Shows real-time FPS on the floating settings button while the game is running.</string>
+    <string name="game_settings_button_position_title">Floating settings button position</string>
+    <string name="game_settings_button_position_summary">Choose the default corner. Dragging the button in-game saves a custom position until it is reset.</string>
+    <string name="button_reset_game_settings_button_position">Reset button position</string>
+    <string name="game_settings_button_position_reset_toast">Floating button position reset.</string>
+    <string name="settings_renderer_ignore_notch_on">Ignore display notch: On</string>
+    <string name="settings_renderer_ignore_notch_off">Ignore display notch: Off</string>
+    <string name="settings_renderer_ignore_notch_summary">Ignores the camera cutout on certain devices.</string>
+    <string name="button_pick_mobileglues_folder">Pick MG folder</string>
+    <string name="renderer_plugin_storage_message">%1$s needs the MobileGlues folder selected before launch.\n\nPick the MG folder so the launcher can write the MobileGlues config here:\n%2$s</string>
+    <string name="preparing_launcher_components">Preparing launcher components...</string>
+    <string name="dual_screen_support_on">Dual-screen support: On</string>
+    <string name="dual_screen_support_off">Dual-screen support: Off</string>
+    <string name="dual_screen_support_summary">Enables DroidBridge dual-screen mode and the swap-screens actions. Off by default on normal devices; automatically enabled on a detected AYN Thor unless you turn it off.</string>
+    <string name="dual_screen_swap_on">Swap dual-screen positions: On</string>
+    <string name="dual_screen_swap_off">Swap dual-screen positions: Off</string>
+    <string name="dual_screen_swap_summary">Swaps which display shows Minecraft and remembers the choice across launches. This is the same swap state used by the in-game Controller / gamepad overlay.</string>
+    <string name="droidbridge">DroidBridge</string>
+    <string name="bmclapi_download_source_on">BMCLAPI download mirror: On</string>
+    <string name="bmclapi_download_source_off">BMCLAPI download mirror: Off</string>
+    <string name="bmclapi_download_source_summary">Uses the third-party BMCLAPI mirror as the preferred source for supported Minecraft and loader files. Official sources remain as automatic fallbacks and downloaded files still use their published hash checks. This does not bypass Microsoft sign-in or game ownership.</string>
+    <string name="bmclapi_enable_title">Enable BMCLAPI mirror?</string>
+    <string name="bmclapi_enable_message">BMCLAPI is an independent third-party mirror and is not operated or approved by Mojang or Microsoft. DroidBridge will prefer BMCLAPI only for supported downloads, keep official URLs as fallbacks, and continue verifying published file hashes. Your Microsoft account must own Minecraft: Java Edition.</string>
+    <string name="bmclapi_enable_confirm">Enable BMCLAPI</string>
+    <string name="bmclapi_requires_microsoft_title">Microsoft account required</string>
+    <string name="bmclapi_requires_microsoft_message">Sign in with a Microsoft account that has a valid Minecraft: Java Edition profile before enabling this mirror.</string>
+</resources>

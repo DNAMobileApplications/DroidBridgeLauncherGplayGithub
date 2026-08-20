@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="microsoft_cape_change_button">Change Cape</string>
+    <string name="microsoft_cape_loading_button">Loading capes…</string>
+    <string name="microsoft_cape_saving_button">Saving cape…</string>
+    <string name="microsoft_cape_loading">Loading owned capes…</string>
+    <string name="microsoft_cape_requires_account">Sign in with a Microsoft account before changing capes.</string>
+    <string name="microsoft_cape_load_failed">Could not load capes: %1$s</string>
+    <string name="microsoft_cape_save_failed">Could not update cape: %1$s</string>
+    <string name="microsoft_cape_save_success">Cape updated. It may take a moment to appear everywhere.</string>
+    <string name="microsoft_cape_dialog_title">Change cape</string>
+    <string name="microsoft_cape_dialog_summary">Choose one of the official capes owned by %1$s, or hide the current cape.</string>
+    <string name="microsoft_cape_owned_title">Owned capes</string>
+    <string name="microsoft_cape_empty">This Microsoft account did not return any owned capes. Custom cape uploads are not supported by the normal Minecraft profile API.</string>
+    <string name="microsoft_cape_none_title">No cape</string>
+    <string name="microsoft_cape_none_summary">Hide the active cape on the Minecraft profile.</string>
+    <string name="microsoft_cape_active_badge">Active cape</string>
+    <string name="microsoft_cape_inactive_badge">Available</string>
+    <string name="microsoft_cape_apply">Apply</string>
+    <string name="player_model_preview">Player model preview</string>
+    <string name="account_profile_controls_hint">Skin and cape controls only appear when a Microsoft profile session is available.</string>
+    <string name="main_player_head_signed_in">Signed-in player profile. Opens account settings.</string>
+    <string name="main_player_head_signed_out">Signed out. Opens account settings.</string>
+</resources>

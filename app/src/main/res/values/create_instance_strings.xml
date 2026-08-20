@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="create_instance_title">Create instance</string>
+    <string name="create_instance_button">Create instance</string>
+    <string name="create_instance_select_icon">Select icon</string>
+    <string name="create_instance_remove_icon">Remove icon</string>
+    <string name="create_instance_name_label">Name</string>
+    <string name="create_instance_name_hint">1.21.11 (Vanilla)</string>
+    <string name="create_instance_loader_label">Loader</string>
+    <string name="create_instance_game_version_label">Game version</string>
+    <string name="create_instance_version_type_label">Version type</string>
+    <string name="create_instance_default_name">%1$s (Vanilla)</string>
+    <string name="create_instance_no_versions">No versions are loaded for this category yet. Refresh the manifest and try again.</string>
+    <string name="create_instance_icon_picker_missing">No image picker is available on this device.</string>
+    <string name="create_instance_version_missing">Unable to find the selected version in the manifest.</string>
+    <string name="create_instance_installing">Creating instance %1$s…</string>
+    <string name="create_instance_complete">Created instance %1$s</string>
+    <string name="create_instance_per_instance_summary">Isolated mode separates the user data folder which creates its own custom instance.</string>
+    <string name="create_instance_isolated_checkbox">Create isolated instance data folder</string>
+    <string name="create_instance_isolated_summary">Disabled: This creates an instance under .minecraft/instances with its own saves, mods, config, logs, options, resource packs, and shader packs.\n\nEnabled: This installs only to the shared/global version. Version folders may still be cached under .minecraft/versions either way, but isolated-owned cache entries are hidden/protected from the Shared tab.</string>
+    <string name="create_instance_installing_shared">Installing shared version %1$s…</string>
+    <string name="create_instance_shared_complete">Installed shared version %1$s</string>
+    <string name="create_instance_name_auto_summary">The default name is the Minecraft version plus loader, for example 1.21.11 (Vanilla). Edit the name to use a custom instance name.</string>
+</resources>

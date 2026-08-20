@@ -1,0 +1,278 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Network/auth/download access. -->
+    <uses-permission android:name="android.permission.INTERNET" />
+
+    <!-- Foreground installation progress service. -->
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE"
+        tools:ignore="ForegroundServicesPolicy" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+
+    <!-- Android 13+ notification permission for visible install progress notifications. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Optional: gyro camera control. Never filter out devices without a gyroscope. -->
+    <uses-feature
+        android:name="android.hardware.sensor.gyroscope"
+        android:required="false" />
+    <!-- Scoped storage uses SAF tree URI grants. Do not request MANAGE_EXTERNAL_STORAGE for Play Store builds. -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <!-- Android 11+ package visibility for renderer and Vulkan driver plugins. -->
+    <queries>
+        <!-- MobileGlues official plugin app. -->
+        <package android:name="com.fcl.plugin.mobileglues" />
+
+        <!-- Krypton / NGG plugin variants. -->
+        <package android:name="com.bzlzhh.plugin.ngg" />
+        <package android:name="com.bzlzhh.plugin.ngg.angleless" />
+
+        <package android:name="com.fcl.plugin.renderer.mobileglues" />
+        <package android:name="com.fcl.plugin.renderer.ltw" />
+        <package android:name="com.fcl.plugin.renderer.gl4es" />
+        <package android:name="com.fcl.plugin.renderer.angle" />
+        <package android:name="com.fcl.plugin.renderer.mesa" />
+
+        <!-- Vulkan / Turnip driver plugin packages for Vulkan Zink. -->
+        <package android:name="com.fcl.plugin.driver.freedreno" />
+        <package android:name="com.fcl.plugin.driver.turnip" />
+        <package android:name="com.fcl.plugin.turnip" />
+        <package android:name="com.fcl.plugin.adreno" />
+        <package android:name="com.bzlzhh.plugin.driver.freedreno" />
+        <package android:name="com.bzlzhh.plugin.driver.turnip" />
+        <package android:name="com.bzlzhh.plugin.turnip" />
+        <package android:name="com.bzlzhh.plugin.adreno" />
+        <package android:name="com.tungsten.fcl.plugin.driver.freedreno" />
+        <package android:name="com.tungsten.fcl.plugin.driver.turnip" />
+        <package android:name="ca.dnamobile.renderer.litegles" />
+        <provider android:authorities="ca.dnamobile.renderer.litegles.settings" />
+        <!-- FFmpeg companion plugin packages.
+             Keep all known release/debug package variants visible on Android 11+.
+             The release plugin is ca.dnamobile.dbridgelauncher.ffmpeg, but debug
+             and local companion builds can use a suffixed package name. -->
+        <package android:name="ca.dnamobile.javalauncher.ffmpeg" />
+        <package android:name="ca.dnamobile.javalauncher.ffmpeg.debug" />
+        <package android:name="ca.dnamobile.javalauncher.debug.ffmpeg" />
+        <package android:name="ca.dnamobile.javalauncher.ffmpegplugin" />
+        <package android:name="ca.dnamobile.javalauncher.ffmpegplugin.debug" />
+
+        <!-- Optional FFmpeg plugin discovery intents.
+             These do not replace exact package queries; they only make future
+             companion builds visible if they expose a plugin/discovery action. -->
+        <intent>
+            <action android:name="ca.dnamobile.javalauncher.ffmpeg.PLUGIN" />
+        </intent>
+        <intent>
+            <action android:name="ca.dnamobile.javalauncher.FFMPEG_PLUGIN" />
+        </intent>
+
+
+        <!-- Android 11+ package visibility for Android TextToSpeech engines.
+             Required so TextToSpeech can discover/bind the system TTS service. -->
+        <intent>
+            <action android:name="android.intent.action.TTS_SERVICE" />
+        </intent>
+        <intent>
+            <action android:name="android.speech.tts.engine.CHECK_TTS_DATA" />
+        </intent>
+        <intent>
+            <action android:name="android.speech.tts.engine.INSTALL_TTS_DATA" />
+        </intent>
+        <package android:name="com.google.android.tts" />
+        <package android:name="com.samsung.SMT" />
+        <package android:name="com.svox.pico" />
+
+        <!-- Fallback visibility for plugin/driver apps with launcher activities. -->
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+        </intent>
+    </queries>
+
+    <application
+        android:allowBackup="true"
+        android:allowNativeHeapPointerTagging="false"
+        android:icon="@mipmap/ic_launcher_droidbridge"
+        android:label="@string/app_name"
+        android:roundIcon="@mipmap/ic_launcher_droidbridge_round"
+        android:supportsRtl="false"
+        android:theme="@style/Theme.DroidBridge"
+        tools:targetApi="30">
+
+        <!-- AppAuth redirect receiver. Kept for AppAuth/custom redirect compatibility. -->
+
+
+        <!-- Main launcher flow. -->
+        <activity
+            android:name=".SplashActivity"
+            android:configChanges="keyboard|keyboardHidden|uiMode"
+            android:screenOrientation="fullSensor"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <activity
+            android:name=".MainActivity"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:screenOrientation="unspecified"
+            android:exported="false">
+            <property
+                android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
+                android:value="true" />
+        </activity>
+        <activity
+            android:name=".DroidBridgeStandaloneJarActivity"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenSize|smallestScreenSize"
+            android:exported="false"
+            android:hardwareAccelerated="false"
+            android:process=":java_gui"
+            android:screenOrientation="landscape" />
+        <!-- Android home screen shortcut entry.
+             This is exported only so the user's launcher app can open pinned
+             instance shortcuts. It immediately hands off to MainActivity. -->
+        <activity
+            android:name=".InstanceShortcutActivity"
+            android:configChanges="keyboard|keyboardHidden|uiMode"
+            android:screenOrientation="fullSensor"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true" />
+
+        <!-- Front-end picker used by Kid Emu and similar launchers.
+             DroidBridge owns the instance list, so front ends should ask DroidBridge
+             to let the parent choose an instance instead of asking for raw IDs. -->
+        <activity
+            android:name=".InstancePickerActivity"
+            android:configChanges="keyboard|keyboardHidden|uiMode"
+            android:screenOrientation="fullSensor"
+            android:excludeFromRecents="true"
+            android:exported="true"
+            android:noHistory="true">
+            <intent-filter>
+                <action android:name="ca.dnamobile.droidbridgelauncher.action.PICK_INSTANCE" />
+                <category android:name="android.intent.category.DEFAULT" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".launcher.DroidBridgeLaunchActivity"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:screenOrientation="unspecified"
+            android:exported="false">
+            <property
+                android:name="android.window.PROPERTY_COMPAT_ALLOW_RESTRICTED_RESIZABILITY"
+                android:value="true" />
+        </activity>
+        <activity
+            android:name=".ModpackUpdateDetailsActivity"
+            android:screenOrientation="fullSensor"
+            android:exported="false" />
+
+        <activity
+            android:name=".LauncherSettingsActivity"
+            android:configChanges="keyboard|keyboardHidden|uiMode"
+            android:screenOrientation="fullSensor"
+            android:exported="false" />
+
+        <activity
+            android:name=".InstanceDetailsActivity"
+            android:configChanges="keyboard|keyboardHidden|uiMode"
+            android:screenOrientation="fullSensor"
+            android:exported="false" />
+
+        <activity
+            android:name=".ContentBrowserActivity"
+            android:configChanges="keyboard|keyboardHidden|uiMode"
+            android:screenOrientation="fullSensor"
+            android:exported="false" />
+        <activity
+            android:name=".input.GamepadMappingTransferActivity"
+            android:configChanges="keyboard|keyboardHidden|uiMode"
+            android:screenOrientation="fullSensor"
+            android:exported="false" />
+
+
+        <activity
+            android:name=".ContentProjectDetailsActivity"
+            android:configChanges="keyboard|keyboardHidden|uiMode"
+            android:screenOrientation="fullSensor"
+            android:exported="false" />
+        <activity
+            android:name=".settings.SimpleVoiceChatPermissionActivity"
+            android:screenOrientation="sensorLandscape"
+            android:exported="false" />
+        <activity
+            android:name=".fancymenu.MicrosoftAuthActivity"
+            android:configChanges="keyboard|keyboardHidden|orientation|screenLayout|screenSize|smallestScreenSize|uiMode"
+            android:exported="false"
+            android:screenOrientation="behind" />
+
+        <!-- Native exit hook / clean game-exit screen. -->
+        <activity
+            android:name=".ErrorActivity"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape" />
+
+        <!-- Game process. -->
+        <activity
+            android:name=".GameActivity"
+            android:configChanges="keyboard|keyboardHidden|navigation|orientation|screenLayout|screenSize|smallestScreenSize|touchscreen|uiMode"
+            android:exported="false"
+            android:process=":game"
+            android:screenOrientation="sensorLandscape" />
+
+        <!-- Controller editor screens. -->
+        <activity
+            android:name=".controls.ControlsActivity"
+            android:configChanges="keyboardHidden|orientation|screenSize"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape" />
+
+        <activity
+            android:name=".controls.ControlsEditorActivity"
+            android:configChanges="keyboardHidden|orientation|screenSize"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape" />
+
+        <!-- File sharing for logs/exports. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+
+        <!-- Android DocumentsProvider for exposing launcher-managed files. -->
+        <provider
+            android:name=".storage.DroidBridgeDocumentsProvider"
+            android:authorities="${applicationId}.documents"
+            android:exported="true"
+            android:grantUriPermissions="true"
+            android:permission="android.permission.MANAGE_DOCUMENTS">
+            <intent-filter>
+                <action android:name="android.content.action.DOCUMENTS_PROVIDER" />
+            </intent-filter>
+        </provider>
+
+        <service
+            android:name=".installation.InstallationForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+    </application>
+</manifest>

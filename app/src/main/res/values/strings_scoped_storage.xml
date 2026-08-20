@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="button_storage_locations">Storage</string>
+    <string name="storage_locations_title">Storage locations</string>
+    <string name="storage_locations_summary">Choose where new game files should be installed. Existing instances keep using the storage folder they were created in.</string>
+    <string name="button_add_storage_location">Add storage location</string>
+    <string name="storage_locations_choose_title">Install location</string>
+    <string name="storage_locations_choose_summary">Select where DroidBridge should install new game files. Only folders that resolve to a writable file path can be used for Minecraft installs.</string>
+    <string name="storage_default_name">Default storage</string>
+    <string name="storage_scoped_name">Scoped storage</string>
+    <string name="storage_picker_unavailable">Storage folder picker is not available on this device.</string>
+    <string name="storage_location_selected">Storage location selected: %1$s</string>
+    <string name="storage_location_added">Storage location added: %1$s</string>
+</resources>

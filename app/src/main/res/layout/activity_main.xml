@@ -1,0 +1,429 @@
+<?xml version="1.0" encoding="utf-8"?>
+<FrameLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/mainContent"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="?android:attr/colorBackground"
+    android:clipToPadding="false"
+    android:padding="0dp">
+
+    <com.google.android.material.card.MaterialCardView
+        android:id="@+id/mainviewcardview"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:cardBackgroundColor="@android:color/transparent"
+        app:cardElevation="0dp"
+        app:cardUseCompatPadding="false"
+        app:strokeWidth="0dp">
+
+        <FrameLayout
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:clipToPadding="false">
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="match_parent"
+                android:clipToPadding="false"
+                android:orientation="vertical">
+
+                <com.google.android.material.card.MaterialCardView
+                    android:id="@+id/cardMainTabsHeader"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:layout_marginTop="10dp"
+                    android:layout_marginEnd="10dp"
+                    app:cardBackgroundColor="?attr/colorSurface"
+                    app:cardCornerRadius="20dp"
+                    app:cardElevation="2dp"
+                    app:cardUseCompatPadding="false"
+                    app:strokeColor="?attr/colorOutlineVariant"
+                    app:strokeWidth="1dp">
+
+                    <!-- Portrait header: title + settings/action buttons on the first row,
+                         tabs get their own full-width second row so they are not squeezed. -->
+                    <LinearLayout
+                        android:id="@+id/installinstanceslayout"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:paddingStart="12dp"
+                        android:paddingTop="8dp"
+                        android:paddingEnd="10dp"
+                        android:paddingBottom="6dp">
+
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <TextView
+                                android:id="@+id/textMainInstancesTitle"
+                                android:layout_width="0dp"
+                                android:layout_height="wrap_content"
+                                android:layout_weight="1"
+                                android:ellipsize="end"
+                                android:maxLines="1"
+                                android:text="Instances"
+                                android:textAppearance="@style/TextAppearance.Material3.TitleMedium"
+                                android:textStyle="bold" />
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/buttonMultiSelectInstances"
+                                style="@style/Widget.Material3.Button.OutlinedButton"
+                                android:layout_width="44dp"
+                                android:layout_height="42dp"
+                                android:layout_marginEnd="6dp"
+                                android:contentDescription="@string/button_delete_selected_instances"
+                                android:minWidth="44dp"
+                                android:minHeight="42dp"
+                                android:padding="0dp"
+                                android:text=""
+                                android:visibility="gone"
+                                app:icon="@drawable/ic_delete_24"
+                                app:iconGravity="textStart"
+                                app:iconPadding="0dp" />
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/buttonStorageLocations"
+                                style="@style/Widget.Material3.Button.OutlinedButton"
+                                android:layout_width="44dp"
+                                android:layout_height="42dp"
+                                android:contentDescription="@string/storage_locations_title"
+                                android:minWidth="44dp"
+                                android:minHeight="42dp"
+                                android:padding="0dp"
+                                android:text=""
+                                app:icon="@drawable/ic_folder_24"
+                                app:iconGravity="textStart"
+                                app:iconPadding="0dp" />
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/buttonRefreshVersions"
+                                style="@style/Widget.Material3.Button.OutlinedButton"
+                                android:layout_width="44dp"
+                                android:layout_height="42dp"
+                                android:layout_marginStart="6dp"
+                                android:contentDescription="@string/button_refresh_versions"
+                                android:minWidth="44dp"
+                                android:minHeight="42dp"
+                                android:padding="0dp"
+                                android:text=""
+                                app:icon="@drawable/ic_refresh_24"
+                                app:iconGravity="textStart"
+                                app:iconPadding="0dp" />
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/buttonOpenSettings"
+                                style="@style/Widget.Material3.Button.OutlinedButton"
+                                android:layout_width="44dp"
+                                android:layout_height="42dp"
+                                android:layout_marginStart="6dp"
+                                android:contentDescription="@string/button_settings"
+                                android:minWidth="44dp"
+                                android:minHeight="42dp"
+                                android:padding="0dp"
+                                android:text=""
+                                app:icon="@drawable/ic_settings_24"
+                                app:iconGravity="textStart"
+                                app:iconPadding="0dp" />
+                        </LinearLayout>
+
+                        <com.google.android.material.tabs.TabLayout
+                            android:id="@+id/tabVersionTypes"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="4dp"
+                            android:background="@android:color/transparent"
+                            app:tabGravity="start"
+                            app:tabIndicatorFullWidth="false"
+                            app:tabMinWidth="78dp"
+                            app:tabMode="scrollable"
+                            app:tabPaddingEnd="12dp"
+                            app:tabPaddingStart="12dp" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+
+                <View
+                    android:id="@+id/viewMainTopBarShadow"
+                    android:layout_width="match_parent"
+                    android:layout_height="2dp"
+                    android:layout_marginStart="10dp"
+                    android:layout_marginEnd="10dp"
+                    android:background="@drawable/bg_main_top_bar_shadow"
+                    android:importantForAccessibility="no" />
+
+                <FrameLayout
+                    android:layout_width="match_parent"
+                    android:layout_height="0dp"
+                    android:layout_weight="1"
+                    android:clipToPadding="false">
+
+                    <androidx.recyclerview.widget.RecyclerView
+                        android:id="@+id/recyclerVersions"
+                        android:layout_width="match_parent"
+                        android:layout_height="match_parent"
+                        android:clipToPadding="false"
+                        android:nestedScrollingEnabled="true"
+                        android:overScrollMode="ifContentScrolls"
+                        android:paddingStart="10dp"
+                        android:paddingTop="14dp"
+                        android:paddingEnd="10dp"
+                        android:paddingBottom="14dp" />
+
+                    <ProgressBar
+                        android:id="@+id/progressVersions"
+                        style="?android:attr/progressBarStyleHorizontal"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:layout_gravity="top"
+                        android:indeterminate="true"
+                        android:visibility="gone" />
+
+                </FrameLayout>
+
+                <View
+                    android:id="@+id/viewMainBottomBarShadow"
+                    android:layout_width="match_parent"
+                    android:layout_height="2dp"
+                    android:layout_marginStart="10dp"
+                    android:layout_marginEnd="10dp"
+                    android:background="@drawable/bg_main_bottom_bar_shadow"
+                    android:importantForAccessibility="no" />
+
+                <com.google.android.material.card.MaterialCardView
+                    android:id="@+id/cardMainBottomActions"
+                    android:layout_width="match_parent"
+                    android:layout_height="wrap_content"
+                    android:layout_marginStart="10dp"
+                    android:layout_marginEnd="10dp"
+                    android:layout_marginBottom="10dp"
+                    app:cardBackgroundColor="?attr/colorSurface"
+                    app:cardCornerRadius="20dp"
+                    app:cardElevation="2dp"
+                    app:cardUseCompatPadding="false"
+                    app:strokeColor="?attr/colorOutlineVariant"
+                    app:strokeWidth="1dp">
+
+                    <LinearLayout
+                        android:id="@+id/bottomMainActions"
+                        android:layout_width="match_parent"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical"
+                        android:padding="10dp">
+
+                        <!-- Portrait bottom area: keep the important profile/log/create controls
+                             visible, and place longer actions in their own scrollable row. -->
+                        <LinearLayout
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:gravity="center_vertical"
+                            android:orientation="horizontal">
+
+                            <ImageView
+                                android:id="@+id/imageMainPlayerHead"
+                                android:layout_width="44dp"
+                                android:layout_height="44dp"
+                                android:layout_marginEnd="10dp"
+                                android:adjustViewBounds="true"
+                                android:background="@drawable/bg_player_head_preview"
+                                android:clickable="true"
+                                android:contentDescription="@string/main_player_head_signed_out"
+                                android:focusable="true"
+                                android:padding="4dp"
+                                android:scaleType="fitXY"
+                                android:src="@drawable/ic_player_head_placeholder" />
+
+                            <com.google.android.material.button.MaterialButton
+                                android:id="@+id/buttonShareLatestLog"
+                                style="@style/Widget.Material3.Button.OutlinedButton"
+                                android:layout_width="0dp"
+                                android:layout_height="44dp"
+                                android:layout_weight="1"
+                                android:contentDescription="@string/button_share_latest_log"
+                                android:ellipsize="end"
+                                android:maxLines="1"
+                                android:minWidth="48dp"
+                                android:minHeight="44dp"
+                                android:paddingStart="8dp"
+                                android:paddingEnd="8dp"
+                                android:text="Share Logs"
+                                android:textStyle="bold"
+                                app:icon="@drawable/ic_share_24"
+                                app:iconGravity="textStart"
+                                app:iconPadding="6dp" />
+
+                            <com.google.android.material.floatingactionbutton.FloatingActionButton
+                                android:id="@+id/fabCreateInstance"
+                                android:layout_width="44dp"
+                                android:layout_height="44dp"
+                                android:layout_marginStart="10dp"
+                                android:contentDescription="@string/create_instance_button"
+                                app:backgroundTint="?attr/colorPrimary"
+                                app:borderWidth="0dp"
+                                app:elevation="2dp"
+                                app:fabCustomSize="44dp"
+                                app:maxImageSize="24dp"
+                                app:pressedTranslationZ="4dp"
+                                app:srcCompat="@drawable/ic_add_24"
+                                app:tint="?attr/colorOnPrimary" />
+                        </LinearLayout>
+
+                        <HorizontalScrollView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:clipToPadding="false"
+                            android:fillViewport="false"
+                            android:overScrollMode="ifContentScrolls"
+                            android:scrollbars="none">
+
+                            <LinearLayout
+                                android:layout_width="wrap_content"
+                                android:layout_height="wrap_content"
+                                android:gravity="center_vertical"
+                                android:orientation="horizontal">
+
+                                <com.google.android.material.button.MaterialButton
+                                    android:id="@+id/buttonBrowseContentMain"
+                                    style="@style/Widget.Material3.Button.OutlinedButton"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="44dp"
+                                    android:ellipsize="end"
+                                    android:maxLines="1"
+                                    android:minHeight="44dp"
+                                    android:minWidth="146dp"
+                                    android:text="Browse Modpacks"
+                                    app:icon="@drawable/ic_browse_modpacks_24"
+                                    app:iconGravity="textStart"
+                                    app:iconPadding="8dp" />
+
+                                <Space
+                                    android:layout_width="8dp"
+                                    android:layout_height="wrap_content" />
+
+                                <com.google.android.material.button.MaterialButton
+                                    android:id="@+id/buttonImportModpackMain"
+                                    style="@style/Widget.Material3.Button.OutlinedButton"
+                                    android:layout_width="wrap_content"
+                                    android:layout_height="44dp"
+                                    android:ellipsize="end"
+                                    android:maxLines="1"
+                                    android:minHeight="44dp"
+                                    android:minWidth="140dp"
+                                    android:text="Import Modpack"
+                                    app:icon="@drawable/ic_import_modpack_24"
+                                    app:iconGravity="textStart"
+                                    app:iconPadding="8dp" />
+                            </LinearLayout>
+                        </HorizontalScrollView>
+
+                        <TextView
+                            android:id="@+id/textStatus"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:ellipsize="end"
+                            android:maxLines="2"
+                            android:textAppearance="@style/TextAppearance.Material3.BodySmall"
+                            android:visibility="gone" />
+                    </LinearLayout>
+                </com.google.android.material.card.MaterialCardView>
+            </LinearLayout>
+        </FrameLayout>
+    </com.google.android.material.card.MaterialCardView>
+
+    <!-- Kept for old Activity/binding references. The visible portrait UI above owns the modern layout. -->
+    <LinearLayout
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:orientation="vertical"
+        android:visibility="gone">
+
+        <TextView
+            android:id="@+id/textVersionCount"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="" />
+
+        <TextView
+            android:id="@+id/textSelectedVersion"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/selected_instance_empty" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonLaunchVersion"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/button_launch_version" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonOpenFolder"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/button_open_folder" />
+
+        <TextView
+            android:id="@+id/textAppTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/app_name" />
+
+        <TextView
+            android:id="@+id/textAccountStatus"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/status_signed_out" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonSignIn"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/button_sign_in" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/buttonSignOut"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="@string/button_sign_out" />
+
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/switchShowSharedInstalls"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/textSharedInstallsSummary"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/textFolder"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/textRenderSurfaceTitle"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <com.google.android.material.switchmaterial.SwitchMaterial
+            android:id="@+id/switchUseNativeSurface"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <TextView
+            android:id="@+id/textRenderSurfaceSummary"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+
+        <CheckBox
+            android:id="@+id/checkKeepLogs"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content" />
+    </LinearLayout>
+</FrameLayout>

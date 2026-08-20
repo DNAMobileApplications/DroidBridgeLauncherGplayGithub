@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_sustained_performance_title">Enable Sustained Performance</string>
+    <string name="settings_sustained_performance_summary">Requests Android’s sustained performance mode while Minecraft is active. On supported devices this lowers short peak clocks to reduce thermal throttling and improve frame-time consistency during longer sessions.</string>
+    <string name="settings_sustained_performance_unsupported">Sustained performance mode is not supported by this device.</string>
+
+    <string name="settings_renderer_resolution_scale_title">Resolution Scale</string>
+    <string name="settings_renderer_resolution_scale_summary">Lower values improve performance; higher values improve image quality. Changes apply the next time Minecraft starts.</string>
+    <string name="settings_renderer_resolution_scale_value">Resolution scale: %1$d%%</string>
+    <string name="settings_renderer_resolution_scale_value_placeholder">Resolution scale: 100%</string>
+    <string name="settings_renderer_resolution_scale_dialog_message">Enter a value from %1$d%% to %2$d%%. 100%% uses the normal screen size.</string>
+
+    <string name="settings_renderer_full_screen_on">Force fullscreen mode: On</string>
+    <string name="settings_renderer_full_screen_off">Force fullscreen mode: Off</string>
+    <string name="settings_renderer_full_screen_summary">When enabled, Minecraft uses immersive fullscreen and ignores safe areas like notches and punch-holes.</string>
+
+    <string name="settings_renderer_avoid_rounded_corners_on">Avoid rounded display corners: On</string>
+    <string name="settings_renderer_avoid_rounded_corners_off">Avoid rounded display corners: Off</string>
+    <string name="settings_renderer_avoid_rounded_corners_summary">Allows the gameview to ignore rounded corners of your device by adding a small inset.</string>
+    <string name="settings_renderer_game_resolution_title">Experimental Game Resolution</string>
+    <string name="settings_renderer_game_resolution_native">Native</string>
+    <string name="settings_renderer_game_resolution_1080p">1920 × 1080</string>
+    <string name="settings_renderer_game_resolution_4_3">4:3 (best fit for device)</string>
+    <string name="settings_renderer_game_resolution_mcsx">MCSX (1280 × 960)</string>
+    <string name="settings_renderer_game_resolution_custom">Custom…</string>
+    <string name="settings_renderer_game_resolution_value_placeholder">Selected: Native</string>
+    <string name="settings_renderer_game_resolution_value_native">Selected: Native (%1$dx%2$d)</string>
+    <string name="settings_renderer_game_resolution_value_preset">Selected: %1$s (%2$dx%3$d)</string>
+    <string name="settings_renderer_game_resolution_value_4_3">Selected: 4:3 best fit (%1$dx%2$d)</string>
+    <string name="settings_renderer_game_resolution_value_mcsx">Selected: MCSX (%1$dx%2$d)</string>
+    <string name="settings_renderer_game_resolution_value_custom">Selected: Custom (%1$dx%2$d)</string>
+    <string name="settings_renderer_game_resolution_summary">Controls Minecraft’s framebuffer size and aspect ratio. The Resolution Scale percentage above is applied to this base resolution, except MCSX which stays fixed at 1280 × 960.</string>
+    <string name="settings_renderer_game_resolution_warning">Experimental — use at your own risk. Unsupported resolutions can cause stretched UI, black screens, renderer crashes, or poor performance. Restart Minecraft after changing this option.</string>
+    <string name="settings_renderer_game_resolution_picker_summary">Choose the base framebuffer and aspect ratio Minecraft will use. 1920 × 1080 automatically rotates to 1080 × 1920 when the game is portrait. MCSX uses its recommended fixed 1280 × 960 framebuffer.</string>
+    <string name="settings_renderer_game_resolution_confirm_title">Use experimental resolution?</string>
+    <string name="settings_renderer_game_resolution_confirm_message">This changes Minecraft’s framebuffer and visible aspect ratio. Some renderers, mods, or devices may not support it correctly. Use this option at your own risk.</string>
+    <string name="settings_renderer_game_resolution_confirm_button">Use resolution</string>
+    <string name="settings_renderer_game_resolution_custom_title">Custom game resolution</string>
+    <string name="settings_renderer_game_resolution_custom_message">Enter the exact base framebuffer width and height. Values from %1$d to %2$d pixels are allowed. The existing Resolution Scale is applied afterwards.</string>
+    <string name="settings_renderer_game_resolution_custom_width">Width</string>
+    <string name="settings_renderer_game_resolution_custom_height">Height</string>
+    <string name="settings_renderer_game_resolution_custom_invalid">Enter width and height values from %1$d to %2$d.</string>
+</resources>

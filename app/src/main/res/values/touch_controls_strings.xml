@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="touch_controls_title">Touch Controls</string>
+    <string name="touch_controls_enabled_on">Touch controls: ON</string>
+    <string name="touch_controls_enabled_off">Touch controls: OFF</string>
+    <string name="touch_controls_manage">Manage touch controls</string>
+</resources>

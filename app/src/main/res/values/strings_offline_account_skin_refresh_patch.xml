@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="button_use_offline_account">Use offline account</string>
+    <string name="button_refresh_microsoft_skin">Refresh Microsoft account / skin</string>
+    <string name="offline_account_title">Offline account</string>
+    <string name="offline_account_message">Enter a Minecraft username for offline play. This is only available because Microsoft sign-in was completed on this device.</string>
+    <string name="offline_account_invalid">Use 3–16 letters, numbers, or underscores.</string>
+    <string name="offline_account_enabled">Offline account enabled: %1$s</string>
+    <string name="status_signed_in_offline">Signed in offline as %1$s</string>
+    <string name="custom_skin_status_locked">Custom/offline skins unlock after Microsoft sign-in is completed once.</string>
+    <string name="microsoft_skin_refreshing">Refreshing Microsoft account and skin…</string>
+    <string name="microsoft_skin_refreshed">Microsoft account and skin refreshed.</string>
+</resources>

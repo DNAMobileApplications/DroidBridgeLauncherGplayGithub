@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="instance_content_play_world_button">Play world</string>
+    <string name="instance_content_enable_switch">Enable or disable content</string>
+    <string name="quick_play_world_unsupported">Quick Play is only supported on Minecraft 1.20 and newer.</string>
+    <string name="world_quick_play_title">Play world</string>
+    <string name="world_quick_play_no_worlds">No world saves were found in this instance.</string>
+</resources>

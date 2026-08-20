@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="microsoft_login_required_install">Please sign in with Microsoft before installing Minecraft.</string>
+    <string name="microsoft_login_required_offline">Please sign in with Microsoft once before using offline mode.</string>
+    <string name="status_signed_out_offline_unlocked">Signed out. Offline mode is unlocked because Microsoft login was completed once.</string>
+</resources>

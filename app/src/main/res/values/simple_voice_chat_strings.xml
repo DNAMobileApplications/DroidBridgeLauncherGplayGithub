@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_simple_voice_chat_title">Simple Voice Chat</string>
+    <string name="settings_simple_voice_chat_summary">Grant Android microphone permission so Simple Voice Chat and other voice mods can access the mic while Minecraft is running.</string>
+    <string name="simple_voice_chat_microphone_title">Simple Voice Chat microphone</string>
+    <string name="simple_voice_chat_microphone_status_granted">Status: Microphone permission is granted.</string>
+    <string name="simple_voice_chat_microphone_status_missing">Status: Microphone permission is not granted.</string>
+    <string name="simple_voice_chat_microphone_button_enable">Enable microphone permission</string>
+    <string name="simple_voice_chat_microphone_button_enabled">Microphone permission enabled</string>
+    <string name="simple_voice_chat_microphone_already_granted">Android microphone permission is already granted for DroidBridge. Simple Voice Chat can request microphone input while Minecraft is running.</string>
+    <string name="simple_voice_chat_microphone_denied_message">Microphone permission was denied. Simple Voice Chat will show Microphone unavailable until the permission is enabled. You can allow it from Android App Info if the prompt no longer appears.</string>
+    <string name="simple_voice_chat_open_app_settings">Open app settings</string>
+    <string name="simple_voice_chat_permission_granted_toast">Microphone permission enabled.</string>
+    <string name="simple_voice_chat_permission_denied_toast">Microphone permission denied.</string>
+    <string name="simple_voice_chat_permission_required_status">Simple Voice Chat needs microphone permission before launch. Grant it, then press Play again.</string>
+</resources>

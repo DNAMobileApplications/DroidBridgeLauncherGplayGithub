@@ -1,0 +1,4 @@
+# Optional local/CI overrides. Keep real credentials outside the public repository.
+MICROSOFT_CLIENT_ID=
+MICROSOFT_REDIRECT_URI=
+MICROSOFT_SCOPE=

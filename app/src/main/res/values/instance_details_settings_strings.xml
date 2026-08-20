@@ -1,0 +1,137 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="button_settings">Settings</string>
+    <string name="settings_title">Launcher settings</string>
+    <string name="settings_account_title">Account</string>
+    <string name="settings_instance_title">Instances Settings</string>
+    <string name="settings_launcher_title">Launcher Settings</string>
+    <string name="instance_details_title">Instance details</string>
+    <string name="instance_details_actions_title">Play</string>
+    <string name="instance_details_mods_title">Mods</string>
+    <string name="instance_details_meta_value">%1$s • %2$s • %3$s</string>
+    <string name="button_play_instance">Play</string>
+    <string name="button_add_mods">Add mods</string>
+    <string name="button_remove_mods">Remove mods</string>
+    <string name="mods_supported_hint">Manage .jar mods for this %1$s instance. Mods folder: %2$s</string>
+    <string name="mods_vanilla_hint">This is a Vanilla instance. Mods will only load after you create or install a loader version such as Fabric, Forge, Quilt, or NeoForge.</string>
+    <string name="mods_empty">No mods installed.</string>
+    <string name="mods_count_value">%1$d mod(s) installed.</string>
+    <string name="mods_picker_title">Choose mod .jar files</string>
+    <string name="mods_picker_missing">No file picker is available on this device.</string>
+    <string name="mods_added_value">Added %1$d mod(s).</string>
+    <string name="mods_add_failed">Could not add mods: %1$s</string>
+    <string name="mods_remove_title">Remove mods</string>
+    <string name="mods_remove_confirm">Remove selected mods</string>
+    <string name="mods_removed_value">Removed %1$d mod(s).</string>
+    <string name="mods_remove_none">Select at least one mod to remove.</string>
+    <string name="mods_file_row">• %1$s</string>
+    <string name="button_delete_instance">Delete instance</string>
+    <string name="button_delete_forever">Delete forever</string>
+    <string name="delete_instance_content_description">Delete instance</string>
+    <string name="delete_instance_title">Delete %1$s?</string>
+    <string name="delete_instance_message">This permanently deletes "%1$s" and every file inside this instance folder, including saves, mods, configs, logs, resource packs, and shader packs.
+
+Folder:
+%2$s
+
+This cannot be undone.</string>
+    <string name="delete_shared_instance_message">This permanently removes the shared/global version "%1$s" from .minecraft/versions.
+
+Folder:
+%2$s
+
+This cannot be undone. Shared libraries and assets are kept because other versions may still use them.</string>
+    <string name="delete_shared_instance_blocked_title">Cannot delete %1$s</string>
+    <string name="delete_shared_instance_blocked_message">The shared vanilla files for "%1$s" are still required by these installed loader versions:
+
+%2$s
+
+Forge, Fabric, Quilt, and NeoForge versions can inherit files from the matching Vanilla version. Deleting the Vanilla folder would break those launches. Delete the dependent loader versions first, or keep this Vanilla version installed.</string>
+    <string name="delete_instance_deleting">Deleting %1$s…</string>
+    <string name="delete_instance_deleted">Deleted %1$s.</string>
+    <string name="delete_instance_failed">Could not delete %1$s: %2$s</string>
+    <string name="inherited_vanilla_remove_on">Remove inherited vanilla after loader install</string>
+    <string name="inherited_vanilla_remove_off">Keep inherited vanilla after loader install</string>
+    <string name="inherited_vanilla_remove_summary">When enabled, new Fabric/Forge installs copy the needed vanilla client jar into the loader profile, flatten the inherited JSON, then delete the vanilla version folder only when no other installed loader version still needs it. This does not make libraries/assets per-instance; those remain shared launcher cache files.</string>
+    <string name="inherited_vanilla_remove_enabled">Inherited vanilla cleanup enabled.</string>
+    <string name="inherited_vanilla_remove_disabled">Inherited vanilla cleanup disabled.</string>
+    <string name="renderer_settings_title">Renderer settings</string>
+    <string name="renderer_settings_summary">Renderer</string>
+    <string name="renderer_description_value">%1$s
+ID: %2$s
+Unique ID: %3$s
+Library: %4$s
+
+%5$s</string>
+    <string name="renderer_none_found">No renderer was found. Krypton should be available from the embedded launcher libraries.</string>
+    <string name="renderer_selected">Renderer set to %1$s. Restart the game for it to take effect.</string>
+    <string name="button_refresh_renderers">Refresh</string>
+    <string name="button_import_renderer_plugin">Import APK</string>
+    <string name="button_open_renderer_plugin_settings">Open plugin settings</string>
+    <string name="button_clear_renderer_plugin_cache">Clear plugin cache</string>
+    <string name="renderer_plugin_picker_title">Choose renderer plugin APK</string>
+    <string name="renderer_plugin_picker_missing">No file picker is available on this device.</string>
+    <string name="renderer_plugin_imported">Renderer plugin imported.</string>
+    <string name="renderer_plugin_import_failed">Could not import renderer plugin: %1$s</string>
+    <string name="renderer_plugins_refreshed">Renderer list refreshed.</string>
+    <string name="renderer_plugin_cache_cleared">Renderer plugin APK/cache files cleared. Installed plugin apps were not uninstalled.</string>
+    <string name="renderer_plugin_no_selected_installed_app">Select an installed renderer plugin first.</string>
+    <string name="renderer_plugin_open_failed">Could not open this renderer plugin app or app settings.</string>
+    <string name="renderer_plugin_storage_title">Renderer plugin storage access</string>
+    <string name="renderer_plugin_open_settings">Open plugin</string>
+    <string name="renderer_plugin_continue_anyway">Continue anyway</string>
+    <string name="button_grant_renderer_storage_access">Grant storage access</string>
+    <string name="button_renderer_storage_access_granted">Storage access granted</string>
+    <string name="renderer_storage_access_open_failed">Could not open Android storage access settings.</string>
+    <string name="use_system_vulkan_driver_on">Use Turnip (Adreno Only) driver with Zink</string>
+    <string name="use_system_vulkan_driver_off">Use system Vulkan driver</string>
+    <string name="use_system_vulkan_driver_summary">Forces the launcher to use the system Vulkan driver.  Only affects Zink or mods that utilize this.</string>
+    <string name="use_system_vulkan_driver_enabled">System Vulkan driver enabled.</string>
+    <string name="use_system_vulkan_driver_disabled">Custom Vulkan driver mode enabled.</string>
+    <string name="use_opengl_26_plus_on">Use OpenGL for Minecraft 26.2+</string>
+    <string name="use_opengl_26_plus_off">Use OpenGL for Minecraft 26.2+</string>
+    <string name="use_opengl_26_plus_summary">For Minecraft 26.x and newer only, this currently allows your device to use OpenGL.</string>
+    <string name="use_opengl_26_plus_enabled">Minecraft 26+ will prefer OpenGL.</string>
+    <string name="use_opengl_26_plus_disabled">Minecraft 26+ backend override disabled.</string>
+    <string name="game_button_overlay_settings">Open in-game button overlay</string>
+    <string name="game_settings_button_on">Show in-game settings COG</string>
+    <string name="game_settings_button_off">Hide in-game settings COG</string>
+    <string name="game_settings_button_summary">Shows the small floating settings COG while Minecraft is running. This no longer controls the FPS counter; FPS has a separate option below.</string>
+    <string name="game_settings_button_enabled">In-game settings COG enabled.</string>
+    <string name="game_settings_button_disabled">In-game settings COG hidden.</string>
+    <string name="android_back_button_action_title">Android Back button</string>
+    <string name="android_back_button_action_summary">Choose whether Android Back pauses Minecraft, opens the DroidBridge in-game launcher menu, or is disabled completely.</string>
+    <string name="android_back_button_action_dialog_summary">This applies to Android navigation Back and gesture Back while Minecraft is running.</string>
+    <string name="android_back_action_pause_game">Default: Pause Minecraft</string>
+    <string name="android_back_action_launcher_menu">Open in-game launcher menu</string>
+    <string name="android_back_action_disabled">Disabled</string>
+    <string name="android_back_action_current_pause_game">Android Back: Pause Minecraft</string>
+    <string name="android_back_action_current_launcher_menu">Android Back: In-game launcher menu</string>
+    <string name="android_back_action_current_disabled">Android Back: Disabled</string>
+    <string name="launcher_orientation_title">Launcher Orientation</string>
+    <string name="launcher_orientation_summary">Current launcher orientation: %1$s. This controls DroidBridge menus and settings screens.</string>
+    <string name="launcher_orientation_dialog_summary">Choose how the DroidBridge launcher rotates. Auto Rotate allows portrait, reverse portrait, landscape, and reverse landscape.</string>
+    <string name="game_orientation_title">Game Orientation</string>
+    <string name="game_orientation_summary">Current game orientation: %1$s. This controls Minecraft while it is running. Auto Rotate switches between landscape and reverse landscape.</string>
+    <string name="game_orientation_dialog_summary">Choose how Minecraft rotates while it is running. Auto Rotate keeps the game in landscape and switches between normal and reverse landscape.</string>
+    <string name="app_orientation_title">Screen orientation</string>
+    <string name="app_orientation_auto_rotate">Auto Rotate</string>
+    <string name="app_orientation_landscape">Landscape</string>
+    <string name="app_orientation_reverse_landscape">Reverse Landscape</string>
+    <string name="app_orientation_portrait">Portrait</string>
+    <string name="app_orientation_reverse_portrait">Reverse Portrait</string>
+    <string name="app_orientation_summary_auto">Launcher auto-rotate allows all four rotations. In-game auto-rotate stays landscape or reverse landscape.</string>
+    <string name="app_orientation_summary">Current orientation: %1$s. Launcher screens and Minecraft will stay in this orientation until changed.</string>
+    <string name="app_orientation_dialog_summary">Choose launcher rotation. Auto-rotate allows all launcher rotations, but the in-game Minecraft surface only auto-rotates between landscape and reverse landscape.</string>
+    <string name="game_log_overlay_title">Latest log</string>
+    <string name="game_log_overlay_on">Show game log overlay</string>
+    <string name="game_log_overlay_off">Hide game log overlay</string>
+    <string name="game_log_overlay_summary">Shows a small live latest-log overlay on the left side while Minecraft is running. Useful for debugging crashes without covering the full game screen.</string>
+    <string name="game_log_overlay_enabled">Game log overlay enabled.</string>
+    <string name="game_log_overlay_disabled">Game log overlay disabled.</string>
+    <string name="vulkan_driver_settings_title">Vulkan Zink driver</string>
+    <string name="vulkan_driver_settings_summary">Choose which Turnip/Adreno driver Vulkan Zink uses when the system Vulkan driver toggle is off. Default Mesa keeps the launcher bundled setup; installed driver plugins use their native driver folder.</string>
+    <string name="vulkan_driver_selected">Vulkan driver set to %1$s.</string>
+    <string name="vulkan_driver_description_value">%1$s
+%2$s</string>
+</resources>

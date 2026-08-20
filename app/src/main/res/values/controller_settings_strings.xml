@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="controller_settings_title">Controller settings</string>
+    <string name="controller_settings_summary">Configure built-in controller mapping, on-screen touch controls, and SDL controller routing.</string>
+    <string name="controller_built_in_title">Built-in controller mapping</string>
+    <string name="controller_built_in_summary">Edit the same built-in controller options available from the in-game settings button.</string>
+    <string name="button_edit_builtin_controller">Edit Gamepad Settings</string>
+    <string name="controller_touch_controls_title">Touch controls</string>
+    <string name="controller_touch_controls_summary">Show or hide on-screen controls and manage imported/custom touch layouts.</string>
+    <string name="controller_touch_controls_enabled_on">Touch controls: ON</string>
+    <string name="controller_touch_controls_enabled_off">Touch controls: OFF</string>
+    <string name="button_manage_touch_controls">Manage touch layouts</string>
+    <string name="controller_force_sdl_on">Force SDL controller bridge: ON</string>
+    <string name="controller_force_sdl_off">Force SDL controller bridge: OFF</string>
+    <string name="controller_force_sdl_summary">Older controller mods might require this example Controllable 1.20.1.</string>
+    <string name="controller_auto_hide_touch_controls_on">Auto-hide touch controls with controller: ON</string>
+    <string name="controller_auto_hide_touch_controls_off">Auto-hide touch controls with controller: OFF</string>
+    <string name="controller_auto_hide_touch_controls_summary">When a controller is connected, keep every on-screen touch button hidden. Touching the screen still controls Minecraft but does not reveal the buttons. They return automatically after the controller disconnects.</string>
+
+    <string name="controller_minecraft_touch_gestures_on">Minecraft touch gestures: On</string>
+    <string name="controller_minecraft_touch_gestures_off">Minecraft touch gestures: Off</string>
+    <string name="controller_minecraft_touch_gestures_summary">Allows empty-screen touch taps and long presses to send Minecraft attack/use gestures. Turn this off if you only want touch buttons and camera movement.</string>
+
+    <string name="controller_double_tap_to_drop_on">Double tap to drop: On</string>
+    <string name="controller_double_tap_to_drop_off">Double tap to drop: Off</string>
+    <string name="controller_double_tap_to_drop_summary">When Minecraft touch gestures are enabled, double-tapping the empty look area sends the Drop key.</string>
+
+    <string name="controller_double_tap_hotbar_to_offhand_on">Double tap hotbar to swap offhand: On</string>
+    <string name="controller_double_tap_hotbar_to_offhand_off">Double tap hotbar to swap offhand: Off</string>
+    <string name="controller_double_tap_hotbar_to_offhand_summary">Double-tapping the same in-game hotbar slot sends the Minecraft Swap Item With Offhand key. This is separate from double tap to drop.</string>
+</resources>

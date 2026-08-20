@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="sign_out_confirm_title">Sign out?</string>
+    <string name="sign_out_confirm_message">This will remove the saved Microsoft account from this device and clear the cached Microsoft login session. Offline profiles will stay saved, but they will be locked until Microsoft sign-in is completed again.</string>
+</resources>

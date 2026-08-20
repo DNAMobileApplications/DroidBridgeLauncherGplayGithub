@@ -1,0 +1,15 @@
+guiScale:4
+fullscreen:false
+pauseOnLostFocus:false
+autoJump:false
+music:0.5
+sound:1.0
+fov:0.0
+gamma:0.0
+renderDistance:6
+fancyGraphics:false
+ao:false
+clouds:true
+particles:1
+mipmapLevels:1
+maxFps:60

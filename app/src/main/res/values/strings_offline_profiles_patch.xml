@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="button_manage_offline_accounts">Manage offline accounts</string>
+    <string name="button_use_microsoft_account">Use Microsoft account</string>
+    <string name="microsoft_account_restored">Microsoft account is active again.</string>
+    <string name="microsoft_skin_needs_refresh">Microsoft skin is not cached yet. Tap Refresh Microsoft account / skin.</string>
+    <string name="offline_accounts_title">Offline accounts</string>
+    <string name="offline_accounts_empty">No offline accounts yet. Create one for no-internet play.</string>
+    <string name="offline_account_add">Add account</string>
+    <string name="offline_account_create_title">Create offline account</string>
+    <string name="offline_account_edit_title">Edit offline account</string>
+    <string name="offline_account_create">Create</string>
+    <string name="offline_account_save">Save</string>
+    <string name="offline_account_name_hint">Username</string>
+    <string name="offline_account_choose_skin">Choose skin PNG</string>
+    <string name="offline_account_clear_skin">Clear skin</string>
+    <string name="offline_account_skin_selected">Selected skin will be saved to this offline account.</string>
+    <string name="offline_account_skin_none">No custom skin selected.</string>
+    <string name="offline_account_skin_current">Current skin: %1$s</string>
+    <string name="offline_account_skin_active">Using offline skin for %1$s.</string>
+    <string name="offline_account_row_active">%1$s • Active</string>
+    <string name="offline_account_row_skin">Skin: %1$s</string>
+    <string name="offline_account_row_no_skin">No custom skin. Minecraft will use the default offline skin.</string>
+    <string name="offline_account_use">Use</string>
+    <string name="offline_account_delete_title">Delete %1$s?</string>
+    <string name="offline_account_delete_message">This removes the offline profile and its local skin. Your Microsoft account will stay remembered.</string>
+    <string name="status_offline_account_with_microsoft">Offline account: %1$s\nMicrosoft account remembered: %2$s</string>
+    <string name="status_microsoft_remembered">Microsoft account remembered: %1$s</string>
+    <string name="offline_account_edit_button">Edit</string>
+    <string name="offline_account_delete_button">Delete</string>
+    <string name="offline_accounts_dialog_summary">Create and select offline profiles for no-internet play. Your Microsoft account stays remembered as the verified online account.</string>
+    <string name="offline_accounts_section_title">Offline profiles</string>
+    <string name="offline_account_active_badge">Active profile</string>
+    <string name="offline_account_active_button">Active</string>
+    <string name="offline_account_edit_summary">Choose the username and optional PNG skin used by this offline profile.</string>
+</resources>

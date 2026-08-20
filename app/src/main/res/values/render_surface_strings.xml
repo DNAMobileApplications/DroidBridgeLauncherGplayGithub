@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="render_surface_section_title">Render Surface</string>
+    <string name="render_surface_texture_view">Use Alternate SurfaceView</string>
+    <string name="render_surface_surface_view">Use Native SurfaceView</string>
+    <string name="render_surface_restart_hint">Allows for Minecraft to be rendered on an alternative native Android SurfaceView which can help with some GPU bound scenarios.\nThis is not recommended for certain mods like VulkanMod.</string>
+    <string name="render_surface_mode_status">Render surface set to %1$s. Restart the game for it to take effect.</string>
+</resources>

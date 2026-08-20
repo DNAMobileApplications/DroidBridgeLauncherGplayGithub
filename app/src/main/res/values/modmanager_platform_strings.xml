@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="modmanager_installed_from">Installed from %1$s</string>
+    <string name="modmanager_installed_source_icon">Installed platform</string>
+</resources>

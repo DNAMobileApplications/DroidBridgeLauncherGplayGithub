@@ -1,0 +1,102 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- DroidBridge brand orange.
+         The app icon samples very close to #FF8000, so the palette is built around that hue.
+         Light mode uses a slightly deeper orange for readable filled buttons. -->
+    <color name="launcher_orange">#D95700</color>
+    <color name="launcher_orange_pressed">#B84800</color>
+    <color name="launcher_orange_bright">#FF8000</color>
+    <color name="launcher_orange_container">#FFE0C2</color>
+    <color name="launcher_on_orange">#FFFFFF</color>
+    <color name="launcher_on_orange_container">#411400</color>
+
+    <!-- Backwards-compatible aliases for older layouts/classes that still reference launcher_green. -->
+    <color name="launcher_green">#D95700</color>
+    <color name="launcher_green_pressed">#B84800</color>
+    <color name="launcher_green_container">#FFE0C2</color>
+    <color name="launcher_on_green">#FFFFFF</color>
+    <color name="launcher_on_green_container">#411400</color>
+
+    <!-- Light theme surfaces: warm, soft orange-tinted white. -->
+    <color name="launcher_background">#FFF8F3</color>
+    <color name="launcher_surface">#FFF8F3</color>
+    <color name="launcher_card">#FFF1E6</color>
+    <color name="launcher_surface_variant">#F8DFD0</color>
+    <color name="launcher_on_surface">#241914</color>
+    <color name="launcher_on_surface_variant">#584337</color>
+    <color name="launcher_outline">#8D7364</color>
+    <color name="launcher_outline_variant">#DBC2B3</color>
+
+    <!-- Existing compatibility names. -->
+    <color name="launcher_dark">#411400</color>
+    <color name="white">#FFFFFF</color>
+
+    <!-- Material semantic colors. -->
+    <color name="launcher_secondary">#765746</color>
+    <color name="launcher_on_secondary">#FFFFFF</color>
+    <color name="launcher_secondary_container">#FFDCC7</color>
+    <color name="launcher_on_secondary_container">#2C160B</color>
+
+    <color name="launcher_tertiary">#695E2F</color>
+    <color name="launcher_on_tertiary">#FFFFFF</color>
+    <color name="launcher_tertiary_container">#F2E2A7</color>
+    <color name="launcher_on_tertiary_container">#211B00</color>
+
+    <color name="launcher_error">#BA1A1A</color>
+    <color name="launcher_on_error">#FFFFFF</color>
+    <color name="launcher_error_container">#FFDAD6</color>
+    <color name="launcher_on_error_container">#410002</color>
+
+
+    <!-- Optional launcher accent themes. Surface/background colors stay unchanged; these override buttons, tabs, icons, and highlights. -->
+    <color name="launcher_green_primary">#16884E</color>
+    <color name="launcher_green_primary_container">#B7F2CC</color>
+    <color name="launcher_on_green_primary">#FFFFFF</color>
+    <color name="launcher_on_green_primary_container">#00210E</color>
+
+    <color name="launcher_blue_primary">#246BCE</color>
+    <color name="launcher_blue_primary_container">#D8E2FF</color>
+    <color name="launcher_on_blue_primary">#FFFFFF</color>
+    <color name="launcher_on_blue_primary_container">#001A41</color>
+
+    <color name="launcher_purple_primary">#7B4BD6</color>
+    <color name="launcher_purple_primary_container">#EADDFF</color>
+    <color name="launcher_on_purple_primary">#FFFFFF</color>
+    <color name="launcher_on_purple_primary_container">#260057</color>
+
+    <color name="launcher_red_primary">#B3261E</color>
+    <color name="launcher_red_primary_container">#FFDAD6</color>
+    <color name="launcher_on_red_primary">#FFFFFF</color>
+    <color name="launcher_on_red_primary_container">#410002</color>
+
+
+    <color name="launcher_yellow_primary">#8A6F00</color>
+    <color name="launcher_yellow_primary_container">#FFF2B3</color>
+    <color name="launcher_on_yellow_primary">#FFFFFF</color>
+    <color name="launcher_on_yellow_primary_container">#241A00</color>
+
+    <color name="launcher_indigo_primary">#4B5FD6</color>
+    <color name="launcher_indigo_primary_container">#E0E0FF</color>
+    <color name="launcher_on_indigo_primary">#FFFFFF</color>
+    <color name="launcher_on_indigo_primary_container">#000F5C</color>
+
+    <color name="launcher_violet_primary">#7B4BD6</color>
+    <color name="launcher_violet_primary_container">#EADDFF</color>
+    <color name="launcher_on_violet_primary">#FFFFFF</color>
+    <color name="launcher_on_violet_primary_container">#260057</color>
+
+    <color name="launcher_pink_primary">#C2185B</color>
+    <color name="launcher_pink_primary_container">#FFD9E6</color>
+    <color name="launcher_on_pink_primary">#FFFFFF</color>
+    <color name="launcher_on_pink_primary_container">#3E001D</color>
+
+    <color name="launcher_rainbow_primary">#FF2D55</color>
+    <color name="launcher_rainbow_primary_container">#FFE1EA</color>
+    <color name="launcher_on_rainbow_primary">#FFFFFF</color>
+    <color name="launcher_on_rainbow_primary_container">#40000F</color>
+
+    <color name="launcher_mono_primary">#4F5B66</color>
+    <color name="launcher_mono_primary_container">#D8DEE4</color>
+    <color name="launcher_on_mono_primary">#FFFFFF</color>
+    <color name="launcher_on_mono_primary_container">#111820</color>
+</resources>

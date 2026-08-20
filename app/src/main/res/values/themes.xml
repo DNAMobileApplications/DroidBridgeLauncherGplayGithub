@@ -1,0 +1,169 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+    <style name="Theme.DroidBridge" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- Material color roles -->
+        <item name="colorPrimary">@color/launcher_orange</item>
+        <item name="colorOnPrimary">@color/launcher_on_orange</item>
+        <item name="colorPrimaryContainer">@color/launcher_orange_container</item>
+        <item name="colorOnPrimaryContainer">@color/launcher_on_orange_container</item>
+
+        <item name="colorSecondary">@color/launcher_secondary</item>
+        <item name="colorOnSecondary">@color/launcher_on_secondary</item>
+        <item name="colorSecondaryContainer">@color/launcher_secondary_container</item>
+        <item name="colorOnSecondaryContainer">@color/launcher_on_secondary_container</item>
+
+        <item name="colorTertiary">@color/launcher_tertiary</item>
+        <item name="colorOnTertiary">@color/launcher_on_tertiary</item>
+        <item name="colorTertiaryContainer">@color/launcher_tertiary_container</item>
+        <item name="colorOnTertiaryContainer">@color/launcher_on_tertiary_container</item>
+
+        <item name="colorSurface">@color/launcher_surface</item>
+        <item name="colorOnSurface">@color/launcher_on_surface</item>
+        <item name="colorSurfaceVariant">@color/launcher_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/launcher_on_surface_variant</item>
+        <item name="colorOutline">@color/launcher_outline</item>
+        <item name="colorOutlineVariant">@color/launcher_outline_variant</item>
+
+        <item name="colorError">@color/launcher_error</item>
+        <item name="colorOnError">@color/launcher_on_error</item>
+        <item name="colorErrorContainer">@color/launcher_error_container</item>
+        <item name="colorOnErrorContainer">@color/launcher_on_error_container</item>
+
+        <!-- App/window surfaces -->
+        <item name="android:windowBackground">@color/launcher_background</item>
+        <item name="android:colorBackground">@color/launcher_background</item>
+        <item name="android:colorAccent">@color/launcher_orange</item>
+        <item name="colorAccent">@color/launcher_orange</item>
+        <item name="colorControlActivated">@color/launcher_orange</item>
+
+        <!-- Keep platform/stock Android widgets readable under Material3 DayNight.
+             android.R layouts (Spinner/ListView/EditText rows) resolve these platform
+             attributes rather than Material colorOnSurface on some OEM builds. -->
+        <item name="android:textColorPrimary">@color/launcher_on_surface</item>
+        <item name="android:textColorSecondary">@color/launcher_on_surface_variant</item>
+        <item name="android:textColorHint">@color/launcher_on_surface_variant</item>
+        <item name="android:listDivider">@color/launcher_outline_variant</item>
+        <item name="android:forceDarkAllowed" tools:targetApi="29">false</item>
+
+        <!-- Bars -->
+        <item name="android:statusBarColor">@android:color/transparent</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
+        <item name="android:windowLightStatusBar" tools:targetApi="23">true</item>
+        <item name="android:windowLightNavigationBar" tools:targetApi="27">true</item>
+
+        <!-- Shared widget styling -->
+        <item name="materialCardViewStyle">@style/Widget.DroidBridge.Card</item>
+        <item name="toolbarStyle">@style/Widget.DroidBridge.Toolbar</item>
+    </style>
+
+    <style name="Theme.DroidBridge.Light" parent="Theme.DroidBridge" />
+
+    <style name="Theme.DroidBridge.Dark" parent="Theme.DroidBridge" />
+
+    <style name="Widget.DroidBridge.Card" parent="Widget.Material3.CardView.Elevated">
+        <item name="cardBackgroundColor">@color/launcher_card</item>
+        <item name="strokeColor">@color/launcher_outline_variant</item>
+        <item name="strokeWidth">1dp</item>
+        <item name="cardCornerRadius">20dp</item>
+        <item name="cardElevation">0dp</item>
+    </style>
+
+    <style name="Widget.DroidBridge.Toolbar" parent="Widget.Material3.Toolbar">
+        <item name="android:background">@color/launcher_background</item>
+        <item name="titleTextColor">@color/launcher_on_surface</item>
+        <item name="navigationIconTint">@color/launcher_on_surface</item>
+    </style>
+    <style name="Theme.DroidBridge.Red" parent="Theme.DroidBridge">
+        <item name="colorPrimary">@color/launcher_red_primary</item>
+        <item name="colorOnPrimary">@color/launcher_on_red_primary</item>
+        <item name="colorPrimaryContainer">@color/launcher_red_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/launcher_on_red_primary_container</item>
+        <item name="android:colorAccent">@color/launcher_red_primary</item>
+        <item name="colorAccent">@color/launcher_red_primary</item>
+        <item name="colorControlActivated">@color/launcher_red_primary</item>
+    </style>
+
+    <style name="Theme.DroidBridge.Yellow" parent="Theme.DroidBridge">
+        <item name="colorPrimary">@color/launcher_yellow_primary</item>
+        <item name="colorOnPrimary">@color/launcher_on_yellow_primary</item>
+        <item name="colorPrimaryContainer">@color/launcher_yellow_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/launcher_on_yellow_primary_container</item>
+        <item name="android:colorAccent">@color/launcher_yellow_primary</item>
+        <item name="colorAccent">@color/launcher_yellow_primary</item>
+        <item name="colorControlActivated">@color/launcher_yellow_primary</item>
+    </style>
+
+    <style name="Theme.DroidBridge.Green" parent="Theme.DroidBridge">
+        <item name="colorPrimary">@color/launcher_green_primary</item>
+        <item name="colorOnPrimary">@color/launcher_on_green_primary</item>
+        <item name="colorPrimaryContainer">@color/launcher_green_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/launcher_on_green_primary_container</item>
+        <item name="android:colorAccent">@color/launcher_green_primary</item>
+        <item name="colorAccent">@color/launcher_green_primary</item>
+        <item name="colorControlActivated">@color/launcher_green_primary</item>
+    </style>
+
+    <style name="Theme.DroidBridge.Blue" parent="Theme.DroidBridge">
+        <item name="colorPrimary">@color/launcher_blue_primary</item>
+        <item name="colorOnPrimary">@color/launcher_on_blue_primary</item>
+        <item name="colorPrimaryContainer">@color/launcher_blue_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/launcher_on_blue_primary_container</item>
+        <item name="android:colorAccent">@color/launcher_blue_primary</item>
+        <item name="colorAccent">@color/launcher_blue_primary</item>
+        <item name="colorControlActivated">@color/launcher_blue_primary</item>
+    </style>
+
+    <style name="Theme.DroidBridge.Indigo" parent="Theme.DroidBridge">
+        <item name="colorPrimary">@color/launcher_indigo_primary</item>
+        <item name="colorOnPrimary">@color/launcher_on_indigo_primary</item>
+        <item name="colorPrimaryContainer">@color/launcher_indigo_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/launcher_on_indigo_primary_container</item>
+        <item name="android:colorAccent">@color/launcher_indigo_primary</item>
+        <item name="colorAccent">@color/launcher_indigo_primary</item>
+        <item name="colorControlActivated">@color/launcher_indigo_primary</item>
+    </style>
+
+    <style name="Theme.DroidBridge.Violet" parent="Theme.DroidBridge">
+        <item name="colorPrimary">@color/launcher_violet_primary</item>
+        <item name="colorOnPrimary">@color/launcher_on_violet_primary</item>
+        <item name="colorPrimaryContainer">@color/launcher_violet_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/launcher_on_violet_primary_container</item>
+        <item name="android:colorAccent">@color/launcher_violet_primary</item>
+        <item name="colorAccent">@color/launcher_violet_primary</item>
+        <item name="colorControlActivated">@color/launcher_violet_primary</item>
+    </style>
+
+    <style name="Theme.DroidBridge.Purple" parent="Theme.DroidBridge.Violet" />
+
+    <style name="Theme.DroidBridge.Pink" parent="Theme.DroidBridge">
+        <item name="colorPrimary">@color/launcher_pink_primary</item>
+        <item name="colorOnPrimary">@color/launcher_on_pink_primary</item>
+        <item name="colorPrimaryContainer">@color/launcher_pink_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/launcher_on_pink_primary_container</item>
+        <item name="android:colorAccent">@color/launcher_pink_primary</item>
+        <item name="colorAccent">@color/launcher_pink_primary</item>
+        <item name="colorControlActivated">@color/launcher_pink_primary</item>
+    </style>
+
+    <style name="Theme.DroidBridge.Rainbow" parent="Theme.DroidBridge">
+        <item name="colorPrimary">@color/launcher_rainbow_primary</item>
+        <item name="colorOnPrimary">@color/launcher_on_rainbow_primary</item>
+        <item name="colorPrimaryContainer">@color/launcher_rainbow_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/launcher_on_rainbow_primary_container</item>
+        <item name="colorSecondary">@color/launcher_yellow_primary</item>
+        <item name="colorTertiary">@color/launcher_blue_primary</item>
+        <item name="android:colorAccent">@color/launcher_rainbow_primary</item>
+        <item name="colorAccent">@color/launcher_rainbow_primary</item>
+        <item name="colorControlActivated">@color/launcher_rainbow_primary</item>
+    </style>
+
+    <style name="Theme.DroidBridge.Mono" parent="Theme.DroidBridge">
+        <item name="colorPrimary">@color/launcher_mono_primary</item>
+        <item name="colorOnPrimary">@color/launcher_on_mono_primary</item>
+        <item name="colorPrimaryContainer">@color/launcher_mono_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/launcher_on_mono_primary_container</item>
+        <item name="android:colorAccent">@color/launcher_mono_primary</item>
+        <item name="colorAccent">@color/launcher_mono_primary</item>
+        <item name="colorControlActivated">@color/launcher_mono_primary</item>
+    </style>
+</resources>

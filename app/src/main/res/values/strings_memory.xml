@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="settings_memory_title">Memory allocation</string>
+    <string name="memory_allocated_placeholder">Allocated memory</string>
+    <string name="memory_available_placeholder">Available memory will appear here</string>
+    <string name="memory_allocated_value">Allocated RAM: %1$d MB (%2$.1f GB)</string>
+    <string name="memory_available_summary">Available now: %1$d MB (%2$.1f GB). Device total: %3$d MB (%4$.1f GB). Slider max: %5$d MB (%6$.1f GB). Locked mode uses available RAM; unlocked mode uses device total RAM. Tap the RAM value to enter a number manually.</string>
+    <string name="memory_dialog_title">Set allocated RAM</string>
+    <string name="memory_dialog_message">Enter RAM in MB. Maximum allowed: %1$d MB.</string>
+    <string name="memory_unlock_button_locked">Unlock RAM limit</string>
+    <string name="memory_unlock_button_unlocked">Relock RAM limit</string>
+    <string name="memory_unlock_dialog_title">Unlock RAM limit?</string>
+    <string name="memory_unlock_dialog_message">Unlocking RAM will let you allocate up to the device-reported maximum RAM. Use this at your own risk. Setting RAM too high can make Minecraft, Android, or the whole device unstable.</string>
+    <string name="memory_unlock_dialog_positive">Unlock</string>
+    <string name="memory_relock_dialog_title">Relock RAM limit?</string>
+    <string name="memory_relock_dialog_message">Relocking RAM will return the global and per-instance RAM sliders to the current Android available RAM limit. The saved default is not reset; values above available RAM will be clamped when applied.</string>
+    <string name="memory_relock_dialog_positive">Relock</string>
+</resources>
