@@ -9,6 +9,14 @@
 </p>
 
 <p align="center">
+  <a href="https://play.google.com/store/apps/details?id=ca.dnamobile.droidbridgelauncher">
+    <img src="https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png"
+         alt="Get it on Google Play"
+         height="80">
+  </a>
+</p>
+
+<p align="center">
   <strong>NOT AN OFFICIAL MINECRAFT PRODUCT.</strong><br>
   <strong>NOT APPROVED AS AN OFFICIAL MINECRAFT PRODUCT, ENDORSED BY, SPONSORED BY, OR ASSOCIATED WITH MOJANG, MICROSOFT, XBOX, OR MINECRAFT.</strong><br>
   <strong>Microsoft API Approval by Mojang evidence can be found here, when I applied to gain API access which checks your Microsoft account for ownership of the game I explicitly told Mojang the application DroidBridge Launcher is an Android application that plays Java Minecraft by abiding by the EULA of Mojang. This approval was requested by Minecraft App ID Review Form with Azure (https://drive.google.com/file/d/1eIt6Jgbp2x5u4mpuX7uHhsesLMEg_ReJ/view?usp=sharing)</strong>
