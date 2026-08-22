@@ -28,7 +28,7 @@
 
 DroidBridge Launcher is an independent Android project by **DNA Mobile Applications**.
 
-DroidBridge Launcher is built for users who already own Minecraft: Java Edition and want to manage and launch their own local game installation on Android. The launcher does not include Minecraft game files, Minecraft assets, paid content, account tokens, or other proprietary Mojang/Microsoft files.
+DroidBridge Launcher is built for users who already own Minecraft: Java Edition and want to manage and launch their own local game installation on Android. The launcher does not include Minecraft game files, Minecraft assets, paid content, account tokens, or other proprietary Mojang/Microsoft files. If you see any forks of DroidBridge Launcher that are not on Google Play or OFFICIAL be warned I have nothing to do with such projects and will advise you to report them. I have spent countless hours trying to make sure the official launcher abides by the EULA of Mojang.
 
 Minecraft, Mojang, Microsoft, Xbox, and related names, services, trademarks, and assets belong to their respective owners. Users are responsible for following the Minecraft EULA, Minecraft Usage Guidelines, Microsoft Services Agreement, and any other terms that apply to their account, game copy, device, mods, resource packs, servers, or third-party content.
 
