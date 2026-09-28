@@ -28,6 +28,7 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 
 import ca.dnamobile.droidbridgelauncher.utils.FullscreenUtils;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 /**
  * Non-cancelable install progress dialog for modpack imports/installs.
@@ -145,7 +146,7 @@ public final class ModpackInstallProgressDialog {
         footerParams.topMargin = LauncherDialogStyle.dp(activity, 12);
         root.addView(footer, footerParams);
 
-        dialog = new AlertDialog.Builder(activity)
+        dialog = new MaterialAlertDialogBuilder(activity)
                 .setView(root)
                 .setCancelable(false)
                 .create();

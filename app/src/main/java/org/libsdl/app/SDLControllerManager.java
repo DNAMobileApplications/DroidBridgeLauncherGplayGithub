@@ -1484,12 +1484,29 @@ class SDLGenericMotionListener_API26 extends SDLGenericMotionListener_API24 {
     @Override
     public boolean setRelativeMouseEnabled(boolean enabled) {
         if (!SDLActivity.isDeXMode() || Build.VERSION.SDK_INT >= 27 /* Android 8.1 (O_MR1) */) {
+            View contentView = SDLActivity.getContentView();
+            if (contentView == null) return false;
+
             if (enabled) {
-                SDLActivity.getContentView().requestPointerCapture();
+                contentView.requestPointerCapture();
             } else {
-                SDLActivity.getContentView().releasePointerCapture();
+                contentView.releasePointerCapture();
             }
             mRelativeModeEnabled = enabled;
+
+            // Pointer capture completes asynchronously. A few Android mouse stacks
+            // restore the old absolute pointer location after SDL has already told
+            // DroidBridge to center the cursor. Re-center on the next UI turn, after
+            // the platform has processed the capture transition.
+            contentView.post(() -> {
+                if (mRelativeModeEnabled) {
+                    DroidBridgeSDL3Bootstrap.recenterLauncherGrabCursorSilently(
+                            "physical-pointer-capture");
+                } else {
+                    DroidBridgeSDL3Bootstrap.recenterLauncherMenuCursor(
+                            "physical-pointer-release");
+                }
+            });
             return true;
         } else {
             return false;
@@ -1499,7 +1516,15 @@ class SDLGenericMotionListener_API26 extends SDLGenericMotionListener_API24 {
     @Override
     public void reclaimRelativeMouseModeIfNeeded() {
         if (mRelativeModeEnabled && !SDLActivity.isDeXMode()) {
-            SDLActivity.getContentView().requestPointerCapture();
+            View contentView = SDLActivity.getContentView();
+            if (contentView == null) return;
+            contentView.requestPointerCapture();
+            contentView.post(() -> {
+                if (mRelativeModeEnabled) {
+                    DroidBridgeSDL3Bootstrap.recenterLauncherGrabCursorSilently(
+                            "physical-pointer-reclaim");
+                }
+            });
         }
     }
 

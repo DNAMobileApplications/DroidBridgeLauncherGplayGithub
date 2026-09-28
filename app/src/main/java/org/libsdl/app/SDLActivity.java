@@ -57,6 +57,8 @@ import android.widget.Toast;
 import java.io.FileNotFoundException;
 import java.util.ArrayList;
 import ca.dnamobile.droidbridgelauncher.runtime.DroidBridgeSDL3Bootstrap;
+import ca.dnamobile.droidbridgelauncher.settings.LauncherPreferences;
+import ca.dnamobile.droidbridgelauncher.utils.FullscreenUtils;
 import ca.dnamobile.droidbridgelauncher.runtime.DroidBridgeSDL3NativeWindowBridge;
 
 import java.util.Hashtable;
@@ -70,7 +72,9 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     private static final String TAG = "SDL";
     private static final int SDL_MAJOR_VERSION = 3;
     private static final int SDL_MINOR_VERSION = 2;
-    private static final int SDL_MICRO_VERSION = 20;
+    // jniLibs/arm64-v8a/libSDL3.so reports SDL 3.2.22. Keep the Android
+    // Java/JNI companion version aligned with the packaged native library.
+    private static final int SDL_MICRO_VERSION = 22;
 /*
     // Display InputType.SOURCE/CLASS of events and devices
     //
@@ -1023,13 +1027,20 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
                     if (context instanceof Activity) {
                         Window window = ((Activity) context).getWindow();
                         if (window != null) {
-                            if ((msg.obj instanceof Integer) && ((Integer) msg.obj != 0)) {
+                            boolean ignoreDisplayCutout =
+                                    LauncherPreferences.isIgnoreDisplayCutout(context);
+                            boolean fullscreenRequested =
+                                    (msg.obj instanceof Integer) && ((Integer) msg.obj != 0);
+                            if (fullscreenRequested) {
                                 int flags = View.SYSTEM_UI_FLAG_FULLSCREEN |
                                         View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
                                         View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY |
+                                        View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
                                         View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
                                         View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
-                                        View.SYSTEM_UI_FLAG_LAYOUT_STABLE | View.INVISIBLE;
+                                        View.INVISIBLE;
+                                // SDL may own immersive system-bar flags, but the camera
+                                // cutout itself is controlled independently by DroidBridge.
                                 window.getDecorView().setSystemUiVisibility(flags);
                                 window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
                                 window.clearFlags(WindowManager.LayoutParams.FLAG_FORCE_NOT_FULLSCREEN);
@@ -1042,7 +1053,36 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
                                 SDLActivity.mFullscreenModeActive = false;
                             }
                             if (Build.VERSION.SDK_INT >= 28 /* Android 9 (Pie) */) {
-                                window.getAttributes().layoutInDisplayCutoutMode = WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS;
+                                // SDL upstream normally forces ALWAYS here. In DroidBridge that
+                                // overwrote the launcher's Ignore display notch preference after
+                                // GameActivity had already configured the window, making the
+                                // toggle look broken. Reassert the launcher policy instead.
+                                FullscreenUtils.applyDisplayCutoutMode(
+                                        (Activity) context,
+                                        ignoreDisplayCutout,
+                                        LauncherPreferences.isForceFullscreenMode(context)
+                                );
+                                if (Build.VERSION.SDK_INT >= 30 /* Android 11 (R) */) {
+                                    try {
+                                        // Fullscreen geometry stays edge-to-edge. If Ignore
+                                        // display notch is ON, GameActivity applies only the
+                                        // physical cutout safe inset to the shared game root.
+                                        window.setDecorFitsSystemWindows(!fullscreenRequested);
+                                    } catch (Throwable ignored) {
+                                    }
+                                }
+                                try {
+                                    View decor = window.getDecorView();
+                                    decor.post(() -> {
+                                        FullscreenUtils.applyDisplayCutoutMode(
+                                                (Activity) context,
+                                                LauncherPreferences.isIgnoreDisplayCutout(context),
+                                                LauncherPreferences.isForceFullscreenMode(context)
+                                        );
+                                        try { decor.requestApplyInsets(); } catch (Throwable ignored) { }
+                                    });
+                                } catch (Throwable ignored) {
+                                }
                             }
                             if (Build.VERSION.SDK_INT >= 30 /* Android 11 (R) */ &&
                                 Build.VERSION.SDK_INT < 35 /* Android 15 */) {
@@ -1379,13 +1419,20 @@ public class SDLActivity extends Activity implements View.OnSystemUiVisibilityCh
     {
         if (mDroidBridgeExternalSurfaceMode) {
             // Treat SDL's relative-mode request as the authoritative GUI/gameplay
-            // grab state. Best-effort pointer capture still benefits a real mouse,
-            // but failure must not block controller camera/WASD mode.
+            // grab state.  Both physical-mouse modes must enter relative mode while
+            // Minecraft is grabbed so camera movement remains continuous and the
+            // existing recenter path keeps working.
             DroidBridgeSDL3Bootstrap.onSdlRelativeMouseChanged(enabled);
             try {
                 SDLActivity.getMotionListener().setRelativeMouseEnabled(enabled);
             } catch (Throwable ignored) {
             }
+
+            // Do not release Android pointer capture merely because Minecraft opens
+            // one of its own GUIs. Android cannot warp the OS cursor to Minecraft's
+            // centered logical position, so MinecraftGLSurface keeps capture and draws
+            // the authoritative centered software cursor there. DroidBridge-owned
+            // Android UI explicitly releases capture only while that UI is open.
             return true;
         }
 

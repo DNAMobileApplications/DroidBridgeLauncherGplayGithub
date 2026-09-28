@@ -14,6 +14,7 @@ package ca.dnamobile.droidbridgelauncher.settings;
 
 import android.content.Context;
 import android.content.SharedPreferences;
+import android.view.KeyEvent;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
@@ -43,10 +44,15 @@ public final class LauncherPreferences {
     private static final String KEY_ENABLE_VULKAN_VSYNC = "enable_vulkan_vsync";
     private static final String KEY_USE_OPENGL_FOR_MC_26_PLUS = "use_opengl_for_mc_26_plus";
     private static final String KEY_SHOW_GAME_LOG_OVERLAY = "show_game_log_overlay";
+    private static final String KEY_SHARE_LOG_CHOOSER_ENABLED = "share_log_chooser_enabled";
+    private static final String KEY_SHARE_LOG_CHOOSER_INITIALIZED_V2 = "share_log_chooser_initialized_v2";
     private static final String KEY_SHOW_IN_GAME_SETTINGS_BUTTON = "show_in_game_settings_button";
     private static final String KEY_DUAL_SCREEN_SUPPORT_ENABLED = "dual_screen_support_enabled";
     private static final String KEY_DUAL_SCREEN_LAST_EXTERNAL_REQUEST = "dual_screen_last_external_request";
     private static final String KEY_DUAL_SCREEN_LAST_SWAP_REQUEST = "dual_screen_last_swap_request";
+    private static final String KEY_DUAL_SCREEN_HUD_LAYOUT = "dual_screen_hud_layout";
+    private static final String KEY_DUAL_SCREEN_ASPECT_RATIO = "dual_screen_aspect_ratio";
+    private static final String KEY_DUAL_SCREEN_FPS_ENABLED = "dual_screen_fps_enabled";
     private static final String KEY_THOR_DUAL_SCREEN_DEFAULT_APPLIED = "thor_dual_screen_default_applied_v3";
     private static final String SHARED_DUAL_SCREEN_STATE_FILE = "droidbridge_dual_screen_preferences.properties";
     private static final String DUAL_SCREEN_BACKGROUND_DIRECTORY = "dual_screen";
@@ -58,6 +64,13 @@ public final class LauncherPreferences {
     private static final Object DUAL_SCREEN_STATE_LOCK = new Object();
     private static final String KEY_ANDROID_BACK_OPENS_IN_GAME_MENU = "android_back_opens_in_game_menu";
     private static final String KEY_ANDROID_BACK_BUTTON_ACTION = "android_back_button_action";
+    private static final String KEY_IN_GAME_MENU_KEYBOARD_SHORTCUT = "in_game_menu_keyboard_shortcut_keycode";
+    private static final String KEY_IN_GAME_MENU_KEYBOARD_SHORTCUT_MODIFIERS = "in_game_menu_keyboard_shortcut_modifiers";
+    private static final String KEY_PHYSICAL_MOUSE_MODE = "physical_mouse_mode";
+    public static final String PHYSICAL_MOUSE_MODE_NATIVE = "native";
+    public static final String PHYSICAL_MOUSE_MODE_ANDROID_VIRTUAL = "android_virtual";
+    private static final int DEFAULT_IN_GAME_MENU_KEYBOARD_SHORTCUT_KEYCODE = KeyEvent.KEYCODE_ESCAPE;
+    private static final int DEFAULT_IN_GAME_MENU_KEYBOARD_SHORTCUT_MODIFIERS = KeyEvent.META_CTRL_ON;
     // Legacy key used before launcher and game orientation were separated.
     private static final String KEY_APP_ORIENTATION_MODE = "app_orientation_mode";
     private static final String KEY_LAUNCHER_ORIENTATION_MODE = "launcher_orientation_mode";
@@ -71,6 +84,7 @@ public final class LauncherPreferences {
     private static final String KEY_FORCE_FULLSCREEN_MODE = "force_fullscreen_mode";
     private static final String KEY_AVOID_ROUNDED_DISPLAY_CORNERS = "avoid_rounded_display_corners";
     private static final String KEY_IGNORE_DISPLAY_CUTOUT = "ignore_display_cutout";
+    private static final String KEY_IME_VIEWPORT_PUSH_ENABLED = "ime_viewport_push_enabled";
     private static final String KEY_LAUNCHER_THEME = "launcher_theme";
     private static final String KEY_USE_BMCLAPI = "use_bmclapi_download_source";
     private static final String KEY_ENABLE_SUSTAINED_PERFORMANCE = "enable_sustained_performance";
@@ -84,6 +98,7 @@ public final class LauncherPreferences {
     public static final String APP_ORIENTATION_REVERSE_LANDSCAPE = "reverse_landscape";
     public static final String APP_ORIENTATION_PORTRAIT = "portrait";
     public static final String APP_ORIENTATION_REVERSE_PORTRAIT = "reverse_portrait";
+    public static final String APP_ORIENTATION_PORTRAIT_CENTERED_GAME = "portrait_centered_game";
 
     public static final String GRID_PLAY_ICON_MODE_REGULAR = "regular";
     public static final String GRID_PLAY_ICON_MODE_LAST_WORLD = "last_world";
@@ -92,6 +107,12 @@ public final class LauncherPreferences {
     public static final String ANDROID_BACK_ACTION_PAUSE_GAME = "pause_game";
     public static final String ANDROID_BACK_ACTION_LAUNCHER_MENU = "launcher_menu";
     public static final String ANDROID_BACK_ACTION_DISABLED = "disabled";
+
+    public static final String DUAL_SCREEN_HUD_LAYOUT_MODERN = "modern";
+    public static final String DUAL_SCREEN_HUD_LAYOUT_LEGACY = "legacy";
+    public static final String DUAL_SCREEN_HUD_LAYOUT_3DS = "3ds";
+    public static final String DUAL_SCREEN_ASPECT_RATIO_16_9 = "16:9";
+    public static final String DUAL_SCREEN_ASPECT_RATIO_4_3 = "4:3";
 
     private static final String DEFAULT_RENDERER_IDENTIFIER = "e7b90ed6-e518-4d4e-93dc-5c7133cd5b31";
     private static final String DEFAULT_VULKAN_DRIVER_NAME = "Default Mesa driver";
@@ -435,6 +456,52 @@ public final class LauncherPreferences {
     }
 
     /**
+     * Controls the main launcher's Share Logs chooser. Enabled by default so users can
+     * choose between the Minecraft latestlog and DroidBridge launcher diagnostics.
+     * When disabled, the main Share Logs action immediately shares latestlog.txt.
+     */
+    public static boolean isShareLogChooserEnabled(@NonNull Context context) {
+        SharedPreferences preferences = prefs(context);
+
+        /*
+         * v2 migration:
+         * The first Share Logs chooser implementation could leave this preference
+         * stored as false before the chooser flow was actually usable. Force the
+         * corrected chooser ON exactly once, then respect the user's setting from
+         * that point forward.
+         */
+        if (!preferences.getBoolean(KEY_SHARE_LOG_CHOOSER_INITIALIZED_V2, false)) {
+            boolean saved = preferences.edit()
+                    .putBoolean(KEY_SHARE_LOG_CHOOSER_ENABLED, true)
+                    .putBoolean(KEY_SHARE_LOG_CHOOSER_INITIALIZED_V2, true)
+                    .commit();
+            if (!saved) {
+                preferences.edit()
+                        .putBoolean(KEY_SHARE_LOG_CHOOSER_ENABLED, true)
+                        .putBoolean(KEY_SHARE_LOG_CHOOSER_INITIALIZED_V2, true)
+                        .apply();
+            }
+            return true;
+        }
+
+        return preferences.getBoolean(KEY_SHARE_LOG_CHOOSER_ENABLED, true);
+    }
+
+    public static void setShareLogChooserEnabled(@NonNull Context context, boolean enabled) {
+        SharedPreferences preferences = prefs(context);
+        boolean saved = preferences.edit()
+                .putBoolean(KEY_SHARE_LOG_CHOOSER_ENABLED, enabled)
+                .putBoolean(KEY_SHARE_LOG_CHOOSER_INITIALIZED_V2, true)
+                .commit();
+        if (!saved) {
+            preferences.edit()
+                    .putBoolean(KEY_SHARE_LOG_CHOOSER_ENABLED, enabled)
+                    .putBoolean(KEY_SHARE_LOG_CHOOSER_INITIALIZED_V2, true)
+                    .apply();
+        }
+    }
+
+    /**
      * Shows the small floating in-game settings button that opens the controller/button
      * overlay while Minecraft is running. Enabled by default so users can still reach
      * the overlay without relying on Android's Back button.
@@ -486,6 +553,78 @@ public final class LauncherPreferences {
     public static boolean hasDualScreenMapFrameImage(@NonNull Context context) {
         File file = getDualScreenMapFrameImageFile(context);
         return file.isFile() && file.length() > 0L;
+    }
+
+    /**
+     * Bottom-screen HUD presentation. This is deliberately launcher-owned and version-neutral:
+     * Fabric/Forge companions only provide state, while Android decides how to arrange it.
+     * Keeping the choice here means the same Modern/Legacy/3DS layouts can be reused when the
+     * compatibility range expands to older Minecraft versions.
+     */
+    @NonNull
+    public static String getDualScreenHudLayout(@NonNull Context context) {
+        String raw = prefs(context).getString(KEY_DUAL_SCREEN_HUD_LAYOUT, DUAL_SCREEN_HUD_LAYOUT_MODERN);
+        String normalized = raw == null ? "" : raw.trim();
+        if (DUAL_SCREEN_HUD_LAYOUT_LEGACY.equalsIgnoreCase(normalized)) {
+            return DUAL_SCREEN_HUD_LAYOUT_LEGACY;
+        }
+        if (DUAL_SCREEN_HUD_LAYOUT_3DS.equalsIgnoreCase(normalized)) {
+            return DUAL_SCREEN_HUD_LAYOUT_3DS;
+        }
+        return DUAL_SCREEN_HUD_LAYOUT_MODERN;
+    }
+
+    public static boolean isDualScreenLegacyHudLayout(@NonNull Context context) {
+        return DUAL_SCREEN_HUD_LAYOUT_LEGACY.equals(getDualScreenHudLayout(context));
+    }
+
+    public static boolean isDualScreen3dsHudLayout(@NonNull Context context) {
+        return DUAL_SCREEN_HUD_LAYOUT_3DS.equals(getDualScreenHudLayout(context));
+    }
+
+    public static void setDualScreenHudLayout(@NonNull Context context, @NonNull String layout) {
+        String raw = layout.trim();
+        String normalized;
+        if (DUAL_SCREEN_HUD_LAYOUT_LEGACY.equalsIgnoreCase(raw)) {
+            normalized = DUAL_SCREEN_HUD_LAYOUT_LEGACY;
+        } else if (DUAL_SCREEN_HUD_LAYOUT_3DS.equalsIgnoreCase(raw)) {
+            normalized = DUAL_SCREEN_HUD_LAYOUT_3DS;
+        } else {
+            normalized = DUAL_SCREEN_HUD_LAYOUT_MODERN;
+        }
+        prefs(context).edit().putString(KEY_DUAL_SCREEN_HUD_LAYOUT, normalized).apply();
+    }
+
+    /**
+     * Launcher-owned safe-area aspect for the lower-screen HUD/controls. This does not
+     * resize Minecraft or the physical panel; it simply composes the lower-screen UI inside
+     * either a centered 16:9 or 4:3 viewport so both shapes remain intentional and unstretched.
+     */
+    @NonNull
+    public static String getDualScreenAspectRatio(@NonNull Context context) {
+        String raw = prefs(context).getString(KEY_DUAL_SCREEN_ASPECT_RATIO, DUAL_SCREEN_ASPECT_RATIO_16_9);
+        return DUAL_SCREEN_ASPECT_RATIO_4_3.equals(raw)
+                ? DUAL_SCREEN_ASPECT_RATIO_4_3
+                : DUAL_SCREEN_ASPECT_RATIO_16_9;
+    }
+
+    public static boolean isDualScreenFourThreeLayout(@NonNull Context context) {
+        return DUAL_SCREEN_ASPECT_RATIO_4_3.equals(getDualScreenAspectRatio(context));
+    }
+
+    public static void setDualScreenAspectRatio(@NonNull Context context, @NonNull String aspectRatio) {
+        String normalized = DUAL_SCREEN_ASPECT_RATIO_4_3.equals(aspectRatio)
+                ? DUAL_SCREEN_ASPECT_RATIO_4_3
+                : DUAL_SCREEN_ASPECT_RATIO_16_9;
+        prefs(context).edit().putString(KEY_DUAL_SCREEN_ASPECT_RATIO, normalized).apply();
+    }
+
+    public static boolean isDualScreenFpsEnabled(@NonNull Context context) {
+        return prefs(context).getBoolean(KEY_DUAL_SCREEN_FPS_ENABLED, false);
+    }
+
+    public static void setDualScreenFpsEnabled(@NonNull Context context, boolean enabled) {
+        prefs(context).edit().putBoolean(KEY_DUAL_SCREEN_FPS_ENABLED, enabled).apply();
     }
 
     public static void clearDualScreenMapFrameImage(@NonNull Context context) {
@@ -789,6 +928,88 @@ public final class LauncherPreferences {
                 .commit();
     }
 
+    /**
+     * Physical mouse routing mode. Native is the accurate/default DroidBridge path.
+     * Android Virtual Mouse keeps the Android OS pointer active so it can interact
+     * with launcher/touch UI as well as Minecraft, at the cost of grabbed-mouse
+     * accuracy because the pointer remains bounded by Android's display.
+     */
+    @NonNull
+    public static String getPhysicalMouseMode(@NonNull Context context) {
+        String value = prefs(context).getString(KEY_PHYSICAL_MOUSE_MODE, PHYSICAL_MOUSE_MODE_NATIVE);
+        return PHYSICAL_MOUSE_MODE_ANDROID_VIRTUAL.equals(value)
+                ? PHYSICAL_MOUSE_MODE_ANDROID_VIRTUAL
+                : PHYSICAL_MOUSE_MODE_NATIVE;
+    }
+
+    public static void setPhysicalMouseMode(@NonNull Context context, @Nullable String mode) {
+        prefs(context).edit()
+                .putString(KEY_PHYSICAL_MOUSE_MODE,
+                        PHYSICAL_MOUSE_MODE_ANDROID_VIRTUAL.equals(mode)
+                                ? PHYSICAL_MOUSE_MODE_ANDROID_VIRTUAL
+                                : PHYSICAL_MOUSE_MODE_NATIVE)
+                .apply();
+    }
+
+    public static boolean isAndroidVirtualPhysicalMouse(@NonNull Context context) {
+        return PHYSICAL_MOUSE_MODE_ANDROID_VIRTUAL.equals(getPhysicalMouseMode(context));
+    }
+
+    /**
+     * Physical-keyboard shortcut for DroidBridge's in-game launcher menu.
+     * New installs default to Ctrl+Esc. Existing R4 installs keep their previously
+     * selected single-key shortcut (no modifiers) so upgrades do not silently remap it.
+     * A stored keyCode of zero explicitly disables the shortcut.
+     */
+    public static int getInGameMenuKeyboardShortcutKeyCode(@NonNull Context context) {
+        SharedPreferences preferences = prefs(context);
+        if (preferences.contains(KEY_IN_GAME_MENU_KEYBOARD_SHORTCUT)) {
+            return Math.max(0, preferences.getInt(KEY_IN_GAME_MENU_KEYBOARD_SHORTCUT, 0));
+        }
+        return DEFAULT_IN_GAME_MENU_KEYBOARD_SHORTCUT_KEYCODE;
+    }
+
+    public static int getInGameMenuKeyboardShortcutModifiers(@NonNull Context context) {
+        SharedPreferences preferences = prefs(context);
+        if (preferences.contains(KEY_IN_GAME_MENU_KEYBOARD_SHORTCUT_MODIFIERS)) {
+            return sanitizeInGameMenuShortcutModifiers(
+                    preferences.getInt(KEY_IN_GAME_MENU_KEYBOARD_SHORTCUT_MODIFIERS, 0));
+        }
+        // R4 stored only the key code. Preserve those user choices as unmodified keys.
+        if (preferences.contains(KEY_IN_GAME_MENU_KEYBOARD_SHORTCUT)) {
+            return 0;
+        }
+        return DEFAULT_IN_GAME_MENU_KEYBOARD_SHORTCUT_MODIFIERS;
+    }
+
+    public static void setInGameMenuKeyboardShortcut(
+            @NonNull Context context,
+            int keyCode,
+            int modifiers
+    ) {
+        int sanitizedKeyCode = Math.max(0, keyCode);
+        int sanitizedModifiers = sanitizedKeyCode == 0
+                ? 0
+                : sanitizeInGameMenuShortcutModifiers(modifiers);
+        prefs(context).edit()
+                .putInt(KEY_IN_GAME_MENU_KEYBOARD_SHORTCUT, sanitizedKeyCode)
+                .putInt(KEY_IN_GAME_MENU_KEYBOARD_SHORTCUT_MODIFIERS, sanitizedModifiers)
+                .commit();
+    }
+
+    /** Compatibility setter for the R4 single-key UI/source path. */
+    public static void setInGameMenuKeyboardShortcutKeyCode(@NonNull Context context, int keyCode) {
+        setInGameMenuKeyboardShortcut(context, keyCode, 0);
+    }
+
+    private static int sanitizeInGameMenuShortcutModifiers(int modifiers) {
+        int normalized = KeyEvent.normalizeMetaState(modifiers);
+        return normalized & (KeyEvent.META_CTRL_ON
+                | KeyEvent.META_ALT_ON
+                | KeyEvent.META_SHIFT_ON
+                | KeyEvent.META_META_ON);
+    }
+
     @NonNull
     private static String sanitizeAndroidBackButtonAction(@Nullable String action) {
         if (ANDROID_BACK_ACTION_LAUNCHER_MENU.equals(action)) {
@@ -879,7 +1100,8 @@ public final class LauncherPreferences {
         if (APP_ORIENTATION_LANDSCAPE.equals(value)
                 || APP_ORIENTATION_REVERSE_LANDSCAPE.equals(value)
                 || APP_ORIENTATION_PORTRAIT.equals(value)
-                || APP_ORIENTATION_REVERSE_PORTRAIT.equals(value)) {
+                || APP_ORIENTATION_REVERSE_PORTRAIT.equals(value)
+                || APP_ORIENTATION_PORTRAIT_CENTERED_GAME.equals(value)) {
             return value;
         }
         return APP_ORIENTATION_AUTO;
@@ -1010,8 +1232,9 @@ public final class LauncherPreferences {
     }
 
     /**
-     * Allows the game/activity window to draw into display cutout/notch areas on supported devices.
-     * Disabled by default because some phones hide UI behind camera cutouts unless the user opts in.
+     * Treats the physical display cutout/notch as unavailable game space. When enabled,
+     * DroidBridge keeps Minecraft, touch controls and launcher overlays inside Android's
+     * reported cutout-safe rectangle even while immersive fullscreen is active.
      */
     public static boolean isIgnoreDisplayCutout(@NonNull Context context) {
         return prefs(context).getBoolean(KEY_IGNORE_DISPLAY_CUTOUT, false);
@@ -1019,6 +1242,19 @@ public final class LauncherPreferences {
 
     public static void setIgnoreDisplayCutout(@NonNull Context context, boolean enabled) {
         saveBoolean(context, KEY_IGNORE_DISPLAY_CUTOUT, enabled);
+    }
+
+    /**
+     * When enabled, opening Android's keyboard for Minecraft chat moves the rendered game
+     * view upward so the in-game text field remains visible. Enabled by default to preserve
+     * DroidBridge's existing behavior; users of floating keyboards can disable it.
+     */
+    public static boolean isImeViewportPushEnabled(@NonNull Context context) {
+        return prefs(context).getBoolean(KEY_IME_VIEWPORT_PUSH_ENABLED, true);
+    }
+
+    public static void setImeViewportPushEnabled(@NonNull Context context, boolean enabled) {
+        saveBoolean(context, KEY_IME_VIEWPORT_PUSH_ENABLED, enabled);
     }
 
     /**

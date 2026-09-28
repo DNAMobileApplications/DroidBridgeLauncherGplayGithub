@@ -865,7 +865,22 @@
                             android:text="@string/launcher_logs_summary"
                             android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
 
+                        
                         <com.google.android.material.switchmaterial.SwitchMaterial
+                            android:id="@+id/switchShareLogChooser"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="10dp"
+                            android:text="@string/share_logs_dialog_setting_on" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="@string/share_logs_dialog_setting_summary"
+                            android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+
+<com.google.android.material.switchmaterial.SwitchMaterial
                             android:id="@+id/switchInstallNotifications"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
@@ -1033,6 +1048,29 @@
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
                             android:layout_marginTop="14dp"
+                            android:text="@string/in_game_menu_keyboard_shortcut_title"
+                            android:textAppearance="@style/TextAppearance.Material3.TitleSmall"
+                            android:textStyle="bold" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/buttonInGameMenuKeyboardShortcut"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:text="@string/in_game_menu_keyboard_shortcut_disabled" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="@string/in_game_menu_keyboard_shortcut_summary"
+                            android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="14dp"
                             android:text="@string/launcher_orientation_title"
                             android:textAppearance="@style/TextAppearance.Material3.TitleSmall"
                             android:textStyle="bold" />
@@ -1075,6 +1113,21 @@
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
                             android:text="@string/game_orientation_dialog_summary"
+                            android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+
+                        <com.google.android.material.switchmaterial.SwitchMaterial
+                            android:id="@+id/switchImeViewportPush"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="12dp"
+                            android:text="@string/settings_game_ime_viewport_push_on"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="@string/settings_game_ime_viewport_push_summary"
                             android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
 
 

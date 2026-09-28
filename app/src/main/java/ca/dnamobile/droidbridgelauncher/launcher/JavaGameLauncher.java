@@ -41,6 +41,7 @@ import ca.dnamobile.droidbridgelauncher.feature.log.Logging;
 import ca.dnamobile.droidbridgelauncher.instance.DefaultMinecraftOptionsInstaller;
 import ca.dnamobile.droidbridgelauncher.modcompat.SableRapierSupport;
 import ca.dnamobile.droidbridgelauncher.modcompat.SystemVulkanShieldModelFallback;
+import ca.dnamobile.droidbridgelauncher.renderer.BtaRendererPolicy;
 import ca.dnamobile.droidbridgelauncher.renderer.RendererInterface;
 import ca.dnamobile.droidbridgelauncher.utils.path.PathManager;
 import ca.dnamobile.droidbridgelauncher.runtime.Architecture;
@@ -98,7 +99,9 @@ public final class JavaGameLauncher {
         preloadGlfwBridgeBeforeMinecraftMain(plan);
 
         notify(listener, "Starting Minecraft JVM...");
+        DistantHorizonsGcMitigation.armRealVmStartupGuardIfNeeded(context, plan);
         int exitCode = launchWithVmLauncher(context, plan);
+        DistantHorizonsGcMitigation.completeRealVmStartupGuardIfNeeded(context, plan, exitCode);
         LaunchGame.onJvmExited(context, plan.getVersionId(), exitCode);
         notify(listener, "Minecraft JVM exited with code " + exitCode + ".");
         return exitCode;
@@ -106,6 +109,275 @@ public final class JavaGameLauncher {
 
     public interface RawJavaProgressListener {
         void onProgress(int progress, @NonNull String status);
+    }
+
+    private static final long ZGC_PROBE_TIMEOUT_SECONDS = 12L;
+
+    /**
+     * Probe ZGC with the selected bundled runtime without letting a failed child
+     * process automatically condemn the in-process Minecraft VM.
+     *
+     * Android app seccomp filters can kill an exec'ed bin/java with SIGSYS even
+     * though the same HotSpot runtime works when DroidBridge starts it through
+     * VMLauncher/JLI.  That is exactly what happens on known-good ZGC devices.
+     * Such a result is INCONCLUSIVE, not a ZGC failure.  A later real-VM startup
+     * guard (DistantHorizonsGcMitigation) confirms or rejects ZGC using the same
+     * launch path Minecraft actually uses.
+     */
+    @NonNull
+    public static ZgcProbeResult probeZgcSupport(
+            @NonNull Context context,
+            @NonNull File runtimeDirectory,
+            int runtimeMajor,
+            @Nullable String maxHeapArg
+    ) {
+        if (runtimeMajor < 17) {
+            return ZgcProbeResult.unsupported(-1, "not-run",
+                    "Java " + runtimeMajor + " is too old for DroidBridge ZGC.");
+        }
+
+        ensureActivePathManager(context);
+
+        File javaBinary = new File(runtimeDirectory, "bin/java");
+        if (!javaBinary.isFile()) {
+            return ZgcProbeResult.inconclusive(-1, "not-run",
+                    "external Java binary is unavailable: " + javaBinary.getAbsolutePath());
+        }
+
+        if (!javaBinary.canExecute()) {
+            //noinspection ResultOfMethodCallIgnored
+            javaBinary.setExecutable(true, false);
+        }
+
+        ArrayList<String> probeArgs = new ArrayList<>();
+        probeArgs.add("-XX:+UseZGC");
+        if (runtimeMajor >= 21 && runtimeMajor < 24) {
+            probeArgs.add("-XX:+ZGenerational");
+        }
+        probeArgs.add("-Xms32m");
+        if (maxHeapArg != null && maxHeapArg.startsWith("-Xmx")) {
+            probeArgs.add(maxHeapArg);
+        }
+        probeArgs.add("-Djava.awt.headless=true");
+        probeArgs.add("-version");
+
+        ZgcProbeResult direct;
+        try {
+            direct = runZgcProbeProcess(
+                    context,
+                    javaBinary,
+                    runtimeDirectory,
+                    probeArgs,
+                    false
+            );
+            if (direct.supported || direct.conclusive) {
+                return direct;
+            }
+        } catch (Throwable throwable) {
+            direct = ZgcProbeResult.inconclusive(-1, "direct-exec",
+                    throwable.getClass().getSimpleName() + ": "
+                            + (throwable.getMessage() == null ? "" : throwable.getMessage()));
+        }
+
+        File linker = resolveSystemLinker();
+        if (linker == null || !linker.isFile()) {
+            return direct;
+        }
+
+        try {
+            ZgcProbeResult linked = runZgcProbeProcess(
+                    context,
+                    javaBinary,
+                    runtimeDirectory,
+                    probeArgs,
+                    true
+            );
+            if (linked.supported || linked.conclusive) {
+                return linked;
+            }
+            // Preserve the most useful Android/seccomp result.  Both are
+            // inconclusive, so neither is allowed to force G1GC.
+            return linked;
+        } catch (Throwable throwable) {
+            return ZgcProbeResult.inconclusive(-1, "system-linker",
+                    throwable.getClass().getSimpleName() + ": "
+                            + (throwable.getMessage() == null ? "" : throwable.getMessage()));
+        }
+    }
+
+    @NonNull
+    private static ZgcProbeResult runZgcProbeProcess(
+            @NonNull Context context,
+            @NonNull File javaBinary,
+            @NonNull File runtimeDirectory,
+            @NonNull List<String> probeArgs,
+            boolean useSystemLinker
+    ) throws Exception {
+        ArrayList<String> command = new ArrayList<>();
+        if (useSystemLinker) {
+            File linker = resolveSystemLinker();
+            if (linker == null || !linker.isFile()) {
+                throw new IOException("No Android system linker found for ZGC probe.");
+            }
+            command.add(linker.getAbsolutePath());
+        }
+        command.add(javaBinary.getAbsolutePath());
+        command.addAll(probeArgs);
+
+        File workingDirectory = context.getCacheDir();
+        if (workingDirectory == null) {
+            workingDirectory = runtimeDirectory;
+        }
+
+        ProcessBuilder builder = new ProcessBuilder(command);
+        builder.directory(workingDirectory);
+        builder.redirectErrorStream(true);
+
+        Map<String, String> env = builder.environment();
+        sanitizeInstallerChildEnvironment(env);
+        env.put("JAVA_HOME", runtimeDirectory.getAbsolutePath());
+        File cacheDir = context.getCacheDir();
+        if (cacheDir != null) {
+            env.put("TMPDIR", cacheDir.getAbsolutePath());
+        }
+        env.put("LD_LIBRARY_PATH", buildInstallerLdLibraryPath(runtimeDirectory));
+
+        File heapTaggingPreload = resolveHeapTaggingPreloadLibrary(context);
+        if (heapTaggingPreload.isFile()) {
+            env.put("LD_PRELOAD", heapTaggingPreload.getAbsolutePath());
+        } else {
+            env.remove("LD_PRELOAD");
+        }
+
+        String existingPath = env.get("PATH");
+        String pathValue = new File(runtimeDirectory, "bin").getAbsolutePath();
+        if (existingPath != null && !existingPath.isEmpty()) {
+            pathValue = pathValue + ":" + existingPath;
+        }
+        env.put("PATH", pathValue);
+
+        String launchMode = useSystemLinker ? "system-linker" : "direct-exec";
+        Logging.i(TAG, "ZGC probe starting mode=" + launchMode
+                + " runtime=" + runtimeDirectory.getAbsolutePath()
+                + " args=" + probeArgs);
+
+        Process process = builder.start();
+        boolean finished = process.waitFor(ZGC_PROBE_TIMEOUT_SECONDS, TimeUnit.SECONDS);
+        if (!finished) {
+            process.destroy();
+            if (!process.waitFor(1, TimeUnit.SECONDS)) {
+                process.destroyForcibly();
+            }
+            return ZgcProbeResult.inconclusive(-1, launchMode,
+                    "external probe timed out after " + ZGC_PROBE_TIMEOUT_SECONDS + "s");
+        }
+
+        String output = readSmallProcessOutput(process, 4096);
+        int exitCode = process.exitValue();
+        ZgcProbeResult result = classifyZgcProbeExit(exitCode, launchMode, output);
+
+        Logging.i(TAG, "ZGC probe finished mode=" + launchMode
+                + " exit=" + exitCode
+                + " verdict=" + result.verdictName()
+                + (output.isEmpty() ? "" : " output=" + output.replace('\n', ' ')));
+
+        return result;
+    }
+
+    @NonNull
+    private static ZgcProbeResult classifyZgcProbeExit(
+            int exitCode,
+            @NonNull String launchMode,
+            @Nullable String output
+    ) {
+        String detail = output == null ? "" : output;
+        if (exitCode == 0) {
+            return ZgcProbeResult.supported(exitCode, launchMode, detail);
+        }
+
+        // 128 + SIGSYS(31). Android's app seccomp policy can kill exec'ed
+        // bin/java this way even while VMLauncher/JLI ZGC works perfectly.
+        if (exitCode == 159) {
+            return ZgcProbeResult.inconclusive(exitCode, launchMode,
+                    detail.isEmpty() ? "child killed by SIGSYS/seccomp" : detail);
+        }
+
+        String lower = detail.toLowerCase(java.util.Locale.ROOT);
+        boolean vmInitFailure = lower.contains("error occurred during initialization of vm")
+                || lower.contains("could not create the java virtual machine")
+                || lower.contains("could not reserve enough space")
+                || lower.contains("failed to reserve")
+                || lower.contains("zgc is not supported")
+                || lower.contains("usezgc is not supported")
+                || (lower.contains("zgc") && lower.contains("unsupported"));
+
+        if (vmInitFailure) {
+            return ZgcProbeResult.unsupported(exitCode, launchMode, detail);
+        }
+
+        // A generic child-process failure says nothing reliable about the
+        // in-process VMLauncher path, so let the real-VM startup guard decide.
+        return ZgcProbeResult.inconclusive(exitCode, launchMode,
+                detail.isEmpty() ? "external probe exited without a ZGC-specific VM error" : detail);
+    }
+
+    @NonNull
+    private static String readSmallProcessOutput(@NonNull Process process, int maxChars) {
+        StringBuilder out = new StringBuilder();
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(process.getInputStream()))) {
+            String line;
+            while ((line = reader.readLine()) != null && out.length() < maxChars) {
+                if (out.length() > 0) out.append('\n');
+                int remaining = maxChars - out.length();
+                out.append(line, 0, Math.min(line.length(), remaining));
+            }
+        } catch (Throwable throwable) {
+            return "output read failed: " + throwable.getClass().getSimpleName();
+        }
+        return out.toString();
+    }
+
+    public static final class ZgcProbeResult {
+        public final boolean supported;
+        public final boolean conclusive;
+        public final int exitCode;
+        @NonNull public final String launchMode;
+        @NonNull public final String detail;
+
+        private ZgcProbeResult(
+                boolean supported,
+                boolean conclusive,
+                int exitCode,
+                @NonNull String launchMode,
+                @NonNull String detail
+        ) {
+            this.supported = supported;
+            this.conclusive = conclusive;
+            this.exitCode = exitCode;
+            this.launchMode = launchMode;
+            this.detail = detail;
+        }
+
+        @NonNull
+        static ZgcProbeResult supported(int exitCode, @NonNull String mode, @NonNull String detail) {
+            return new ZgcProbeResult(true, true, exitCode, mode, detail);
+        }
+
+        @NonNull
+        static ZgcProbeResult unsupported(int exitCode, @NonNull String mode, @NonNull String detail) {
+            return new ZgcProbeResult(false, true, exitCode, mode, detail);
+        }
+
+        @NonNull
+        static ZgcProbeResult inconclusive(int exitCode, @NonNull String mode, @NonNull String detail) {
+            return new ZgcProbeResult(false, false, exitCode, mode, detail);
+        }
+
+        @NonNull
+        public String verdictName() {
+            if (supported) return "PASS";
+            return conclusive ? "FAIL" : "INCONCLUSIVE";
+        }
     }
 
     public static int launchRawJavaArgs(
@@ -1408,7 +1680,9 @@ public final class JavaGameLauncher {
             @NonNull LaunchPlan plan,
             @NonNull RendererInterface renderer
     ) {
-        if (isBetterThanAdventureLaunch(plan) && isBtaSafeVisualRenderer(renderer)) {
+        if (isBetterThanAdventureLaunch(plan)
+                && !BtaRendererPolicy.isBta8OrNewer(plan.getVersionId(), null)
+                && isBtaSafeVisualRenderer(renderer)) {
             plan = appendJvmArgIfMissing(plan, "-Ddroidbridge.bta.disableGlShaders=true");
             safeAppendLog("BTA Android visual profile: LWJGL shader-only capability override enabled for "
                     + renderer.getRendererName());
@@ -1437,6 +1711,34 @@ public final class JavaGameLauncher {
                 safeAppendLog("Failed to apply BTA Android visual profile: " + throwable);
             }
             return plan;
+        }
+
+        if (isBetterThanAdventureLaunch(plan)
+                && BtaRendererPolicy.isBta8OrNewer(plan.getVersionId(), null)) {
+            /*
+             * Older DroidBridge BTA compatibility forced enableShaders=false for
+             * wrapper renderers and that value persists in the instance options.
+             * BTA 8's first-person/player pipeline depends on its modern shader
+             * path, so repair the stale launcher-forced value for every BTA 8+
+             * renderer instead of carrying the old BTA 7 workaround forward.
+             */
+            File options = new File(plan.getGameDirectory(), "options.txt");
+            try {
+                java.util.LinkedHashMap<String, String> values = readOptionsFile(options);
+                boolean changed = false;
+                changed |= setOption(values, "fboEnable", "true");
+                changed |= setOption(values, "enableShaders", "true");
+                if (changed) {
+                    writeOptionsFile(options, values);
+                    safeAppendLog("BTA 8+ visual profile repaired: fboEnable=true, enableShaders=true");
+                } else {
+                    safeAppendLog("BTA 8+ visual profile already native: shaders/FBO enabled for "
+                            + renderer.getRendererName());
+                }
+            } catch (Throwable throwable) {
+                Logging.e(TAG, "Failed to repair BTA 8+ visual profile", throwable);
+                safeAppendLog("Failed to repair BTA 8+ visual profile: " + throwable);
+            }
         }
 
         if (isLtwRenderer(renderer)) {

@@ -34,9 +34,9 @@ import ca.dnamobile.droidbridgelauncher.utils.path.PathManager;
  * Shared, non-blocking component/JRE installation flow.
  *
  * A failed item is attempted once, recorded, and skipped so one broken runtime
- * cannot trap the launcher on its preparation screen. The recorded failure is
- * kept until that exact item installs successfully, even if a damaged install
- * happened to leave a version marker behind.
+ * cannot trap the launcher on its preparation screen. Failed-task state is only
+ * a repair hint: if the normal integrity/version check later proves the installed
+ * item is healthy, the stale failure marker is cleared automatically.
  */
 public final class ComponentInstallationManager {
     private static final String TAG = "ComponentInstaller";
@@ -148,7 +148,7 @@ public final class ComponentInstallationManager {
     }
 
     @NonNull
-    public static ScanResult scan(@NonNull Context context) {
+    public static synchronized ScanResult scan(@NonNull Context context) {
         Context appContext = context.getApplicationContext();
         PathManager.initContextConstants(appContext);
 
@@ -157,10 +157,11 @@ public final class ComponentInstallationManager {
         ArrayList<String> missingIds = new ArrayList<>();
         ArrayList<String> missingNames = new ArrayList<>();
 
+        boolean failureStateChanged = false;
         for (TaskEntry entry : tasks) {
-            boolean missing = rememberedFailures.contains(entry.id);
+            boolean missing;
             try {
-                if (entry.task.isNeedUnpack()) missing = true;
+                missing = entry.task.isNeedUnpack();
             } catch (Throwable throwable) {
                 missing = true;
                 Logging.e(TAG, "Unable to verify " + entry.name + "; treating it as missing", throwable);
@@ -169,7 +170,17 @@ public final class ComponentInstallationManager {
             if (missing) {
                 missingIds.add(entry.id);
                 missingNames.add(entry.name);
+            } else if (rememberedFailures.remove(entry.id)) {
+                // A previous install/reinstall may have failed after leaving the old
+                // known-good copy active. Do not let that stale preference override
+                // the component/JRE's real health check forever.
+                failureStateChanged = true;
+                Logging.i(TAG, "Cleared stale failed-task marker for verified item: " + entry.name);
             }
+        }
+
+        if (failureStateChanged) {
+            writeFailedTaskIds(appContext, rememberedFailures);
         }
 
         return new ScanResult(tasks.size(), missingIds, missingNames);
@@ -207,7 +218,7 @@ public final class ComponentInstallationManager {
     }
 
     @NonNull
-    private static InstallResult install(
+    private static synchronized InstallResult install(
             @NonNull Context context,
             boolean forceAll,
             @Nullable Listener listener

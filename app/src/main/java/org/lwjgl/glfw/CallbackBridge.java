@@ -215,6 +215,26 @@ public class CallbackBridge {
     }
 
     /**
+     * Sends a cursor position that came from a real Android hardware mouse.
+     *
+     * This is intentionally separate from sendCursorPos(). Controller mods,
+     * touch controls, and Minecraft itself also move/warp the logical cursor.
+     * Only genuine hardware-mouse input is allowed to force the native cursor
+     * pump baseline to refresh, which preserves PC-style mouse recentering
+     * without making Controlify/Legacy4J see synthetic mouse movement.
+     */
+    public static void sendHardwareCursorPos(float x, float y) {
+        mouseX = x;
+        mouseY = y;
+        if (DroidBridgeSDL3Bootstrap.routeVirtualCursor(mouseX, mouseY)) {
+            sInputReady = true;
+            return;
+        }
+        ensureNativeInputReady();
+        nativeSendHardwareCursorPos(mouseX, mouseY);
+    }
+
+    /**
      * Marks Controllable right-stick look as genuine mouse activity without
      * replacing Controllable's camera movement. A sub-pixel alternating pulse
      * is enough for Minecraft's mouse-update path while remaining bounded and
@@ -722,6 +742,7 @@ public class CallbackBridge {
     @Keep @CriticalNative private static native boolean nativeSendCharMods(char codepoint, int mods);
     @Keep @CriticalNative private static native void nativeSendKey(int key, int scancode, int action, int mods);
     @Keep @CriticalNative private static native void nativeSendCursorPos(float x, float y);
+    @Keep @CriticalNative private static native void nativeSendHardwareCursorPos(float x, float y);
     @Keep @CriticalNative private static native void nativeSetCursorPosSilently(float x, float y);
     @Keep @CriticalNative private static native void nativeSendMouseButton(int button, int action, int mods);
     @Keep private static native boolean nativeIsMinecraftKeybindCaptureActive();

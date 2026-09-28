@@ -167,7 +167,14 @@ static JNIEnv *droidbridge_get_runtime_env(void) {
     JNIEnv *env = NULL;
     jint result = (*jvm)->GetEnv(jvm, (void **) &env, JNI_VERSION_1_4);
     if (result == JNI_EDETACHED) {
-        result = (*jvm)->AttachCurrentThread(jvm, (void **) &env, NULL);
+        /*
+         * This call originates on an Android/native input helper thread, not a
+         * Java thread owned by the embedded OpenJDK VM.  Keep it attached for
+         * low-latency Minecraft screen/keybind probes, but make the attachment
+         * daemon so it cannot keep DestroyJavaVM alive after Minecraft's main
+         * thread has finished.
+         */
+        result = (*jvm)->AttachCurrentThreadAsDaemon(jvm, (void **) &env, NULL);
     }
     return result == JNI_OK ? env : NULL;
 }
@@ -2086,8 +2093,16 @@ void handleFramebufferSizeJava(long window, int w, int h) {
 
 void droidbridgePumpEvents(void* window) {
     if(droidbridge_environ->shouldUpdateMouse) {
-        droidbridge_environ->GLFW_invoke_CursorPos(window, floor(droidbridge_environ->cursorX),
-                                             floor(droidbridge_environ->cursorY));
+        /*
+         * Preserve sub-pixel mouse motion all the way into GLFW. Hardware mouse
+         * sensitivity can intentionally scale a one-pixel Android delta below
+         * 1.0 (for example 25% -> 0.25). Flooring here made Minecraft wait for
+         * several small samples to accumulate before it observed any movement,
+         * which felt like input latency at low DPI/sensitivity settings.
+         */
+        droidbridge_environ->GLFW_invoke_CursorPos(window,
+                                             droidbridge_environ->cursorX,
+                                             droidbridge_environ->cursorY);
     }
 
     size_t index = droidbridge_environ->outEventIndex;
@@ -2394,13 +2409,13 @@ JNIEXPORT void JNICALL Java_org_lwjgl_glfw_CallbackBridge_nativeSendCursorEnter(
 }
 */
 
-void critical_send_cursor_pos(jfloat x, jfloat y) {
+static void droidbridge_send_cursor_pos_internal(jfloat x, jfloat y, bool hardware_mouse) {
 #ifdef DEBUG
-    LOGD("Sending cursor position \n");
+    LOGD("Sending cursor position source=%s\n", hardware_mouse ? "hardware-mouse" : "logical");
 #endif
     if (droidbridge_environ->GLFW_invoke_CursorPos && droidbridge_environ->isInputReady) {
 #ifdef DEBUG
-        LOGD("droidbridge_environ->GLFW_invoke_CursorPos && droidbridge_environ->isInputReady \n");
+        LOGD("droidbridge_environ->GLFW_invoke_CursorPos && droidbridge_environ->isInputReady\n");
 #endif
         if (!droidbridge_environ->isCursorEntered) {
             if (droidbridge_environ->GLFW_invoke_CursorEnter) {
@@ -2418,18 +2433,110 @@ void critical_send_cursor_pos(jfloat x, jfloat y) {
         }
 
         if (!droidbridge_environ->isUseStackQueueCall) {
-            droidbridge_environ->GLFW_invoke_CursorPos((void*) droidbridge_environ->showingWindow, (double) (x), (double) (y));
+            droidbridge_environ->GLFW_invoke_CursorPos((void*) droidbridge_environ->showingWindow, (double) x, (double) y);
         } else {
+            /*
+             * Remember whether this hardware-mouse update exactly matches the
+             * position most recently pumped to GLFW before overwriting cursorX/Y.
+             * Normal hardware motion already differs from cLastX/cLastY and needs
+             * no special invalidation. Only a true same-position recenter needs a
+             * one-shot forced callback so a physical mouse can re-synchronise
+             * after Minecraft recentres it.
+             */
+            bool force_hardware_recenter = hardware_mouse
+                    && droidbridge_environ->cLastX == (double) x
+                    && droidbridge_environ->cLastY == (double) y;
+
             droidbridge_environ->cursorX = x;
             droidbridge_environ->cursorY = y;
+
+            /*
+             * Keep controller mods, touch controls, and Minecraft cursor warps on
+             * the ordinary logical path. A real Android hardware mouse gets the
+             * recenter repair only when the requested position would otherwise be
+             * indistinguishable from the already-pumped cursor position.
+             */
+            if (force_hardware_recenter) {
+                droidbridge_environ->cLastX = NAN;
+                droidbridge_environ->cLastY = NAN;
+            }
         }
     }
 }
 
-void noncritical_send_cursor_pos(__attribute__((unused)) JNIEnv* env, __attribute__((unused)) jclass clazz,  jfloat x, jfloat y) {
-    critical_send_cursor_pos(x, y);
+void critical_send_cursor_pos(jfloat x, jfloat y) {
+    droidbridge_send_cursor_pos_internal(x, y, false);
 }
 
+void noncritical_send_cursor_pos(__attribute__((unused)) JNIEnv* env,
+                                 __attribute__((unused)) jclass clazz,
+                                 jfloat x,
+                                 jfloat y) {
+    droidbridge_send_cursor_pos_internal(x, y, false);
+}
+
+void critical_send_hardware_cursor_pos(jfloat x, jfloat y) {
+    droidbridge_send_cursor_pos_internal(x, y, true);
+}
+
+void noncritical_send_hardware_cursor_pos(__attribute__((unused)) JNIEnv* env,
+                                          __attribute__((unused)) jclass clazz,
+                                          jfloat x,
+                                          jfloat y) {
+    droidbridge_send_cursor_pos_internal(x, y, true);
+}
+
+static jclass droidbridge_find_game_runtime_class(
+        JNIEnv *env,
+        const char *slash_name,
+        const char *dot_name) {
+    if (env == NULL || slash_name == NULL || dot_name == NULL) return NULL;
+
+    jclass direct = (*env)->FindClass(env, slash_name);
+    if (direct != NULL && !droidbridge_jni_clear_exception(env)) {
+        return direct;
+    }
+    droidbridge_jni_clear_exception(env);
+
+    jclass minecraft_class = droidbridge_find_minecraft_class(env);
+    if (minecraft_class == NULL) return NULL;
+
+    jclass class_class = (*env)->FindClass(env, "java/lang/Class");
+    if (class_class == NULL || droidbridge_jni_clear_exception(env)) {
+        droidbridge_jni_clear_exception(env);
+        (*env)->DeleteLocalRef(env, minecraft_class);
+        return NULL;
+    }
+
+    jmethodID get_class_loader = (*env)->GetMethodID(
+            env, class_class, "getClassLoader", "()Ljava/lang/ClassLoader;");
+    jmethodID for_name = (*env)->GetStaticMethodID(
+            env, class_class, "forName",
+            "(Ljava/lang/String;ZLjava/lang/ClassLoader;)Ljava/lang/Class;");
+    if (get_class_loader == NULL || for_name == NULL || droidbridge_jni_clear_exception(env)) {
+        droidbridge_jni_clear_exception(env);
+        (*env)->DeleteLocalRef(env, class_class);
+        (*env)->DeleteLocalRef(env, minecraft_class);
+        return NULL;
+    }
+
+    jobject loader = (*env)->CallObjectMethod(env, minecraft_class, get_class_loader);
+    jstring class_name = (*env)->NewStringUTF(env, dot_name);
+    jclass result = NULL;
+    if (loader != NULL && class_name != NULL && !droidbridge_jni_clear_exception(env)) {
+        result = (jclass) (*env)->CallStaticObjectMethod(
+                env, class_class, for_name, class_name, JNI_FALSE, loader);
+        if (droidbridge_jni_clear_exception(env)) result = NULL;
+    } else {
+        droidbridge_jni_clear_exception(env);
+    }
+
+    if (class_name != NULL) (*env)->DeleteLocalRef(env, class_name);
+    if (loader != NULL) (*env)->DeleteLocalRef(env, loader);
+    (*env)->DeleteLocalRef(env, class_class);
+    (*env)->DeleteLocalRef(env, minecraft_class);
+    return result;
+}
 
 /*
  * Resolve the LWJGL2 compatibility input class from the same runtime
@@ -2488,12 +2595,111 @@ static jclass droidbridge_find_lwjgl2_input_class(JNIEnv *env) {
 }
 
 /*
- * LWJGL2 compatibility keeps its own physical cursor baseline in the embedded
- * OpenJDK VM. Resetting only DroidBridge's Java/native cursor caches is not
- * enough: after dragging an inventory stack, GLFWInputImplementation still
- * remembers the last slot coordinate and turns the first right-stick sample
- * into a very large relative delta. This runs only while LWJGL2 is grabbed;
- * modern versions do not contain this compatibility class and return early.
+ * LWJGL2 Mouse.poll() keeps one more cursor baseline above
+ * GLFWInputImplementation. In an ungrabbed menu it computes dx/dy from the
+ * static absolute_x/absolute_y fields before accepting the current poll
+ * position. If those static fields are still at their constructor zeroes,
+ * the first controller-mode poll creates a screen-sized fake delta and BTA's
+ * virtual cursor clamps to a corner.
+ *
+ * Seed the static Mouse coordinates to the same logical position and clear all
+ * accumulated deltas so the first controller poll starts at zero movement.
+ */
+static void droidbridge_reset_lwjgl2_mouse_static_state(
+        JNIEnv *env,
+        jint logical_x,
+        jint logical_y) {
+    if (env == NULL) return;
+
+    jclass mouse_class = droidbridge_find_game_runtime_class(
+            env, "org/lwjgl/input/Mouse", "org.lwjgl.input.Mouse");
+    if (mouse_class == NULL) return;
+
+    jfieldID created_field = (*env)->GetStaticFieldID(env, mouse_class, "created", "Z");
+    if (created_field == NULL || droidbridge_jni_clear_exception(env)) {
+        droidbridge_jni_clear_exception(env);
+        (*env)->DeleteLocalRef(env, mouse_class);
+        return;
+    }
+
+    jboolean created = (*env)->GetStaticBooleanField(env, mouse_class, created_field);
+    if (droidbridge_jni_clear_exception(env) || created != JNI_TRUE) {
+        droidbridge_jni_clear_exception(env);
+        (*env)->DeleteLocalRef(env, mouse_class);
+        return;
+    }
+
+    const char *x_fields[] = {
+            "x", "absolute_x", "event_x", "last_event_raw_x"
+    };
+    const char *y_fields[] = {
+            "y", "absolute_y", "event_y", "last_event_raw_y"
+    };
+    const char *zero_fields[] = {
+            "dx", "dy", "event_dx", "event_dy"
+    };
+
+    for (size_t i = 0; i < sizeof(x_fields) / sizeof(x_fields[0]); i++) {
+        jfieldID field = (*env)->GetStaticFieldID(env, mouse_class, x_fields[i], "I");
+        if (field == NULL || droidbridge_jni_clear_exception(env)) {
+            droidbridge_jni_clear_exception(env);
+            (*env)->DeleteLocalRef(env, mouse_class);
+            return;
+        }
+        (*env)->SetStaticIntField(env, mouse_class, field, logical_x);
+        if (droidbridge_jni_clear_exception(env)) {
+            (*env)->DeleteLocalRef(env, mouse_class);
+            return;
+        }
+    }
+
+    for (size_t i = 0; i < sizeof(y_fields) / sizeof(y_fields[0]); i++) {
+        jfieldID field = (*env)->GetStaticFieldID(env, mouse_class, y_fields[i], "I");
+        if (field == NULL || droidbridge_jni_clear_exception(env)) {
+            droidbridge_jni_clear_exception(env);
+            (*env)->DeleteLocalRef(env, mouse_class);
+            return;
+        }
+        (*env)->SetStaticIntField(env, mouse_class, field, logical_y);
+        if (droidbridge_jni_clear_exception(env)) {
+            (*env)->DeleteLocalRef(env, mouse_class);
+            return;
+        }
+    }
+
+    for (size_t i = 0; i < sizeof(zero_fields) / sizeof(zero_fields[0]); i++) {
+        jfieldID field = (*env)->GetStaticFieldID(env, mouse_class, zero_fields[i], "I");
+        if (field == NULL || droidbridge_jni_clear_exception(env)) {
+            droidbridge_jni_clear_exception(env);
+            (*env)->DeleteLocalRef(env, mouse_class);
+            return;
+        }
+        (*env)->SetStaticIntField(env, mouse_class, field, 0);
+        if (droidbridge_jni_clear_exception(env)) {
+            (*env)->DeleteLocalRef(env, mouse_class);
+            return;
+        }
+    }
+
+    (*env)->DeleteLocalRef(env, mouse_class);
+}
+
+/*
+ * LWJGL2 compatibility keeps a second mouse state inside the embedded OpenJDK
+ * VM (GLFWInputImplementation.mouseX/mouseY + physical baselines). Resetting
+ * only DroidBridge's Java/native GLFW cursor caches is therefore not enough.
+ *
+ * There are two cases we must keep in sync:
+ *
+ *  1) grabbed/gameplay: reset the physical and poll baselines so the first
+ *     camera sample after a GUI cannot become a huge relative delta;
+ *  2) ungrabbed/menu: seed LWJGL2's logical mouseX/mouseY too. BTA 8 centers
+ *     its visible controller cursor independently, while this compatibility
+ *     object can still be at its constructor default (0,0). The first left-
+ *     stick sample then starts BTA's virtual cursor from the top-left corner.
+ *
+ * Modern LWJGL versions do not contain this compatibility class and simply
+ * return early, so this remains isolated to LWJGL2-style consumers such as BTA.
  */
 static void droidbridge_reset_lwjgl2_mouse_baseline(jfloat x, jfloat y) {
     JNIEnv *env = droidbridge_get_runtime_env();
@@ -2521,10 +2727,15 @@ static void droidbridge_reset_lwjgl2_mouse_baseline(jfloat x, jfloat y) {
     }
 
     jfieldID grab_field = (*env)->GetFieldID(env, impl_class, "grab", "Z");
-    if (grab_field == NULL || droidbridge_jni_clear_exception(env)
-            || (*env)->GetBooleanField(env, singleton, grab_field) != JNI_TRUE
-            || droidbridge_jni_clear_exception(env)) {
+    if (grab_field == NULL || droidbridge_jni_clear_exception(env)) {
         droidbridge_jni_clear_exception(env);
+        (*env)->DeleteLocalRef(env, singleton);
+        (*env)->DeleteLocalRef(env, impl_class);
+        return;
+    }
+
+    jboolean grabbed = (*env)->GetBooleanField(env, singleton, grab_field);
+    if (droidbridge_jni_clear_exception(env)) {
         (*env)->DeleteLocalRef(env, singleton);
         (*env)->DeleteLocalRef(env, impl_class);
         return;
@@ -2541,14 +2752,41 @@ static void droidbridge_reset_lwjgl2_mouse_baseline(jfloat x, jfloat y) {
             && mouse_x != NULL && mouse_y != NULL
             && mouse_last_x != NULL && mouse_last_y != NULL
             && !droidbridge_jni_clear_exception(env)) {
-        jint logical_x = (*env)->GetIntField(env, singleton, mouse_x);
-        jint logical_y = (*env)->GetIntField(env, singleton, mouse_y);
-        if (!droidbridge_jni_clear_exception(env)) {
-            (*env)->SetIntField(env, singleton, last_physical_x, (jint) lroundf(x));
-            (*env)->SetIntField(env, singleton, last_physical_y, (jint) lroundf(y));
+        jint physical_x = (jint) lroundf(x);
+        jint physical_y = (jint) lroundf(y);
+
+        if (grabbed == JNI_TRUE) {
+            jint logical_x = (*env)->GetIntField(env, singleton, mouse_x);
+            jint logical_y = (*env)->GetIntField(env, singleton, mouse_y);
+            if (!droidbridge_jni_clear_exception(env)) {
+                (*env)->SetIntField(env, singleton, last_physical_x, physical_x);
+                (*env)->SetIntField(env, singleton, last_physical_y, physical_y);
+                (*env)->SetIntField(env, singleton, mouse_last_x, logical_x);
+                (*env)->SetIntField(env, singleton, mouse_last_y, logical_y);
+                droidbridge_jni_clear_exception(env);
+            }
+        } else {
+            /*
+             * GLFW cursor Y is top-origin, while LWJGL2 Mouse Y is bottom-origin.
+             * Mirror GLFWInputImplementation.putMouseEventWithCoords() exactly:
+             *     mouseY = (physicalY - Display.getHeight()) * -1
+             * savedHeight is kept current by critical_send_screen_size().
+             */
+            jint height = droidbridge_environ != NULL ? droidbridge_environ->savedHeight : 0;
+            jint logical_x = physical_x;
+            jint logical_y = height > 0 ? (height - physical_y) : physical_y;
+
+            (*env)->SetIntField(env, singleton, last_physical_x, physical_x);
+            (*env)->SetIntField(env, singleton, last_physical_y, physical_y);
+            (*env)->SetIntField(env, singleton, mouse_x, logical_x);
+            (*env)->SetIntField(env, singleton, mouse_y, logical_y);
             (*env)->SetIntField(env, singleton, mouse_last_x, logical_x);
             (*env)->SetIntField(env, singleton, mouse_last_y, logical_y);
-            droidbridge_jni_clear_exception(env);
+            if (!droidbridge_jni_clear_exception(env)) {
+                droidbridge_reset_lwjgl2_mouse_static_state(env, logical_x, logical_y);
+            } else {
+                droidbridge_jni_clear_exception(env);
+            }
         }
     } else {
         droidbridge_jni_clear_exception(env);
@@ -2673,7 +2911,9 @@ JavaVM* jvm = droidbridge_environ->runtimeJavaVMPtr;
 JNIEnv *jvm_env = NULL;
 jint env_result = (*jvm)->GetEnv(jvm, (void**)&jvm_env, JNI_VERSION_1_4);
 if(env_result == JNI_EDETACHED) {
-env_result = (*jvm)->AttachCurrentThread(jvm, &jvm_env, NULL);
+// This is the Android UI/lifecycle thread.  It is intentionally kept attached
+// for later window-attrib callbacks, so attach it as a daemon JVM thread.
+env_result = (*jvm)->AttachCurrentThreadAsDaemon(jvm, &jvm_env, NULL);
 }
 if(env_result != JNI_OK) {
 printf("input_bridge nativeSetWindowAttrib() JNI call failed: %i\n", env_result);
@@ -2873,6 +3113,7 @@ const static JNINativeMethod critical_fcns[] = {
         {"nativeSendCharMods", "(CI)Z", critical_send_char_mods},
         {"nativeSendKey", "(IIII)V", critical_send_key},
         {"nativeSendCursorPos", "(FF)V", critical_send_cursor_pos},
+        {"nativeSendHardwareCursorPos", "(FF)V", critical_send_hardware_cursor_pos},
         {"nativeSetCursorPosSilently", "(FF)V", critical_set_cursor_pos_silently},
         {"nativeSendMouseButton", "(III)V", critical_send_mouse_button},
         {"nativeIsMinecraftKeybindCaptureActive", "()Z", droidbridge_native_is_minecraft_keybind_capture_active},
@@ -2892,6 +3133,7 @@ const static JNINativeMethod noncritical_fcns[] = {
         {"nativeSendCharMods", "(CI)Z", noncritical_send_char_mods},
         {"nativeSendKey", "(IIII)V", noncritical_send_key},
         {"nativeSendCursorPos", "(FF)V", noncritical_send_cursor_pos},
+        {"nativeSendHardwareCursorPos", "(FF)V", noncritical_send_hardware_cursor_pos},
         {"nativeSetCursorPosSilently", "(FF)V", noncritical_set_cursor_pos_silently},
         {"nativeSendMouseButton", "(III)V", noncritical_send_mouse_button},
         {"nativeIsMinecraftKeybindCaptureActive", "()Z", droidbridge_native_is_minecraft_keybind_capture_active},

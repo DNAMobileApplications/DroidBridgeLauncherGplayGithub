@@ -22,6 +22,7 @@ import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatDelegate;
 
 import ca.dnamobile.droidbridgelauncher.settings.LauncherPreferences;
+import ca.dnamobile.droidbridgelauncher.ui.LauncherDialogStyle;
 
 /**
  * Applies the user-selected DroidBridge launcher accent theme.
@@ -36,6 +37,7 @@ public final class LauncherTheme {
     public static void apply(@NonNull Activity activity) {
         applyNightMode(activity);
         activity.setTheme(getStyleRes(activity));
+        LauncherDialogStyle.syncTheme(activity);
     }
 
     private static void applyNightMode(@NonNull Context context) {

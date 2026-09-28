@@ -12,7 +12,7 @@
 
     <string name="settings_renderer_full_screen_on">Force fullscreen mode: On</string>
     <string name="settings_renderer_full_screen_off">Force fullscreen mode: Off</string>
-    <string name="settings_renderer_full_screen_summary">When enabled, Minecraft uses immersive fullscreen and ignores safe areas like notches and punch-holes.</string>
+    <string name="settings_renderer_full_screen_summary">When enabled, Minecraft uses immersive fullscreen and hides the Android system bars. Display-notch behavior is controlled separately by Ignore display notch.</string>
 
     <string name="settings_renderer_avoid_rounded_corners_on">Avoid rounded display corners: On</string>
     <string name="settings_renderer_avoid_rounded_corners_off">Avoid rounded display corners: Off</string>
@@ -40,4 +40,8 @@
     <string name="settings_renderer_game_resolution_custom_width">Width</string>
     <string name="settings_renderer_game_resolution_custom_height">Height</string>
     <string name="settings_renderer_game_resolution_custom_invalid">Enter width and height values from %1$d to %2$d.</string>
+
+    <string name="settings_game_ime_viewport_push_on">Move game above keyboard: On</string>
+    <string name="settings_game_ime_viewport_push_off">Move game above keyboard: Off</string>
+    <string name="settings_game_ime_viewport_push_summary">Keeps Minecraft chat/text fields visible by moving the game view above the Android keyboard. Enabled by default. Turn this off when using a floating keyboard or when you do not want the game view to move.</string>
 </resources>

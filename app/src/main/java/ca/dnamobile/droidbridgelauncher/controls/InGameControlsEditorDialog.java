@@ -50,6 +50,7 @@ import java.util.Collections;
 
 import ca.dnamobile.droidbridgelauncher.ui.LauncherDialogStyle;
 import ca.dnamobile.droidbridgelauncher.utils.FullscreenUtils;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 /** Drag buttons to move; tap a button to edit/delete it. */
 public final class InGameControlsEditorDialog extends AppCompatDialog {
@@ -122,9 +123,16 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
         super.onCreate(savedInstanceState);
         configureDialogWindow();
 
-        menuTouchSlop = ViewConfiguration.get(hostActivity).getScaledTouchSlop();
+        // GameActivity intentionally keeps its own game-facing theme. The editor must
+        // not inherit that theme or its Material dialogs/color picker diverge from the
+        // standalone touch editor. AppCompatDialog#getContext() is already wrapped in
+        // the selected DroidBridge launcher theme passed to super(...).
+        final Context editorContext = getContext();
+        LauncherDialogStyle.syncTheme(editorContext);
 
-        windowRoot = new FrameLayout(hostActivity);
+        menuTouchSlop = ViewConfiguration.get(editorContext).getScaledTouchSlop();
+
+        windowRoot = new FrameLayout(editorContext);
         windowRoot.setBackgroundColor(Color.TRANSPARENT);
         windowRoot.setClipChildren(false);
         windowRoot.setClipToPadding(false);
@@ -136,7 +144,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
         // navigation, external-display, and some vendor fullscreen implementations.
         // Saving positions against the dialog's full canvas therefore shifted the
         // buttons when the real game overlay reloaded them.
-        root = new FrameLayout(hostActivity);
+        root = new FrameLayout(editorContext);
         root.setBackgroundColor(Color.TRANSPARENT);
         root.setClipChildren(false);
         root.setClipToPadding(false);
@@ -163,7 +171,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
         }
         enableImmersiveSafely();
 
-        overlay = new TouchControlsOverlay(hostActivity);
+        overlay = new TouchControlsOverlay(editorContext);
         overlay.setEditorPanelHideRequest(this::hideGlobalEditorPanelForControlEdit);
         if (liveOverlay != null) {
             overlay.setEditorPreviewListener(new TouchControlsOverlay.EditorPreviewListener() {
@@ -188,7 +196,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
                 ViewGroup.LayoutParams.MATCH_PARENT
         ));
 
-        editorPanel = new LinearLayout(hostActivity);
+        editorPanel = new LinearLayout(editorContext);
         editorPanel.setOrientation(LinearLayout.VERTICAL);
         editorPanel.setGravity(Gravity.TOP);
         editorPanel.setPadding(dp(12), dp(10), dp(12), dp(10));
@@ -202,7 +210,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
 
         buildEditorPanel();
 
-        menuButton = new Button(hostActivity);
+        menuButton = new Button(editorContext);
         menuButton.setText("⚙");
         menuButton.setTextSize(22f);
         menuButton.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
@@ -297,7 +305,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
             return;
         }
 
-        AlertDialog dialog = new AlertDialog.Builder(hostActivity)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(getContext())
                 .setTitle("Close touch editor?")
                 .setMessage("Save your touch-control changes before closing, or close without saving to restore the layout from when you opened the editor.")
                 .setNegativeButton("Close without saving", (unused, which) -> {
@@ -315,7 +323,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
                     dismiss();
                 })
                 .create();
-        dialog.setOnShowListener(unused -> LauncherDialogStyle.styleDialogChrome(hostActivity, dialog));
+        dialog.setOnShowListener(unused -> styleEditorDialogChrome(dialog));
         dialog.setOnDismissListener(unused -> {
             if (windowRoot != null) {
                 windowRoot.removeCallbacks(immersiveReapplyRunnable);
@@ -323,7 +331,39 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
             }
         });
         dialog.show();
-        LauncherDialogStyle.styleDialogChrome(hostActivity, dialog);
+        styleEditorDialogChrome(dialog);
+    }
+
+
+    private void styleEditorDialogChrome(@NonNull AlertDialog dialog) {
+        Context editorContext = getContext();
+        LauncherDialogStyle.syncTheme(editorContext);
+
+        Window window = dialog.getWindow();
+        if (window != null) {
+            window.setBackgroundDrawable(LauncherDialogStyle.roundedDrawable(
+                    editorContext,
+                    LauncherDialogStyle.COLOR_DIALOG_BG,
+                    LauncherDialogStyle.COLOR_CARD_STROKE,
+                    22
+            ));
+            window.setDimAmount(LauncherDialogStyle.DIALOG_DIM_NORMAL);
+
+            int sideMargin = dp(
+                    editorContext.getResources().getDisplayMetrics().widthPixels
+                            > editorContext.getResources().getDisplayMetrics().heightPixels
+                            ? 24 : 16
+            );
+            int available = Math.max(
+                    dp(280),
+                    editorContext.getResources().getDisplayMetrics().widthPixels - (sideMargin * 2)
+            );
+            window.setLayout(Math.min(available, dp(720)), ViewGroup.LayoutParams.WRAP_CONTENT);
+        }
+
+        LauncherDialogStyle.tintDialogButton(dialog, AlertDialog.BUTTON_POSITIVE);
+        LauncherDialogStyle.tintDialogButton(dialog, AlertDialog.BUTTON_NEGATIVE);
+        LauncherDialogStyle.tintDialogButton(dialog, AlertDialog.BUTTON_NEUTRAL);
     }
 
     private void configureDialogWindow() {
@@ -436,12 +476,12 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
     }
 
     private void buildEditorPanel() {
-        LinearLayout headerRow = new LinearLayout(hostActivity);
+        LinearLayout headerRow = new LinearLayout(getContext());
         headerRow.setOrientation(LinearLayout.HORIZONTAL);
         headerRow.setGravity(Gravity.CENTER_VERTICAL);
         headerRow.setPadding(0, 0, 0, dp(6));
 
-        TextView header = new TextView(hostActivity);
+        TextView header = new TextView(getContext());
         header.setText("Touch editor");
         header.setTextSize(15f);
         header.setTypeface(Typeface.DEFAULT_BOLD);
@@ -455,13 +495,13 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
 
         editorPanel.addView(headerRow, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        editorScroll = new BoundedScrollView(hostActivity);
+        editorScroll = new BoundedScrollView(getContext());
         editorScroll.setFillViewport(false);
         editorScroll.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
         editorScroll.setVerticalScrollBarEnabled(true);
         editorScroll.setScrollbarFadingEnabled(true);
 
-        editorContent = new LinearLayout(hostActivity);
+        editorContent = new LinearLayout(getContext());
         editorContent.setOrientation(LinearLayout.VERTICAL);
         editorContent.setGravity(Gravity.CENTER_HORIZONTAL);
         editorContent.setPadding(0, 0, 0, dp(4));
@@ -555,6 +595,20 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
         });
         rowThree.addView(redo, panelButtonParams());
 
+        // Keep this action set in parity with ControlsEditorActivity. The in-game
+        // editor used to be an older fork and silently missed newer actions such as
+        // Drawer creation.
+        Button addDrawer = panelButton("Add Drawer");
+        addDrawer.setOnClickListener(view -> {
+            overlay.addControl(TouchControlData.drawer("Drawer", 320, 120, 96, 52));
+            Toast.makeText(
+                    getContext(),
+                    "Added drawer. Tap it to choose which buttons it shows and hides.",
+                    Toast.LENGTH_SHORT
+            ).show();
+        });
+        rowFour.addView(addDrawer, panelButtonParams());
+
         Button closeEditor = panelButton("Close Editor");
         closeEditor.setOnClickListener(view -> requestCloseEditor());
         rowFour.addView(closeEditor, panelButtonParams());
@@ -567,7 +621,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
 
 
     private void addGlobalOpacityControls() {
-        TextView title = new TextView(hostActivity);
+        TextView title = new TextView(getContext());
         title.setText("All button opacity");
         title.setTextSize(12f);
         title.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
@@ -578,7 +632,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        globalOpacityValue = new TextView(hostActivity);
+        globalOpacityValue = new TextView(getContext());
         globalOpacityValue.setTextSize(11f);
         globalOpacityValue.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         globalOpacityValue.setGravity(Gravity.CENTER);
@@ -588,7 +642,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        globalOpacitySlider = new SeekBar(hostActivity);
+        globalOpacitySlider = new SeekBar(getContext());
         globalOpacitySlider.setMax(100);
         int progress = Math.round((overlay != null ? overlay.getProfileGlobalOpacity() : ControlsPreferences.getGlobalOpacity(hostActivity)) * 100f);
         globalOpacitySlider.setProgress(Math.max(0, Math.min(100, progress)));
@@ -625,7 +679,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
     }
 
     private void addGlobalButtonScaleControls() {
-        TextView title = new TextView(hostActivity);
+        TextView title = new TextView(getContext());
         title.setText("All button scale");
         title.setTextSize(12f);
         title.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
@@ -636,7 +690,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        globalScaleValue = new TextView(hostActivity);
+        globalScaleValue = new TextView(getContext());
         globalScaleValue.setTextSize(11f);
         globalScaleValue.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         globalScaleValue.setGravity(Gravity.CENTER);
@@ -646,7 +700,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        globalScaleSlider = new SeekBar(hostActivity);
+        globalScaleSlider = new SeekBar(getContext());
         globalScaleSlider.setMax(ControlsPreferences.MAX_GLOBAL_BUTTON_SCALE_PERCENT);
         int progress = overlay != null ? overlay.getProfileGlobalButtonScalePercent() : ControlsPreferences.getGlobalButtonScalePercent(hostActivity);
         globalScaleSlider.setProgress(Math.max(
@@ -703,7 +757,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
     }
 
     private void addGlobalButtonAppearanceControls() {
-        TextView radiusTitle = new TextView(hostActivity);
+        TextView radiusTitle = new TextView(getContext());
         radiusTitle.setText("All button radius");
         radiusTitle.setTextSize(12f);
         radiusTitle.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
@@ -714,7 +768,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        globalRadiusValue = new TextView(hostActivity);
+        globalRadiusValue = new TextView(getContext());
         globalRadiusValue.setTextSize(11f);
         globalRadiusValue.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         globalRadiusValue.setGravity(Gravity.CENTER);
@@ -724,7 +778,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        globalRadiusSlider = new SeekBar(hostActivity);
+        globalRadiusSlider = new SeekBar(getContext());
         globalRadiusSlider.setMax(100);
         int radiusProgress = overlay == null ? 16 : Math.max(0, Math.min(100, overlay.averageButtonCornerRadius()));
         globalRadiusSlider.setProgress(radiusProgress);
@@ -757,7 +811,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
                 dp(38)
         ));
 
-        TextView strokeTitle = new TextView(hostActivity);
+        TextView strokeTitle = new TextView(getContext());
         strokeTitle.setText("All button stroke");
         strokeTitle.setTextSize(12f);
         strokeTitle.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
@@ -768,7 +822,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        globalStrokeValue = new TextView(hostActivity);
+        globalStrokeValue = new TextView(getContext());
         globalStrokeValue.setTextSize(11f);
         globalStrokeValue.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         globalStrokeValue.setGravity(Gravity.CENTER);
@@ -778,7 +832,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        globalStrokeSlider = new SeekBar(hostActivity);
+        globalStrokeSlider = new SeekBar(getContext());
         globalStrokeSlider.setMax(20);
         int strokeProgress = overlay == null ? 2 : Math.max(0, Math.min(20, overlay.averageButtonStrokeWidth()));
         globalStrokeSlider.setProgress(strokeProgress);
@@ -1004,7 +1058,7 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
     }
 
     private LinearLayout panelRow() {
-        LinearLayout row = new LinearLayout(hostActivity);
+        LinearLayout row = new LinearLayout(getContext());
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setPadding(0, dp(2), 0, dp(2));
@@ -1012,12 +1066,12 @@ public final class InGameControlsEditorDialog extends AppCompatDialog {
     }
 
     private Button panelButton(String text) {
-        Button button = new Button(hostActivity);
+        Button button = new Button(getContext());
         button.setText(text);
         button.setAllCaps(false);
         button.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         button.setTypeface(Typeface.DEFAULT_BOLD);
-        button.setBackground(LauncherDialogStyle.roundedDrawable(hostActivity, LauncherDialogStyle.COLOR_CARD_BG_PRESSED, LauncherDialogStyle.COLOR_CARD_STROKE, 14));
+        button.setBackground(LauncherDialogStyle.roundedDrawable(getContext(), LauncherDialogStyle.COLOR_CARD_BG_PRESSED, LauncherDialogStyle.COLOR_CARD_STROKE, 14));
         button.setMinHeight(0);
         button.setMinimumHeight(0);
         button.setPadding(dp(8), 0, dp(8), 0);

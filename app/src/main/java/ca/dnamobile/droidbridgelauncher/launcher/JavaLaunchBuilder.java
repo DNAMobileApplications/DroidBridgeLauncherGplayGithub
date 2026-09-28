@@ -25,9 +25,11 @@ import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.BufferedInputStream;
+import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.net.HttpURLConnection;
 import java.net.InetAddress;
 import java.net.URL;
@@ -48,11 +50,15 @@ import java.util.regex.Pattern;
 import ca.dnamobile.droidbridgelauncher.data.AccountStore;
 import ca.dnamobile.droidbridgelauncher.feature.log.Logging;
 import ca.dnamobile.droidbridgelauncher.network.MinecraftDownloadSource;
+import ca.dnamobile.droidbridgelauncher.modcompat.BtaGlfwBufferCompat;
 import ca.dnamobile.droidbridgelauncher.modcompat.ControllerModCompat;
 import ca.dnamobile.droidbridgelauncher.modcompat.ControlifySDL;
 import ca.dnamobile.droidbridgelauncher.modcompat.FFmpegPluginCompat;
+import ca.dnamobile.droidbridgelauncher.modcompat.E4MCCompat;
+import ca.dnamobile.droidbridgelauncher.modcompat.MCSRRankedCompat;
 import ca.dnamobile.droidbridgelauncher.modcompat.VerityNativeCompat;
 import ca.dnamobile.droidbridgelauncher.renderer.DriverPluginManager;
+import ca.dnamobile.droidbridgelauncher.renderer.BtaRendererPolicy;
 import ca.dnamobile.droidbridgelauncher.renderer.RendererInterface;
 import ca.dnamobile.droidbridgelauncher.security.LauncherSecurity;
 import ca.dnamobile.droidbridgelauncher.settings.LauncherPreferences;
@@ -75,6 +81,10 @@ public final class JavaLaunchBuilder {
     private static final String TAG = "JavaLaunchBuilder";
     private static final String DEFAULT_MAIN_CLASS = "net.minecraft.client.main.Main";
     private static final int DEFAULT_MEMORY_MB = 2048;
+    private static final String DROIDBRIDGE_LIB_PATCHER_ASSET =
+            "components/components/DroidBridgeLibPatcher.jar";
+    private static final String DROIDBRIDGE_COMPONENT_VERSION_ASSET =
+            "components/components/version";
     private static OfflineYggdrasilServer activeOfflineSkinServer;
     private static LegacySkinProxyServer activeLegacySkinProxyServer;
 
@@ -225,6 +235,11 @@ public final class JavaLaunchBuilder {
         String effectiveMinecraftVersionId = resolveEffectiveMinecraftVersionId(rawVersionJson, versionJson);
         versionJson = ensureCriticalMinecraftLibraries(versionJson, effectiveMinecraftVersionId);
         File clientJarFile = resolveClientJarFile(versionId, rawVersionJson);
+        Logging.i(TAG, "Client jar resolution: launchVersion=" + versionId
+                + " effectiveMinecraftVersion=" + effectiveMinecraftVersionId
+                + " inheritsFrom=" + rawVersionJson.optString("inheritsFrom", "")
+                + " jar=" + rawVersionJson.optString("jar", "")
+                + " clientJar=" + clientJarFile.getAbsolutePath());
         String mainClass = versionJson.optString("mainClass", DEFAULT_MAIN_CLASS);
         String assetIndexName = resolveAssetIndexName(versionJson);
         File gameAssetsDir = resolveGameAssetsDirectory(versionJson, assetIndexName);
@@ -252,6 +267,12 @@ public final class JavaLaunchBuilder {
         }
 
         File lwjglComponentDir = resolveLwjglComponent(effectiveMinecraftVersionId, versionJson);
+        if (BtaRendererPolicy.isBta8OrNewer(this.versionId, null)) {
+            // BTA 8 reuses one-element GLFW output buffers. Repair the isolated
+            // DroidBridge BTA GLFW shim before its jars are placed on the JVM
+            // classpath so native-compatible output calls preserve buffer position.
+            BtaGlfwBufferCompat.prepare(lwjglComponentDir);
+        }
         File lwjglNativesDir = resolveLwjglNativeDir(lwjglComponentDir);
         MinecraftVersionInstaller.ensureJnaNativesForLaunch(versionId, versionJson);
         boolean forgeLaunch = isForgeOrBootstrapVersion(versionJson);
@@ -368,6 +389,38 @@ public final class JavaLaunchBuilder {
     @NonNull
     private File resolveClientJarFile(@NonNull String id, @NonNull JSONObject rawVersionJson) {
         File ownJar = new File(MinecraftVersionInstaller.getVersionDirectory(id), id + ".jar");
+        String referencedJarId = rawVersionJson.optString("jar", "").trim();
+        String inheritsFrom = rawVersionJson.optString("inheritsFrom", "").trim();
+
+        /*
+         * OptiFine installer profiles are inheritance profiles: the OptiFine code
+         * lives in libraries/optifine while the Minecraft client classes come from
+         * the declared vanilla jar/parent. A stale or installer-created profile-local
+         * jar must not silently replace that declared base. This also makes the
+         * selected client jar match the version metadata shown in DroidBridge.
+         */
+        if (isOptiFineProfile(id, rawVersionJson)) {
+            if (!referencedJarId.isEmpty() && !referencedJarId.equals(id)) {
+                File referencedJar = new File(
+                        MinecraftVersionInstaller.getVersionDirectory(referencedJarId),
+                        referencedJarId + ".jar"
+                );
+                if (referencedJar.isFile()) return referencedJar;
+                throw new IllegalStateException("Missing OptiFine referenced client jar: "
+                        + referencedJar.getAbsolutePath());
+            }
+
+            if (!inheritsFrom.isEmpty() && !inheritsFrom.equals(id)) {
+                File parentJar = new File(
+                        MinecraftVersionInstaller.getVersionDirectory(inheritsFrom),
+                        inheritsFrom + ".jar"
+                );
+                if (parentJar.isFile()) return parentJar;
+                throw new IllegalStateException("Missing OptiFine inherited client jar: "
+                        + parentJar.getAbsolutePath());
+            }
+        }
+
         if (ownJar.isFile()) {
             return ownJar;
         }
@@ -375,7 +428,6 @@ public final class JavaLaunchBuilder {
         // Cleanroom and some official-launcher-compatible profiles use the
         // standard "jar" field to reuse another version's client jar without
         // inheriting that version's complete library list.
-        String referencedJarId = rawVersionJson.optString("jar", "").trim();
         if (!referencedJarId.isEmpty() && !referencedJarId.equals(id)) {
             File referencedJar = new File(
                     MinecraftVersionInstaller.getVersionDirectory(referencedJarId),
@@ -385,7 +437,6 @@ public final class JavaLaunchBuilder {
             throw new IllegalStateException("Missing referenced client jar: " + referencedJar.getAbsolutePath());
         }
 
-        String inheritsFrom = rawVersionJson.optString("inheritsFrom", "").trim();
         if (!inheritsFrom.isEmpty()) {
             File parentJar = new File(MinecraftVersionInstaller.getVersionDirectory(inheritsFrom), inheritsFrom + ".jar");
             if (parentJar.isFile()) return parentJar;
@@ -406,6 +457,19 @@ public final class JavaLaunchBuilder {
         }
 
         throw new IllegalStateException("Missing client jar: " + ownJar.getAbsolutePath());
+    }
+
+    private static boolean isOptiFineProfile(@NonNull String id, @NonNull JSONObject rawVersionJson) {
+        if (id.toLowerCase(Locale.ROOT).contains("optifine")) return true;
+        JSONArray libraries = rawVersionJson.optJSONArray("libraries");
+        if (libraries == null) return false;
+        for (int i = 0; i < libraries.length(); i++) {
+            JSONObject library = libraries.optJSONObject(i);
+            if (library == null) continue;
+            String name = library.optString("name", "").toLowerCase(Locale.ROOT);
+            if (name.contains("optifine")) return true;
+        }
+        return false;
     }
 
     @NonNull
@@ -734,6 +798,11 @@ public final class JavaLaunchBuilder {
     }
 
     private int resolveJavaMajor(@NonNull JSONObject versionJson) {
+        if (BtaRendererPolicy.isBta8OrNewer(versionId, null)) {
+            Logging.i(TAG, "BTA 8+ profile detected; forcing Java 17 for " + versionId);
+            return 17;
+        }
+
         int cleanroomJava = CleanroomSupport.resolveRequiredJava(versionId, versionJson);
         if (cleanroomJava > 0) {
             Logging.i(TAG, "Cleanroom profile detected; forcing Java " + cleanroomJava + " for " + versionId);
@@ -1797,26 +1866,46 @@ public final class JavaLaunchBuilder {
     ) {
         stopActiveLegacySkinProxyServer();
 
-        if (!shouldUseLegacySkinProxy(versionJson)) {
+        // BTA 8.x still resolves modern texture hashes through a plain-HTTP
+        // textures.minecraft.net URL. Android/JDK networking can leave that request
+        // unusable even though the same HTTPS endpoint works. Reuse the existing
+        // localhost HTTP proxy as a transport bridge for BTA: the proxy upgrades only
+        // textures.minecraft.net requests to HTTPS and forwards everything else
+        // normally. BTA's positional username/session arguments remain untouched.
+        boolean btaSkinHttpBridge = isBetterThanAdventureProfile(versionJson);
+        boolean legacySkinProxy = shouldUseLegacySkinProxy(versionJson);
+        if (!btaSkinHttpBridge && !legacySkinProxy) {
             return;
         }
 
         String playerName = resolvePlayerName();
         File skinFile = resolveLegacySkinFileForLaunch(playerName);
-        if (skinFile == null || !skinFile.isFile()) {
+        if (!btaSkinHttpBridge && (skinFile == null || !skinFile.isFile())) {
             Logging.i(TAG, "Legacy skin proxy skipped: no cached/selected skin available for " + playerName);
             return;
         }
 
         try {
             LegacySkinProxyServer server = new LegacySkinProxyServer();
-            server.addSkin(playerName, skinFile);
+            // Keep the old pre-Yggdrasil behavior exactly as before. For BTA this is
+            // only an optional local fallback entry; its modern /texture/<hash> request
+            // is forwarded after the HTTP -> HTTPS upgrade.
+            if (skinFile != null && skinFile.isFile()) {
+                server.addSkin(playerName, skinFile);
+                if (btaSkinHttpBridge) {
+                    // BTA may replace the authenticated account name with Player###
+                    // and request that transient profile's texture hash. Serve the
+                    // authenticated launch account skin for any BTA texture hash so
+                    // the in-game model always matches the selected Microsoft account.
+                    server.setModernTextureOverride(skinFile);
+                }
+            }
             server.start();
 
             int port = server.getPort();
             if (port <= 0) {
                 server.stop();
-                Logging.i(TAG, "Legacy skin proxy did not expose a valid port.");
+                Logging.i(TAG, "Legacy/BTA skin proxy did not expose a valid port.");
                 return;
             }
 
@@ -1825,12 +1914,19 @@ public final class JavaLaunchBuilder {
             addJvmArgIfMissing(args, "-Dhttp.proxyHost=127.0.0.1");
             addJvmArgIfMissing(args, "-Dhttp.proxyPort=" + port);
             addJvmArgIfMissing(args, "-Dhttp.nonProxyHosts=127.*|localhost|::1");
-            Logging.i(TAG, "Legacy skin proxy active on port " + port
-                    + " for " + playerName
-                    + " skin=" + skinFile.getAbsolutePath());
+
+            if (btaSkinHttpBridge) {
+                Logging.i(TAG, "BTA skin HTTP bridge active on port " + port
+                        + " for launch account " + playerName
+                        + "; textures.minecraft.net HTTP requests will be upgraded to HTTPS");
+            } else {
+                Logging.i(TAG, "Legacy skin proxy active on port " + port
+                        + " for " + playerName
+                        + " skin=" + skinFile.getAbsolutePath());
+            }
         } catch (Throwable throwable) {
             stopActiveLegacySkinProxyServer();
-            Logging.e(TAG, "Failed to start legacy skin proxy", throwable);
+            Logging.e(TAG, "Failed to start legacy/BTA skin proxy", throwable);
         }
     }
 
@@ -1967,7 +2063,76 @@ public final class JavaLaunchBuilder {
     }
 
     private void addCustomSkinAuthlibInjectorIfNeeded(@NonNull ArrayList<String> args) {
-        stopActiveOfflineSkinServer();
+        String playerName = resolvePlayerName();
+        OfflineSkinProfile profile = resolveOfflineSkinProfile(playerName);
+        if (profile == null || !profile.enabled || profile.skinFile == null || !profile.skinFile.isFile()) {
+            stopActiveOfflineSkinServer();
+            return;
+        }
+
+        File authlibInjector = resolveAuthlibInjectorJar();
+        if (authlibInjector == null || !authlibInjector.isFile()) {
+            Logging.i(TAG, "Offline skin selected, but authlib-injector.jar was not found. Skin will only show in launcher UI.");
+            safeWriteSkinLaunchNote("Offline skin selected, but authlib-injector.jar was not found.\n");
+            stopActiveOfflineSkinServer();
+            return;
+        }
+
+        try {
+            stopActiveOfflineSkinServer();
+            OfflineYggdrasilServer server = new OfflineYggdrasilServer("JavaLauncher_Offline", "JavaLauncher", "1.0");
+            server.start();
+            int port = server.getPort();
+            if (port <= 0) {
+                server.stop();
+                Logging.i(TAG, "Offline skin server did not expose a valid port.");
+                return;
+            }
+
+            server.addCharacter(stripUuidDashes(profile.uniqueUuid), playerName, profile.skinFile, profile.model);
+            activeOfflineSkinServer = server;
+
+            args.add("-javaagent:" + authlibInjector.getAbsolutePath() + "=http://127.0.0.1:" + port + "/");
+            args.add("-Dauthlibinjector.side=client");
+            Logging.i(TAG, "Using OfflineYggdrasilServer on port " + port + " for offline skin user " + playerName);
+        } catch (Throwable throwable) {
+            stopActiveOfflineSkinServer();
+            Logging.e(TAG, "Failed to prepare custom skin authlib injector", throwable);
+        }
+    }
+
+    private File resolveAuthlibInjectorJar() {
+        File fromLibPath = readLibPathFileField("AUTHLIB_INJECTOR");
+        if (fromLibPath != null && fromLibPath.isFile()) return fromLibPath;
+
+        File[] candidates = new File[]{
+                new File(PathManager.DIR_FILE, "authlib-injector.jar"),
+                new File(PathManager.DIR_FILE, "authlib-injector/authlib-injector.jar"),
+                new File(PathManager.DIR_FILE, "components/authlib-injector.jar"),
+                new File(PathManager.DIR_FILE, "components/authlib-injector/authlib-injector.jar"),
+                new File(PathManager.DIR_FILE, "authlib_injector.jar"),
+                new File(PathManager.DIR_DATA, "authlib-injector.jar")
+        };
+
+        for (File candidate : candidates) {
+            if (candidate.isFile()) return candidate;
+        }
+        return null;
+    }
+
+    @Nullable
+    private File readLibPathFileField(@NonNull String fieldName) {
+        try {
+            Field field = LibPath.class.getDeclaredField(fieldName);
+            field.setAccessible(true);
+            Object value = field.get(null);
+            if (value instanceof File) return (File) value;
+            if (value instanceof String && !((String) value).trim().isEmpty()) {
+                return new File((String) value);
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
     }
 
     private void safeWriteSkinLaunchNote(@NonNull String text) {
@@ -2018,6 +2183,37 @@ public final class JavaLaunchBuilder {
         int major = parsed[0];
         int minor = parsed[1];
         return major == 1 && minor >= 0 && minor <= 12;
+    }
+
+    private boolean shouldEnableControlifySharedSdl263Compat(@NonNull JSONObject versionJson) {
+        // Controlify 26.3 needs a shared-SDL compatibility gate. Loader instance IDs
+        // such as fabric-loader-0.19.5-26.3 are not parsed correctly by the generic
+        // release parser because it sees the loader version (0.19.5) first. Resolve
+        // the Minecraft tail explicitly without changing behavior for any non-Controlify
+        // launch or older Minecraft version.
+        if (shouldEnableSdl3SingleWindowJavaBindingReuse(versionJson)) {
+            return true;
+        }
+
+        String[] candidates = new String[]{
+                versionJson.optString("javaLauncherFlattenedParent", ""),
+                versionJson.optString("inheritsFrom", ""),
+                versionJson.optString("id", ""),
+                versionId
+        };
+        for (String candidate : candidates) {
+            if (candidate == null) continue;
+            String value = candidate.trim();
+            if (value.isEmpty()) continue;
+
+            String minecraftId = extractMinecraftIdFromLoaderVersion(value);
+            int[] parsed = parseReleaseVersion(minecraftId.toLowerCase(Locale.ROOT));
+            if (parsed == null) continue;
+            if (parsed[0] > 26 || (parsed[0] == 26 && parsed[1] >= 3)) {
+                return true;
+            }
+        }
+        return false;
     }
 
     private boolean shouldEnableSdl3SingleWindowJavaBindingReuse(@NonNull JSONObject versionJson) {
@@ -2135,9 +2331,58 @@ public final class JavaLaunchBuilder {
                 + new File(gameDirectory, "droidbridge_dual_screen_state.json").getAbsolutePath());
         args.add("-Ddroidbridge.dualscreen.control="
                 + new File(gameDirectory, "droidbridge_dual_screen_control.json").getAbsolutePath());
+        // Event-driven networkless exact-icon mailbox.
+        //
+        // Keep the proven v9 transport for every supported Minecraft version, including 26.2.
+        // The 26.2 renderer itself is still selected separately below through the dedicated
+        // javaagent property, so restoring this mailbox does NOT roll back the 26.2 transformer.
+        //
+        // This intentionally matches the launcher-side transport used by the known-good
+        // 0.9.17-0.9.21 builds. The later v11/per-instance mailbox split caused 26.2 to stop
+        // receiving finished item captures reliably even though 26.1.2 continued to render.
+        final boolean droidBridgeMinecraft262 = isMinecraft262ReleaseForDebugUtilsFallback(versionJson);
+        final File droidBridgeIconMailbox =
+                new File(PathManager.DIR_CACHE, "droidbridge_dual_screen_live_icons_v9");
+        if (droidBridgeMinecraft262) {
+            // Keep the current hybrid LibPatcher routing: 26.2 gets the stable historical
+            // GuiRenderer/GuiItemAtlas transformer, while 26.3+ keeps the newer transformer.
+            args.add("-Ddroidbridge.dualscreen.shield_native_capture_26_2=true");
+        }
+        File droidBridgeIconRequests = new File(droidBridgeIconMailbox, "requests");
+        File droidBridgeIconResponses = new File(droidBridgeIconMailbox, "responses");
+        if (!droidBridgeIconMailbox.isDirectory()) droidBridgeIconMailbox.mkdirs();
+        if (!droidBridgeIconRequests.isDirectory()) droidBridgeIconRequests.mkdirs();
+        if (!droidBridgeIconResponses.isDirectory()) droidBridgeIconResponses.mkdirs();
+        try { new File(droidBridgeIconMailbox, "ready.current").delete(); } catch (Throwable ignored) { }
+        File[] staleIconRequests = droidBridgeIconRequests.listFiles();
+        if (staleIconRequests != null) {
+            for (File stale : staleIconRequests) {
+                if (stale != null && stale.isFile()) {
+                    String name = stale.getName().toLowerCase(java.util.Locale.ROOT);
+                    if (name.endsWith(".req") || name.endsWith(".tmp")) {
+                        try { stale.delete(); } catch (Throwable ignored) { }
+                    }
+                }
+            }
+        }
+        args.add("-Ddroidbridge.dualscreen.iconDir=" + droidBridgeIconMailbox.getAbsolutePath());
+        if (droidBridgeMinecraft262) {
+            Logging.i(TAG, "DroidBridge 26.2 dual-screen exact-icon transport restored to v9; "
+                    + "stable 26.2 GuiItemAtlas transformer remains enabled");
+        }
         args.add("-Ddroidbridge.dualscreen.hideHud=false");
         args.add("-Ddroidbridge.path.private.account=" + PathManager.DIR_ACCOUNT_NEW);
         args.add("-Djava.library.path=" + nativeLibraryPath);
+        // MCSR Ranked 5.x bundles both desktop-Linux and Android Snappy JNI libraries.
+        // OpenJDK on Android reports itself as Linux/aarch64, so Xerial Snappy otherwise
+        // extracts the glibc build (libm.so.6/libc.so.6) and crashes when replay tracking
+        // starts in a ranked world. Point Snappy at the Android native already shipped
+        // inside the unmodified MCSR Ranked jar.
+        MCSRRankedCompat.applySnappyCompatibility(context, gameDirectory, args);
+        // e4mc 6.x can use a launcher-supplied Android Netty-Quiche native via
+        // link.e4mc.native_path. Keep the mod jar/network protocol untouched and
+        // arm the override only when a real Android-compatible native is present.
+        E4MCCompat.applyNativeCompatibility(context, gameDirectory, args);
         if (needsLegacyAwt) {
             args.add("-Dsun.boot.library.path=" + bootLibraryPath);
         }
@@ -2156,6 +2401,12 @@ public final class JavaLaunchBuilder {
             File controlifySdl3 = new File(PathManager.DIR_NATIVE_LIB, "libSDL3.so");
             args.add("-Ddroidbridge.controlify.sdl3_compat=true");
             args.add("-Ddroidbridge.controlify.sdl3.path=" + controlifySdl3.getAbsolutePath());
+
+            if (shouldEnableControlifySharedSdl263Compat(versionJson)) {
+                args.add("-Ddroidbridge.controlify.knot_safe_26_3=true");
+                Logging.i(TAG, "Controlify Minecraft 26.3 shared-SDL keyboard/event compatibility enabled");
+            }
+
             Logging.i(TAG, "Controlify Android SDL3 FFM path active: "
                     + controlifySdl3.getAbsolutePath());
         }
@@ -2167,12 +2418,43 @@ public final class JavaLaunchBuilder {
         if (!rendererLibrary.isEmpty()) {
             args.add("-Dorg.lwjgl.opengl.libname=" + rendererLibrary);
         }
+
+        /*
+         * Android 10's linker/OpenJDK combination on devices such as the LG G7
+         * can execute LTW when DroidBridge preloads it, but LWJGL 3.4's Linux
+         * GL.create() bootstrap cannot reopen LTW as the context-management
+         * library. Minecraft 26.3 uses SDL3/EGL anyway, so select EGL explicitly
+         * for that narrow path and let DroidBridge's app-owned SDL3 EGL provider
+         * supply eglGetProcAddress. The provider continues routing desktop GL
+         * procedure lookup to LTW via DROIDBRIDGE_SDL3_OPENGL_LIBRARY.
+         *
+         * Keep older LTW/GLFW releases and Android 11+ on the established path.
+         */
+        if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q
+                && isLtwRenderer(renderer)
+                && shouldEnableSdl3SingleWindowJavaBindingReuse(versionJson)) {
+            File sdl3EglProvider = new File(
+                    PathManager.DIR_NATIVE_LIB,
+                    "libdroidbridge_sdl3_egl.so"
+            );
+            if (sdl3EglProvider.isFile()) {
+                args.add("-Dorg.lwjgl.opengl.contextAPI=EGL");
+                args.add("-Dorg.lwjgl.egl.libname=" + sdl3EglProvider.getAbsolutePath());
+                Logging.i(TAG, "Android 10 LTW LWJGL context bootstrap using SDL3 EGL provider="
+                        + sdl3EglProvider.getAbsolutePath());
+            } else {
+                Logging.e(TAG, "Android 10 LTW LWJGL context bootstrap provider missing="
+                        + sdl3EglProvider.getAbsolutePath());
+            }
+        }
+
         args.add("-Dorg.lwjgl.freetype.libname=" + new File(PathManager.DIR_NATIVE_LIB, "libfreetype.so").getAbsolutePath());
         args.add("-Dglfwstub.windowWidth=" + glfwWindowWidth);
         args.add("-Dglfwstub.windowHeight=" + glfwWindowHeight);
         args.add("-Dglfwstub.initEgl=" + (!needsLegacyAwt && shouldGlfwStubInitEgl(renderer)));
         args.add("-Dext.net.resolvPath=" + resolvFile);
         addMinecraftNetworkJvmArgs(args, runtimeDir);
+        enforceBtaSkinProxyJvmArgs(args, versionJson);
         args.add("-Dlog4j2.formatMsgNoLookups=true");
         if (legacyForgeRuntime) {
             addLegacyForgeLog4jPatchArg(args);
@@ -2218,7 +2500,13 @@ public final class JavaLaunchBuilder {
         addJvmArgIfMissing(args, "-Ddroidbridge.bta=true");
         addJvmArgIfMissing(args, "-Ddroidbridge.bta.disableNativeControllers=true");
         addJvmArgIfMissing(args, "-Ddroidbridge.bta.launcherControllerFallback=true");
-        Logging.i(TAG, "Applied isolated BTA input/controller JVM flags");
+        if (BtaRendererPolicy.isBta8OrNewer(this.versionId, null)) {
+            // The BTA GLFW shim uses one adaptive presentation pacer. It leaves
+            // real eglSwapInterval enabled and only sleeps when the EGL swap
+            // returns before the next display deadline, avoiding double pacing.
+            addJvmArgIfMissing(args, "-Ddroidbridge.bta.vsyncPacer=true");
+        }
+        Logging.i(TAG, "Applied isolated BTA input/controller/VSync JVM flags");
     }
 
     private void writeLegacyForgeSplashConfigIfNeeded(
@@ -2442,6 +2730,28 @@ public final class JavaLaunchBuilder {
         return Math.max(1, fallback);
     }
 
+
+    private void enforceBtaSkinProxyJvmArgs(
+            @NonNull ArrayList<String> args,
+            @NonNull JSONObject versionJson
+    ) {
+        if (!isBetterThanAdventureProfile(versionJson)) return;
+
+        int port = getActiveLegacySkinProxyPort();
+        if (port <= 0) return;
+
+        // Inherited/version JVM arguments are appended after the proxy is created.
+        // Make the BTA transport bridge authoritative at the end of JVM assembly so
+        // a stale proxyHost/proxyPort cannot bypass the local skin override.
+        purgeArg(args, "-Dhttp.proxyHost=");
+        purgeArg(args, "-Dhttp.proxyPort=");
+        purgeArg(args, "-Dhttp.nonProxyHosts=");
+        args.add("-Dhttp.proxyHost=127.0.0.1");
+        args.add("-Dhttp.proxyPort=" + port);
+        args.add("-Dhttp.nonProxyHosts=127.*|localhost|::1");
+
+        Logging.i(TAG, "BTA skin proxy JVM route finalized on port " + port);
+    }
 
     private void addMinecraftNetworkJvmArgs(
             @NonNull ArrayList<String> args,
@@ -2905,6 +3215,7 @@ public final class JavaLaunchBuilder {
         LibPath.refresh();
 
         File patcher = LibPath.DROIDBRIDGE_LIB_PATCHER;
+        ensureBundledDroidBridgeLibPatcherCurrent(patcher);
         if (patcher == null || !patcher.isFile()) {
             Logging.i(TAG, "DroidBridgeLibPatcher.jar was not found at "
                     + (patcher != null ? patcher.getAbsolutePath() : "<null>"));
@@ -2937,6 +3248,177 @@ public final class JavaLaunchBuilder {
             addJvmArgIfMissing(args, "--enable-native-access=ALL-UNNAMED");
             Logging.i(TAG, "Enabled native access for DroidBridgeLibPatcher on runtime " + runtimeDir.getName());
         }
+    }
+
+    /**
+     * The javaagent is launch-critical and may outlive an APK/component update in app data.
+     * Verify the extracted copy against the APK asset immediately before building the JVM
+     * command. If the bytes differ, refresh it from the APK so Minecraft cannot accidentally
+     * start with an older transformer revision.
+     */
+    private void ensureBundledDroidBridgeLibPatcherCurrent(@Nullable File patcher) {
+        if (patcher == null) {
+            Logging.i(TAG, "DroidBridgeLibPatcher self-check skipped: resolved path is null");
+            return;
+        }
+
+        String bundledVersion = readBundledComponentVersion();
+        try {
+            if (fileMatchesAsset(patcher, DROIDBRIDGE_LIB_PATCHER_ASSET)) {
+                Logging.i(TAG, "DroidBridgeLibPatcher self-check OK: component="
+                        + bundledVersion + " sha256=" + sha256(patcher)
+                        + " path=" + patcher.getAbsolutePath());
+                return;
+            }
+
+            File parent = patcher.getParentFile();
+            if (parent == null) {
+                Logging.i(TAG, "DroidBridgeLibPatcher self-heal failed: path has no parent: "
+                        + patcher.getAbsolutePath());
+                return;
+            }
+            if (!parent.isDirectory() && !parent.mkdirs() && !parent.isDirectory()) {
+                Logging.i(TAG, "DroidBridgeLibPatcher self-heal failed: unable to create "
+                        + parent.getAbsolutePath());
+                return;
+            }
+
+            File staged = new File(parent, patcher.getName() + ".asset-refresh.tmp");
+            File backup = new File(parent, patcher.getName() + ".asset-refresh.bak");
+            //noinspection ResultOfMethodCallIgnored
+            staged.delete();
+            //noinspection ResultOfMethodCallIgnored
+            backup.delete();
+
+            copyAssetToFile(DROIDBRIDGE_LIB_PATCHER_ASSET, staged);
+            if (!fileMatchesAsset(staged, DROIDBRIDGE_LIB_PATCHER_ASSET)) {
+                throw new IllegalStateException("staged javaagent does not match APK asset");
+            }
+
+            boolean hadOld = patcher.isFile();
+            if (hadOld && !patcher.renameTo(backup)) {
+                // renameTo can fail on some Android filesystems. A direct delete is safe here:
+                // the javaagent has not been attached to the Minecraft JVM yet.
+                if (!patcher.delete()) {
+                    throw new IllegalStateException("unable to replace existing javaagent");
+                }
+            }
+
+            if (!staged.renameTo(patcher)) {
+                // Fall back to a byte copy if an atomic rename is unavailable.
+                copyFile(staged, patcher);
+                //noinspection ResultOfMethodCallIgnored
+                staged.delete();
+            }
+
+            if (!fileMatchesAsset(patcher, DROIDBRIDGE_LIB_PATCHER_ASSET)) {
+                // Restore the old copy when possible rather than leaving a bad agent in place.
+                //noinspection ResultOfMethodCallIgnored
+                patcher.delete();
+                if (backup.isFile()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    backup.renameTo(patcher);
+                }
+                throw new IllegalStateException("installed javaagent failed APK byte verification");
+            }
+
+            //noinspection ResultOfMethodCallIgnored
+            backup.delete();
+            Logging.i(TAG, "DroidBridgeLibPatcher self-healed from APK asset: component="
+                    + bundledVersion + " sha256=" + sha256(patcher)
+                    + " path=" + patcher.getAbsolutePath());
+        } catch (Throwable throwable) {
+            Logging.e(TAG, "DroidBridgeLibPatcher self-heal failed; retaining available installed agent", throwable);
+        }
+    }
+
+    private boolean fileMatchesAsset(@NonNull File file, @NonNull String assetPath) {
+        if (!file.isFile() || file.length() <= 0) return false;
+        try (InputStream asset = new BufferedInputStream(context.getAssets().open(assetPath));
+             InputStream installed = new BufferedInputStream(new FileInputStream(file))) {
+            byte[] left = new byte[32 * 1024];
+            byte[] right = new byte[32 * 1024];
+            while (true) {
+                int leftRead = readChunk(asset, left);
+                int rightRead = readChunk(installed, right);
+                if (leftRead != rightRead) return false;
+                if (leftRead < 0) return true;
+                for (int i = 0; i < leftRead; i++) {
+                    if (left[i] != right[i]) return false;
+                }
+            }
+        } catch (Throwable throwable) {
+            Logging.e(TAG, "Unable to compare javaagent with APK asset " + assetPath, throwable);
+            return false;
+        }
+    }
+
+    private static int readChunk(@NonNull InputStream input, @NonNull byte[] buffer) throws Exception {
+        int offset = 0;
+        while (offset < buffer.length) {
+            int read = input.read(buffer, offset, buffer.length - offset);
+            if (read < 0) return offset == 0 ? -1 : offset;
+            if (read == 0) break;
+            offset += read;
+        }
+        return offset;
+    }
+
+    private void copyAssetToFile(@NonNull String assetPath, @NonNull File target) throws Exception {
+        try (InputStream input = new BufferedInputStream(context.getAssets().open(assetPath));
+             FileOutputStream output = new FileOutputStream(target, false)) {
+            byte[] buffer = new byte[32 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+            output.flush();
+        }
+        if (!target.isFile() || target.length() <= 0) {
+            throw new IllegalStateException("copied asset is missing or empty: " + assetPath);
+        }
+    }
+
+    @NonNull
+    private String readBundledComponentVersion() {
+        try (InputStream input = context.getAssets().open(DROIDBRIDGE_COMPONENT_VERSION_ASSET);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[256];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+            String value = new String(output.toByteArray(), StandardCharsets.UTF_8).trim();
+            return value.isEmpty() ? "unknown" : value;
+        } catch (Throwable throwable) {
+            return "unknown";
+        }
+    }
+
+    @NonNull
+    private static String sha256(@NonNull File file) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        try (InputStream input = new BufferedInputStream(new FileInputStream(file))) {
+            byte[] buffer = new byte[32 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                digest.update(buffer, 0, read);
+            }
+        }
+        StringBuilder out = new StringBuilder(64);
+        for (byte value : digest.digest()) {
+            out.append(String.format(Locale.ROOT, "%02x", value & 0xff));
+        }
+        return out.toString();
+    }
+
+    @NonNull
+    private static String sha256Text(@NonNull String value) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-256");
+        byte[] bytes = digest.digest(value.getBytes(StandardCharsets.UTF_8));
+        StringBuilder out = new StringBuilder(64);
+        for (byte b : bytes) out.append(String.format(Locale.ROOT, "%02x", b & 0xff));
+        return out.toString();
     }
 
     private boolean shouldEnableNativeAccessForRuntime(@NonNull File runtimeDir) {
@@ -3824,6 +4306,8 @@ public final class JavaLaunchBuilder {
         purgeArg(args, "-Dorg.lwjgl.librarypath=");
         purgeArg(args, "-Dorg.lwjgl.sdl.libname=");
         purgeArg(args, "-Dorg.lwjgl.opengl.libname=");
+        purgeArg(args, "-Dorg.lwjgl.opengl.contextAPI=");
+        purgeArg(args, "-Dorg.lwjgl.egl.libname=");
         purgeArg(args, "-Dorg.lwjgl.freetype.libname=");
         purgeArg(args, "-Dorg.lwjgl.system.SharedLibraryExtractPath=");
         purgeArg(args, "-Dio.netty.native.workdir=");

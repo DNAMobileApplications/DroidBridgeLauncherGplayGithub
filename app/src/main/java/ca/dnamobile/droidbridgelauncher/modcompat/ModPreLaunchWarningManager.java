@@ -58,7 +58,7 @@ public final class ModPreLaunchWarningManager {
             "distant_horizons_gc_mode_explanation";
 
     private static final int MAX_DISTANT_HORIZONS_GC_WARNING_SHOWS = 1;
-    private static final int MAX_VULKANMOD_12111_WARNING_SHOWS = 2;
+    private static final int MAX_VULKANMOD_12111_WARNING_SHOWS = 1;
     private static final int MAX_SODIUM_1165_WARNING_SHOWS = 2;
 
     public static final String NEUTRAL_ACTION_VULKAN_EXTENSION_CHECKER =
@@ -181,7 +181,7 @@ public final class ModPreLaunchWarningManager {
                 "This instance uses VulkanMod on Minecraft 1.21.11 or a 26.x+ Minecraft version. Before launching, use Vulkan Extension Checker to confirm your device supports Vulkan 1.2+ and Dynamic Rendering.",
                 "What to check",
                 "Open Vulkan Extension Checker and confirm both Vulkan 1.2 or newer and Dynamic Rendering are supported. If either one is missing, this VulkanMod instance may crash, fail to open Video Settings, or render incorrectly.",
-                "DroidBridge will only show this reminder twice. It appears again even after the first confirmation because many users skip warning text.",
+                "This reminder is shown only once. After it has been displayed, DroidBridge will not show it again.",
                 displayVersion(launchContext),
                 displayGameDirectory(gameDir),
                 "Install Checker",

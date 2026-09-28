@@ -132,6 +132,10 @@ public final class DriverPluginManager {
                 || DroidBridgeMesaSupport.isMesaZinkTurnipRenderer(renderer);
     }
 
+    public static boolean isKopperZinkRenderer(@Nullable RendererInterface renderer) {
+        return KopperZinkRenderer.isRenderer(renderer);
+    }
+
     @NonNull
     public static List<File> getSelectedDriverLibrarySearchPaths(@NonNull Context context, @Nullable RendererInterface renderer) {
         return getSelectedDriverLibrarySearchPaths(
@@ -193,6 +197,19 @@ public final class DriverPluginManager {
         boolean zink = isVulkanZinkRenderer(renderer);
         Driver driver = getSelectedDriver(context);
 
+        // Zink must not silently fall through to Android's Qualcomm ICD when the
+        // user has System Vulkan disabled. If the generic "Default Mesa driver" is
+        // selected, make bundled Turnip/Freedreno the effective Vulkan driver.
+        if (zink && !useSystemVulkan && driver.getType() == Driver.Type.DEFAULT_MESA) {
+            Driver bundledTurnip = MesaZinkTurnipDriver.createDriverIfAvailable(context);
+            if (bundledTurnip != null) {
+                driver = bundledTurnip;
+                Logging.i(TAG, "Zink: Default Mesa driver resolved to bundled Turnip/Freedreno");
+            } else {
+                Logging.i(TAG, "Zink: bundled Turnip/Freedreno unavailable; custom Vulkan cannot be forced");
+            }
+        }
+
         env.put("JAVA_LAUNCHER_USE_SYSTEM_VULKAN_DRIVER", useSystemVulkan ? "1" : "0");
         env.put("JAVA_LAUNCHER_VULKAN_DRIVER", useSystemVulkan ? SYSTEM_VULKAN_DRIVER : driver.getName());
 
@@ -212,19 +229,22 @@ public final class DriverPluginManager {
         }
 
         applyGlobalVulkanDriverEnvironment(context, env, driver, true, useSystemVulkan);
-        applyZinkMesaEnvironment(context, env);
+        if (isKopperZinkRenderer(renderer)) {
+            applyKopperZinkEnvironment(context, env);
+            // Kopper owns presentation through Mesa EGL/native-window. Never enable
+            // the legacy OSMesa RGBA workaround for this renderer.
+            DroidBridgeMesaSupport.applyZinkSurfaceWorkaround(null);
+        } else {
+            applyZinkMesaEnvironment(context, env);
 
-        // v56: first force the safe Android presentation path for all Vulkan Zink
-        // launches. The log proves Zink creates a context, while the Adreno 740
-        // visual issue remains in the final displayed frame.
-        DroidBridgeMesaSupport.applyZinkSurfaceWorkaround(renderer);
+            // v56: first force the safe Android presentation path for all legacy Vulkan Zink
+            // launches. The log proves Zink creates a context, while the Adreno 740
+            // visual issue remains in the final displayed frame.
+            DroidBridgeMesaSupport.applyZinkSurfaceWorkaround(renderer);
 
-        // v61: the legacy Freedreno UUID returns earlier as direct freedreno_kgsl.
-        // Do not alias it to Vulkan Zink here, otherwise swapped the tested renderer path libEGL_mesa
-        // and libgallium_dri payloads will never be used.
-
-        // Explicit custom Mesa-Zink entries can still use the experimental route.
-        DroidBridgeMesaSupport.applyZinkTurnipEnvironment(context, renderer, env);
+            // Explicit custom Mesa-Zink entries can still use the experimental route.
+            DroidBridgeMesaSupport.applyZinkTurnipEnvironment(context, renderer, env);
+        }
         if (useSystemVulkan) {
             applyGlobalVulkanDriverEnvironment(context, env, driver, true, true);
             env.put("JAVA_LAUNCHER_USE_SYSTEM_VULKAN_DRIVER", "1");
@@ -342,9 +362,19 @@ public final class DriverPluginManager {
             @NonNull Driver driver
     ) {
         File nativeDir = driver.getNativeLibraryDir();
+        File vulkan = driver.getVulkanLibrary();
         if (nativeDir != null && nativeDir.isDirectory()) {
             env.put("DRIVER_PATH", nativeDir.getAbsolutePath());
+            env.put("DROIDBRIDGE_TURNIP_DRIVER_DIR", nativeDir.getAbsolutePath());
         }
+        if (vulkan != null && vulkan.isFile()) {
+            env.put("DROIDBRIDGE_CUSTOM_VULKAN_DRIVER", vulkan.getAbsolutePath());
+            env.put("DROIDBRIDGE_TURNIP_DRIVER_LIBRARY", vulkan.getAbsolutePath());
+        }
+        env.put("DROIDBRIDGE_LOAD_TURNIP", "1");
+        env.put("DROIDBRIDGE_USE_CUSTOM_TURNIP", "1");
+        env.put("DROIDBRIDGE_ZINK_PREFER_SYSTEM_DRIVER", "");
+        env.put("POJAV_ZINK_PREFER_SYSTEM_DRIVER", "");
 
         File icd = buildIcdFile(context, driver);
         if (icd != null && icd.isFile()) {
@@ -356,7 +386,123 @@ public final class DriverPluginManager {
         }
     }
 
+    private static void applyKopperZinkEnvironment(
+            @NonNull Context context,
+            @NonNull LinkedHashMap<String, String> env
+    ) {
+        env.put("DROIDBRIDGE_RENDERER", KopperZinkRenderer.RENDERER_ID);
+        env.put("POJAV_RENDERER", KopperZinkRenderer.RENDERER_ID);
+        env.put("DROIDBRIDGE_RENDERER_LIBRARY", KopperZinkRenderer.MAIN_LIBRARY);
+        env.put("POJAV_RENDERER_LIBRARY", KopperZinkRenderer.MAIN_LIBRARY);
+        env.put("DROIDBRIDGE_EGL", KopperZinkRenderer.EGL_LIBRARY);
+        env.put("DROIDBRIDGE_EGL_LIBRARY", KopperZinkRenderer.EGL_LIBRARY);
+        env.put("POJAVEXEC_EGL", KopperZinkRenderer.EGL_LIBRARY);
+        env.put("POJAVEXEC_EGL_LIBRARY", KopperZinkRenderer.EGL_LIBRARY);
+
+        env.put("GALLIUM_DRIVER", "zink");
+        env.put("MESA_LOADER_DRIVER_OVERRIDE", "zink");
+        env.put("force_gl_vendor", "Mesa/DroidBridge");
+        env.put("MESA_ANDROID_NO_KMS_SWRAST", "1");
+        env.put("LIBGL_ES", "3");
+        env.put("MESA_GL_VERSION_OVERRIDE", "4.6");
+        env.put("MESA_GLSL_VERSION_OVERRIDE", "460");
+        env.put("MESA_NO_ERROR", "0");
+        env.put("LIBGL_NOERROR", "0");
+        env.put("ZINK_DESCRIPTORS", "lazy");
+        env.put("ZINK_DEBUG", "compact,noreorder");
+        env.put("mesa_glthread", "false");
+        env.put("MESA_VK_WSI_PRESENT_MODE", LauncherPreferences.isVulkanVsyncEnabled(context) ? "fifo" : "immediate");
+        env.put("DROIDBRIDGE_EGL_FORCE_RGBX8888", "1");
+        env.put("DROIDBRIDGE_EGL_FORCE_DESKTOP_GL", "1");
+        env.put("DROIDBRIDGE_MESA_DESKTOP_GL", "1");
+        env.put("DROIDBRIDGE_EGL_NO_SYSTEM_FALLBACK", "1");
+        env.put("DROIDBRIDGE_KOPPER_FORCE_NAMESPACE_VULKAN", "1");
+
+        // Load Mesa EGL inside the same Kopper/Turnip namespace. v14 gives that
+        // namespace a dedicated Vulkan-only alias directory first, then Android
+        // /system, so Mesa's own libvulkan lookup cannot escape to Qualcomm while
+        // platform dependencies still resolve against the real Android libraries.
+        File mesaNativeDir = DroidBridgeMesaSupport.resolveMesaNativeDir(context);
+        File mesaAliasDir = DroidBridgeMesaSupport.prepareMesaLibraryAliases(context, null);
+        File kopperVulkanAliasDir = new File(PathManager.DIR_CACHE, "kopper-vulkan-loader");
+        //noinspection ResultOfMethodCallIgnored
+        kopperVulkanAliasDir.mkdirs();
+        File staleKopperVulkanAlias = new File(kopperVulkanAliasDir, "libvulkan.so");
+        if (staleKopperVulkanAlias.isFile() && !staleKopperVulkanAlias.delete()) {
+            Logging.i(TAG, "Kopper Zink: could not delete stale Vulkan alias before launch: "
+                    + staleKopperVulkanAlias.getAbsolutePath());
+        }
+        env.put("DROIDBRIDGE_KOPPER_VULKAN_ALIAS_DIR", kopperVulkanAliasDir.getAbsolutePath());
+        String driverPath = env.get("DRIVER_PATH");
+        StringBuilder namespacePath = new StringBuilder(kopperVulkanAliasDir.getAbsolutePath())
+                .append(File.pathSeparator)
+                .append(mesaNativeDir.getAbsolutePath());
+        if (mesaAliasDir != null && mesaAliasDir.isDirectory()) {
+            namespacePath.append(File.pathSeparator).append(mesaAliasDir.getAbsolutePath());
+            env.put("DROIDBRIDGE_MESA_ALIAS_DIR", mesaAliasDir.getAbsolutePath());
+        }
+        if (driverPath != null && !driverPath.trim().isEmpty()
+                && !driverPath.equals(mesaNativeDir.getAbsolutePath())) {
+            namespacePath.append(File.pathSeparator).append(driverPath);
+        }
+        env.put("DROIDBRIDGE_MESA", "1");
+        env.put("DROIDBRIDGE_MESA_MODE", "kopper_zink");
+        env.put("DROIDBRIDGE_MESA_DRIVER", "zink");
+        env.put("DROIDBRIDGE_MESA_NATIVE_DIR", mesaNativeDir.getAbsolutePath());
+        env.put("DROIDBRIDGE_MESA_NAMESPACE", "1");
+        env.put("DROIDBRIDGE_MESA_NAMESPACE_PATH", namespacePath.toString());
+        env.put("DROIDBRIDGE_MESA_EGL", new File(mesaNativeDir, KopperZinkRenderer.EGL_LIBRARY).getAbsolutePath());
+        env.put("DROIDBRIDGE_MESA_EGL_SINGLE_INSTANCE", "1");
+
+        // Most important difference from legacy Vulkan Zink: no OSMesa aliases.
+        env.put("LIB_MESA_NAME", "");
+        env.put("OSMESA_LIB", "");
+        env.put("DROIDBRIDGE_OSMESA_LIBRARY", "");
+        env.put("OSMESA_LIBRARY", "");
+        env.put("LIBGL_OSMESA", "");
+        env.put("DROIDBRIDGE_ZINK_V57_FORCE_OSMESA_EGL", "");
+        env.put("DROIDBRIDGE_ZINK_V61_CLEAN_ZINK", "");
+        Logging.i(TAG, "Kopper Zink: dedicated Vulkan alias dir="
+                + kopperVulkanAliasDir.getAbsolutePath()
+                + " namespacePath=" + namespacePath);
+    }
+
     private static void applyZinkMesaEnvironment(@NonNull Context context, @NonNull LinkedHashMap<String, String> env) {
+        // Regular Vulkan Zink still uses the OSMesa frontend, but it must use the
+        // same private Android Vulkan-loader alias that Kopper uses when System
+        // Vulkan is disabled. The old generic unique-loader path can fail on
+        // Android 13 while resolving libhidlbase/native_handle_close, which makes
+        // OSMesa silently fall back to Qualcomm system Vulkan.
+        String turnipLibrary = env.get("DROIDBRIDGE_TURNIP_DRIVER_LIBRARY");
+        boolean customVulkanRequested = !"1".equals(env.get("DROIDBRIDGE_USE_SYSTEM_VULKAN"))
+                && "1".equals(env.get("DROIDBRIDGE_USE_CUSTOM_TURNIP"))
+                && turnipLibrary != null
+                && turnipLibrary.endsWith(MesaZinkTurnipDriver.LIB_VULKAN_FREEDRENO);
+        if (customVulkanRequested) {
+            File zinkVulkanAliasDir = new File(PathManager.DIR_CACHE, "zink-vulkan-loader");
+            //noinspection ResultOfMethodCallIgnored
+            zinkVulkanAliasDir.mkdirs();
+            File staleVulkanAlias = new File(zinkVulkanAliasDir, "libvulkan.so");
+            if (staleVulkanAlias.isFile() && !staleVulkanAlias.delete()) {
+                Logging.i(TAG, "Vulkan Zink: could not delete stale Vulkan alias before launch: "
+                        + staleVulkanAlias.getAbsolutePath());
+            }
+
+            // Reuse the already-shipped native alias-loader implementation. This
+            // flag name originated in the Kopper path, but the helper itself is
+            // renderer-agnostic: it creates a private libvulkan.so clone and hooks
+            // that loader to bundled Turnip/Freedreno before publishing VULKAN_PTR.
+            env.put("DROIDBRIDGE_KOPPER_FORCE_NAMESPACE_VULKAN", "1");
+            env.put("DROIDBRIDGE_KOPPER_VULKAN_ALIAS_DIR", zinkVulkanAliasDir.getAbsolutePath());
+            Logging.i(TAG, "Vulkan Zink: using private Turnip Vulkan-loader alias dir="
+                    + zinkVulkanAliasDir.getAbsolutePath());
+        } else {
+            // Do not leave strict custom-loader state behind when the user explicitly
+            // selected System Vulkan or the bundled Turnip payload is unavailable.
+            env.put("DROIDBRIDGE_KOPPER_FORCE_NAMESPACE_VULKAN", "");
+            env.put("DROIDBRIDGE_KOPPER_VULKAN_ALIAS_DIR", "");
+        }
+
         // v57: Always make the Java environment match the known-good Vulkan Zink
         // route. The latest Freedreno-alias log still had DROIDBRIDGE_RENDERER=vulkan_zink
         // but DROIDBRIDGE_EGL was overwritten back to libEGL_mesa.so, which made

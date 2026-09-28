@@ -12,7 +12,7 @@
 
 package ca.dnamobile.droidbridgelauncher.game;
 
-import android.app.Activity;
+import android.content.Context;
 import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
@@ -42,7 +42,7 @@ public final class FloatingGameSettingsOverlayController {
     private static final int BUTTON_SIZE_DP = 48;
     private static final int LARGE_FPS_BUTTON_OVERLAP_DP = BUTTON_SIZE_DP / 4;
 
-    @NonNull private final Activity activity;
+    @NonNull private final Context context;
     @NonNull private final ImageButton settingsButton;
     @NonNull private final Handler handler = new Handler(Looper.getMainLooper());
     private final int touchSlop;
@@ -50,7 +50,10 @@ public final class FloatingGameSettingsOverlayController {
     @Nullable private FrameLayout floatingContainer;
     @Nullable private TextView fpsText;
     private boolean attached;
+    private boolean suppressed;
+    private boolean fpsSuppressed;
     private boolean dragging;
+    private boolean capturedPhysicalMouseGestureActive;
     private float downRawX;
     private float downRawY;
     private int startLeft;
@@ -65,12 +68,12 @@ public final class FloatingGameSettingsOverlayController {
     };
 
     public FloatingGameSettingsOverlayController(
-            @NonNull Activity activity,
+            @NonNull Context context,
             @NonNull ImageButton settingsButton
     ) {
-        this.activity = activity;
+        this.context = context;
         this.settingsButton = settingsButton;
-        this.touchSlop = ViewConfiguration.get(activity).getScaledTouchSlop();
+        this.touchSlop = ViewConfiguration.get(context).getScaledTouchSlop();
     }
 
     public void attach() {
@@ -112,12 +115,27 @@ public final class FloatingGameSettingsOverlayController {
         refreshFromPreferences(true);
     }
 
+    /** The controls display owns this affordance while a dual-screen session is active. */
+    public void setSuppressed(boolean suppressed) {
+        if (this.suppressed == suppressed) return;
+        this.suppressed = suppressed;
+        refreshFromPreferences(true);
+    }
+
+    /** Allows the dual-screen deck to replace only the Android-font FPS badge with its own
+     * Minecraft-font counter while keeping the lower-screen settings button available. */
+    public void setFpsSuppressed(boolean suppressed) {
+        if (this.fpsSuppressed == suppressed) return;
+        this.fpsSuppressed = suppressed;
+        refreshFromPreferences(true);
+    }
+
     private void refreshFromPreferences(boolean applyPosition) {
         FrameLayout wrapper = ensureWrapped();
         if (wrapper == null) return;
 
-        boolean showButton = LauncherPreferences.isShowInGameSettingsButton(activity);
-        boolean showFps = GameOverlayPreferences.isShowGameFpsCounter(activity);
+        boolean showButton = !suppressed && LauncherPreferences.isShowInGameSettingsButton(context);
+        boolean showFps = !suppressed && !fpsSuppressed && GameOverlayPreferences.isShowGameFpsCounter(context);
         boolean showAnything = showButton || showFps;
 
         wrapper.setVisibility(showAnything ? View.VISIBLE : View.GONE);
@@ -150,7 +168,7 @@ public final class FloatingGameSettingsOverlayController {
         int index = parent.indexOfChild(settingsButton);
         parent.removeView(settingsButton);
 
-        FrameLayout wrapper = new FrameLayout(activity);
+        FrameLayout wrapper = new FrameLayout(context);
         wrapper.setTag(WRAPPER_TAG);
         wrapper.setClipChildren(false);
         wrapper.setClipToPadding(false);
@@ -209,7 +227,7 @@ public final class FloatingGameSettingsOverlayController {
             return text;
         }
 
-        TextView text = new TextView(activity);
+        TextView text = new TextView(context);
         text.setTag("game_settings_fps_badge");
         text.setBackgroundResource(R.drawable.bg_fps_badge);
         text.setGravity(Gravity.CENTER);
@@ -252,7 +270,7 @@ public final class FloatingGameSettingsOverlayController {
         // DroidBridgeSDL3Bootstrap.isRequested() made those valid samples
         // invisible to the launcher overlay. Always prefer a fresh file sample,
         // then fall back to the in-process native OpenGL counter.
-        int fps = DroidBridgeSdlFpsBridge.readCurrentFps(activity);
+        int fps = DroidBridgeSdlFpsBridge.readCurrentFps(context);
         if (fps <= 0) {
             try {
                 fps = Math.max(0, CallbackBridge.getCurrentFps());
@@ -266,7 +284,7 @@ public final class FloatingGameSettingsOverlayController {
     }
 
     private void applyFpsCounterSize(@NonNull TextView text, boolean showButton) {
-        String size = GameOverlayPreferences.getGameFpsCounterSize(activity);
+        String size = GameOverlayPreferences.getGameFpsCounterSize(context);
         boolean large = GameOverlayPreferences.FPS_SIZE_LARGE.equals(size);
         int minWidthDp;
         int horizontalPaddingDp;
@@ -357,6 +375,108 @@ public final class FloatingGameSettingsOverlayController {
         wrapper.requestLayout();
     }
 
+    /**
+     * Feeds the centered Android Virtual Mouse cursor into the same floating-Cog drag
+     * behavior used by normal touch. The coordinates are absolute screen coordinates
+     * because the physical pointer is captured and the real Android pointer is hidden.
+     * Returning true means the gesture belongs to the floating Cog and must not also
+     * be delivered to Minecraft.
+     */
+    public boolean dispatchCapturedPhysicalMouseGesture(
+            int action,
+            float screenX,
+            float screenY
+    ) {
+        FrameLayout wrapper = ensureWrapped();
+        if (wrapper == null || wrapper.getVisibility() != View.VISIBLE
+                || settingsButton.getVisibility() != View.VISIBLE || !settingsButton.isShown()) {
+            capturedPhysicalMouseGestureActive = false;
+            return false;
+        }
+
+        if (action == MotionEvent.ACTION_DOWN) {
+            if (!isScreenPointInsideView(settingsButton, screenX, screenY)) return false;
+
+            capturedPhysicalMouseGestureActive = true;
+            dragging = false;
+            downRawX = screenX;
+            downRawY = screenY;
+            startLeft = wrapper.getLeft();
+            startTop = wrapper.getTop();
+            settingsButton.setPressed(true);
+            if (settingsButton.getParent() != null) {
+                settingsButton.getParent().requestDisallowInterceptTouchEvent(true);
+            }
+            return true;
+        }
+
+        if (!capturedPhysicalMouseGestureActive) return false;
+
+        switch (action) {
+            case MotionEvent.ACTION_MOVE: {
+                float dx = screenX - downRawX;
+                float dy = screenY - downRawY;
+                if (!dragging && (Math.abs(dx) > touchSlop || Math.abs(dy) > touchSlop)) {
+                    dragging = true;
+                    forceAbsolutePosition(startLeft, startTop);
+                }
+                if (dragging) {
+                    settingsButton.setPressed(false);
+                    moveTo(Math.round(startLeft + dx), Math.round(startTop + dy), false);
+                } else {
+                    settingsButton.setPressed(isScreenPointInsideView(settingsButton, screenX, screenY));
+                }
+                return true;
+            }
+
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL: {
+                boolean wasDragging = dragging;
+                boolean click = action == MotionEvent.ACTION_UP
+                        && !wasDragging
+                        && isScreenPointInsideView(settingsButton, screenX, screenY);
+
+                capturedPhysicalMouseGestureActive = false;
+                dragging = false;
+                settingsButton.setPressed(false);
+                if (settingsButton.getParent() != null) {
+                    settingsButton.getParent().requestDisallowInterceptTouchEvent(false);
+                }
+
+                if (wasDragging) {
+                    saveCurrentPosition();
+                } else if (click) {
+                    settingsButton.performClick();
+                }
+                return true;
+            }
+
+            default:
+                return true;
+        }
+    }
+
+    private static boolean isScreenPointInsideView(
+            @NonNull View view,
+            float screenX,
+            float screenY
+    ) {
+        if (view.getVisibility() != View.VISIBLE || !view.isShown()
+                || view.getWidth() <= 0 || view.getHeight() <= 0) {
+            return false;
+        }
+        int[] location = new int[2];
+        try {
+            view.getLocationOnScreen(location);
+        } catch (Throwable ignored) {
+            return false;
+        }
+        return screenX >= location[0]
+                && screenX < location[0] + view.getWidth()
+                && screenY >= location[1]
+                && screenY < location[1] + view.getHeight();
+    }
+
     private boolean onFloatingOverlayTouch(View view, MotionEvent event) {
         FrameLayout wrapper = ensureWrapped();
         if (wrapper == null) return false;
@@ -408,15 +528,15 @@ public final class FloatingGameSettingsOverlayController {
         ViewGroup parent = parentViewGroup();
         if (wrapper == null || parent == null) return;
 
-        if (GameOverlayPreferences.hasCustomGameSettingsButtonPosition(activity)) {
-            int left = dpToPx(GameOverlayPreferences.getGameSettingsButtonCustomLeftDp(activity));
-            int top = dpToPx(GameOverlayPreferences.getGameSettingsButtonCustomTopDp(activity));
+        if (GameOverlayPreferences.hasCustomGameSettingsButtonPosition(context)) {
+            int left = dpToPx(GameOverlayPreferences.getGameSettingsButtonCustomLeftDp(context));
+            int top = dpToPx(GameOverlayPreferences.getGameSettingsButtonCustomTopDp(context));
             moveTo(left, top, false);
             return;
         }
 
         FrameLayout.LayoutParams lp = ensureFrameLayoutParams(wrapper);
-        lp.gravity = gravityForPlacement(GameOverlayPreferences.getGameSettingsButtonPlacement(activity));
+        lp.gravity = gravityForPlacement(GameOverlayPreferences.getGameSettingsButtonPlacement(context));
         int margin = dpToPx(DEFAULT_MARGIN_DP);
         lp.leftMargin = margin;
         lp.topMargin = margin;
@@ -459,7 +579,7 @@ public final class FloatingGameSettingsOverlayController {
         wrapper.setLayoutParams(lp);
 
         if (save) {
-            GameOverlayPreferences.setGameSettingsButtonCustomPosition(activity, pxToDp(left), pxToDp(top));
+            GameOverlayPreferences.setGameSettingsButtonCustomPosition(context, pxToDp(left), pxToDp(top));
         }
     }
 
@@ -500,11 +620,11 @@ public final class FloatingGameSettingsOverlayController {
     }
 
     private int dpToPx(int dp) {
-        return Math.round(dp * activity.getResources().getDisplayMetrics().density);
+        return Math.round(dp * context.getResources().getDisplayMetrics().density);
     }
 
     private int pxToDp(int px) {
-        return Math.round(px / activity.getResources().getDisplayMetrics().density);
+        return Math.round(px / context.getResources().getDisplayMetrics().density);
     }
 
     private static int clamp(int value, int min, int max) {

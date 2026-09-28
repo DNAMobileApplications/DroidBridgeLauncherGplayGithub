@@ -26,6 +26,7 @@ import androidx.appcompat.app.AlertDialog;
 
 import ca.dnamobile.droidbridgelauncher.feature.log.Logging;
 import ca.dnamobile.droidbridgelauncher.instance.LauncherInstance;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 /** Shared UI for post-modpack-install, manual migration, and compatibility repair. */
 public final class CleanroomMigrationDialog {
@@ -173,7 +174,7 @@ public final class CleanroomMigrationDialog {
                 dp(activity, 12)
         ));
 
-        AlertDialog progressDialog = new AlertDialog.Builder(activity)
+        AlertDialog progressDialog = new MaterialAlertDialogBuilder(activity)
                 .setView(root)
                 .setCancelable(false)
                 .create();
@@ -260,7 +261,7 @@ public final class CleanroomMigrationDialog {
         body.setLineSpacing(0f, 1.08f);
         card.addView(body, matchWrap());
 
-        AlertDialog.Builder builder = new AlertDialog.Builder(activity)
+        AlertDialog.Builder builder = new MaterialAlertDialogBuilder(activity)
                 .setView(root)
                 .setCancelable(cancelable)
                 .setPositiveButton(positiveLabel, (dialog, which) -> positiveAction.run());

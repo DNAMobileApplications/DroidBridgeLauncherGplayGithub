@@ -13,7 +13,7 @@
 package ca.dnamobile.droidbridgelauncher;
 
 import android.annotation.SuppressLint;
-import android.app.AlertDialog;
+import androidx.appcompat.app.AlertDialog;
 import android.content.Intent;
 import android.os.Bundle;
 import android.text.format.Formatter;
@@ -36,6 +36,7 @@ import ca.dnamobile.droidbridgelauncher.feature.unpack.RuntimeComponentMigration
 import ca.dnamobile.droidbridgelauncher.launcher.DroidBridgeLaunchActivity;
 import ca.dnamobile.droidbridgelauncher.runtime.Tools;
 import ca.dnamobile.droidbridgelauncher.utils.path.PathManager;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 @SuppressLint("CustomSplashScreen")
 public class SplashActivity extends AppCompatActivity {
@@ -261,7 +262,7 @@ public class SplashActivity extends AppCompatActivity {
         }
         message.append("\n").append(getString(R.string.component_installer_troubleshooting));
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.component_installer_missing_dialog_title)
                 .setMessage(message.toString().trim())
                 .setNegativeButton(R.string.component_installer_continue_button, (dialog, which) -> openMainActivity())

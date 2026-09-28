@@ -74,6 +74,8 @@ public final class GamepadInputController {
 
     private static volatile boolean loggedBtaRightStickAxisChoice;
     private static volatile boolean loggedBtaRightStickMenuSample;
+    private static volatile boolean loggedBtaLauncherMenuCursorRoute;
+    private static volatile boolean loggedBtaNativeMenuButtonCursorPin;
 
     private static final float DEADZONE = 0.25f;
     private static final float TRIGGER_THRESHOLD = 0.50f;
@@ -114,11 +116,21 @@ public final class GamepadInputController {
         void onRequestControllerMapping();
     }
 
+    /**
+     * Optional observer for gameplay actions that have already been resolved through
+     * the active controller profile. This is deliberately downstream of mapping so
+     * dual-screen HUD feedback never guesses what a physical shoulder/trigger means.
+     */
+    public interface MappedGameActionListener {
+        void onHotbarScroll(int delta);
+    }
+
     private final Choreographer choreographer = Choreographer.getInstance();
     @NonNull private final View hostView;
     private final Context context;
     private final GamepadMappingStore mappingStore;
     private final MappingRequestListener mappingRequestListener;
+    @Nullable private final MappedGameActionListener mappedGameActionListener;
     private final EnumMap<GamepadButton, ActiveMappedAction[]> activeButtonActions = new EnumMap<>(GamepadButton.class);
     private final Set<String> latchedToggleBindings = new HashSet<>();
     private final EnumMap<GamepadAction, Integer> mappedKeyHoldCounts = new EnumMap<>(GamepadAction.class);
@@ -178,7 +190,7 @@ public final class GamepadInputController {
     };
 
     public GamepadInputController(@NonNull View hostView) {
-        this(hostView, null);
+        this(hostView, null, null);
     }
 
     /**
@@ -249,6 +261,11 @@ public final class GamepadInputController {
         float hy = readAxis(event, axisDevice, MotionEvent.AXIS_HAT_Y);
 
         if (btaRoute && btaNativeControllerOwnsLauncherInput) {
+            // GameActivity routes BTA joystick MotionEvents through this static bridge
+            // before the instance controller gets a chance to copy the axes into its
+            // leftX/leftY fields. Keep the menu-stick samples here as well so the very
+            // first left-stick motion can drive DroidBridge's menu cursor immediately.
+            BtaNativeControllerBridge.updateLatestMenuLeftStick(lx, ly);
             BtaNativeControllerBridge.updateLatestMenuRightStickY(ry);
         }
 
@@ -302,6 +319,18 @@ public final class GamepadInputController {
 
         if (!btaRoute) {
             markControllerModButtonActivity();
+        }
+
+        // Keep BTA's native controller buttons intact. BTA 8 changes its input type
+        // to CONTROLLER when the first native menu button is consumed, and that mode
+        // transition can overwrite the menu cursor with an internal (0,0) baseline.
+        // Preserve the current real cursor across that short transition instead of
+        // translating the button into launcher keyboard/mouse mappings.
+        if (btaRoute
+                && btaNativeControllerOwnsLauncherInput
+                && action == KeyEvent.ACTION_DOWN
+                && !org.lwjgl.glfw.CallbackBridge.isGrabbing()) {
+            BtaNativeControllerBridge.armNativeMenuButtonCursorPin();
         }
 
         return BtaNativeControllerBridge.updateButton(device, event.getKeyCode(), action == KeyEvent.ACTION_DOWN);
@@ -448,10 +477,19 @@ public final class GamepadInputController {
 
 
     public GamepadInputController(@NonNull View hostView, MappingRequestListener mappingRequestListener) {
+        this(hostView, mappingRequestListener, null);
+    }
+
+    public GamepadInputController(
+            @NonNull View hostView,
+            @Nullable MappingRequestListener mappingRequestListener,
+            @Nullable MappedGameActionListener mappedGameActionListener
+    ) {
         this.hostView = hostView;
         context = hostView.getContext().getApplicationContext();
         mappingStore = GamepadMappingStore.get(hostView.getContext());
         this.mappingRequestListener = mappingRequestListener;
+        this.mappedGameActionListener = mappedGameActionListener;
 
         hostView.setFocusable(true);
         hostView.setFocusableInTouchMode(true);
@@ -460,7 +498,6 @@ public final class GamepadInputController {
         if (btaNativeControllerBridgeEnabled) {
             BtaNativeControllerBridge.initializeFromAndroidDevices(hostView.getContext());
         }
-
         org.lwjgl.glfw.CallbackBridge.sendCursorPos(
                 Math.max(1, org.lwjgl.glfw.CallbackBridge.windowWidth) / 2f,
                 Math.max(1, org.lwjgl.glfw.CallbackBridge.windowHeight) / 2f
@@ -679,6 +716,7 @@ public final class GamepadInputController {
 
         if (btaNativeControllerBridgeEnabled) {
             if (btaNativeControllerOwnsLauncherInput) {
+                BtaNativeControllerBridge.updateLatestMenuLeftStick(leftX, leftY);
                 BtaNativeControllerBridge.updateLatestMenuRightStickY(rightY);
             }
             if (BtaNativeControllerBridge.updateMotion(
@@ -864,6 +902,12 @@ public final class GamepadInputController {
                 if (gameMode) {
                     BtaNativeControllerBridge.resetMenuScroll();
                 } else {
+                    // BTA 8 resets its own controller virtual-cursor to (0,0) when
+                    // the first stick sample switches the game into CONTROLLER input
+                    // mode. Do not use that cursor on Android. Keep BTA's controller
+                    // device/buttons alive, but let DroidBridge own menu pointer motion
+                    // exactly like the normal launcher controller path.
+                    tickBtaMenuCursor(deltaScale);
                     BtaNativeControllerBridge.tickMenuScroll(deltaScale);
                 }
             }
@@ -1031,6 +1075,49 @@ public final class GamepadInputController {
         }
 
         return timedSuppressActive || requireRightStickNeutralBeforeCamera;
+    }
+
+    /**
+     * BTA 8 menu cursor workaround. BTA's internal controller cursor is initialized
+     * after the first controller-mode transition and can start at the top-left even
+     * though the visible mouse was centered. Move the real GLFW/LWJGL mouse directly
+     * from the LEFT stick instead, while updateMotion() feeds neutral stick axes to
+     * BTA whenever the mouse is ungrabbed. In grabbed gameplay BTA receives the real
+     * axes unchanged.
+     */
+    private void tickBtaMenuCursor(float deltaScale) {
+        // A native BTA menu button can switch BTA into CONTROLLER mode and reset its
+        // private cursor baseline after Android has already delivered the KeyEvent.
+        // Restore the real menu cursor before applying this frame's stick motion.
+        BtaNativeControllerBridge.restoreNativeMenuButtonCursorPinIfActive();
+
+        // BTA joystick events are normally consumed by GameActivity's static
+        // native-controller route before handleMotionEvent() updates this instance's
+        // leftX/leftY fields. Read the samples captured by that route instead. This is
+        // what makes the FIRST stick movement work without requiring a touch/button to
+        // wake a different input path first.
+        float x = BtaNativeControllerBridge.latestMenuLeftStickX();
+        float y = BtaNativeControllerBridge.latestMenuLeftStickY();
+        if (x == 0f && y == 0f) return;
+
+        float magnitude = Math.min(1f, (float) Math.sqrt(x * x + y * y));
+        float acceleration = Math.max(0.35f, magnitude * magnitude);
+        float sensitivity = BASE_MENU_CURSOR_SENSITIVITY
+                * mappingStore.getMenuCursorSensitivityMultiplier()
+                * menuCursorResolutionScale();
+        float dx = x * acceleration * sensitivity * deltaScale;
+        float dy = y * acceleration * sensitivity * deltaScale;
+
+        GamepadAction.moveCursorBy(dx, dy);
+        BtaNativeControllerBridge.refreshNativeMenuButtonCursorPinFromCurrent();
+
+        if (!loggedBtaLauncherMenuCursorRoute) {
+            loggedBtaLauncherMenuCursorRoute = true;
+            try {
+                Logger.appendToLog("BTA controller bridge: left-stick menu cursor owned by DroidBridge; BTA menu stick axes suppressed");
+            } catch (Throwable ignored) {
+            }
+        }
     }
 
     private void tickMenuCursor(float deltaScale) {
@@ -1369,6 +1456,14 @@ public final class GamepadInputController {
     }
 
     private void performMappedAction(@NonNull ActiveMappedAction mapped, boolean isDown) {
+        if (isDown && mapped.gameMode && mappedGameActionListener != null) {
+            if (mapped.action == GamepadAction.SCROLL_UP) {
+                mappedGameActionListener.onHotbarScroll(-1);
+            } else if (mapped.action == GamepadAction.SCROLL_DOWN) {
+                mappedGameActionListener.onHotbarScroll(1);
+            }
+        }
+
         if (mapped.pulseMenuMouseClick && mapped.action == GamepadAction.MOUSE_LEFT) {
             performPulseMenuMouseClick(isDown);
             return;
@@ -1619,8 +1714,18 @@ public final class GamepadInputController {
         private static volatile boolean loggedMotion;
         private static volatile boolean loggedButton;
         private static volatile boolean loggedMenuScroll;
+        private static volatile boolean menuCursorBaselineSeeded;
+        private static volatile float latestMenuLeftStickX;
+        private static volatile float latestMenuLeftStickY;
         private static volatile float latestMenuRightStickY;
+        private static volatile long nativeMenuButtonCursorPinUntilNanos;
+        private static volatile float nativeMenuButtonCursorPinX;
+        private static volatile float nativeMenuButtonCursorPinY;
         private static float menuScrollAccumulator;
+
+        // Long enough to straddle BTA's next one or two game-thread controller polls,
+        // but short enough that this never behaves like a persistent cursor lock.
+        private static final long NATIVE_MENU_BUTTON_CURSOR_PIN_NANOS = 350_000_000L;
 
         private BtaNativeControllerBridge() {
         }
@@ -1688,6 +1793,19 @@ public final class GamepadInputController {
             }
         }
 
+        static void updateLatestMenuLeftStick(float leftX, float leftY) {
+            latestMenuLeftStickX = leftX;
+            latestMenuLeftStickY = leftY;
+        }
+
+        static float latestMenuLeftStickX() {
+            return latestMenuLeftStickX;
+        }
+
+        static float latestMenuLeftStickY() {
+            return latestMenuLeftStickY;
+        }
+
         static void updateLatestMenuRightStickY(float rightY) {
             latestMenuRightStickY = rightY;
             if (!loggedBtaRightStickMenuSample && Math.abs(rightY) > DEADZONE) {
@@ -1696,8 +1814,143 @@ public final class GamepadInputController {
             }
         }
 
+        static void armNativeMenuButtonCursorPin() {
+            try {
+                if (!btaNativeControllerOwnsLauncherInput
+                        || org.lwjgl.glfw.CallbackBridge.isGrabbing()) {
+                    return;
+                }
+
+                float x = org.lwjgl.glfw.CallbackBridge.mouseX;
+                float y = org.lwjgl.glfw.CallbackBridge.mouseY;
+                int width = org.lwjgl.glfw.CallbackBridge.windowWidth > 1
+                        ? org.lwjgl.glfw.CallbackBridge.windowWidth
+                        : org.lwjgl.glfw.CallbackBridge.physicalWidth;
+                int height = org.lwjgl.glfw.CallbackBridge.windowHeight > 1
+                        ? org.lwjgl.glfw.CallbackBridge.windowHeight
+                        : org.lwjgl.glfw.CallbackBridge.physicalHeight;
+                if (width <= 1 || height <= 1) return;
+
+                if (Float.isNaN(x) || Float.isInfinite(x) || x < 0f || x >= width) {
+                    x = (width - 1f) * 0.5f;
+                }
+                if (Float.isNaN(y) || Float.isInfinite(y) || y < 0f || y >= height) {
+                    y = (height - 1f) * 0.5f;
+                }
+
+                nativeMenuButtonCursorPinX = x;
+                nativeMenuButtonCursorPinY = y;
+                nativeMenuButtonCursorPinUntilNanos = System.nanoTime()
+                        + NATIVE_MENU_BUTTON_CURSOR_PIN_NANOS;
+
+                // Synchronize every cursor cache immediately as well. The previous
+                // LWJGL2 native bridge fix makes this update BTA's Mouse state without
+                // generating a fake mouse event or stealing controller input type.
+                org.lwjgl.glfw.CallbackBridge.setCursorPosSilently(x, y);
+
+                if (!loggedBtaNativeMenuButtonCursorPin) {
+                    loggedBtaNativeMenuButtonCursorPin = true;
+                    appendBta("BTA controller bridge: native menu buttons preserved; cursor pin armed across CONTROLLER mode switch");
+                }
+            } catch (Throwable throwable) {
+                Logging.e(TAG, "BTA native menu-button cursor pin arm failed", throwable);
+            }
+        }
+
+        static void restoreNativeMenuButtonCursorPinIfActive() {
+            long until = nativeMenuButtonCursorPinUntilNanos;
+            if (until == 0L) return;
+            if (org.lwjgl.glfw.CallbackBridge.isGrabbing()) {
+                nativeMenuButtonCursorPinUntilNanos = 0L;
+                return;
+            }
+            if (System.nanoTime() >= until) {
+                nativeMenuButtonCursorPinUntilNanos = 0L;
+                return;
+            }
+
+            try {
+                org.lwjgl.glfw.CallbackBridge.setCursorPosSilently(
+                        nativeMenuButtonCursorPinX,
+                        nativeMenuButtonCursorPinY
+                );
+            } catch (Throwable throwable) {
+                Logging.e(TAG, "BTA native menu-button cursor pin restore failed", throwable);
+                nativeMenuButtonCursorPinUntilNanos = 0L;
+            }
+        }
+
+        static void refreshNativeMenuButtonCursorPinFromCurrent() {
+            long until = nativeMenuButtonCursorPinUntilNanos;
+            if (until == 0L || System.nanoTime() >= until) return;
+            if (org.lwjgl.glfw.CallbackBridge.isGrabbing()) {
+                nativeMenuButtonCursorPinUntilNanos = 0L;
+                return;
+            }
+            nativeMenuButtonCursorPinX = org.lwjgl.glfw.CallbackBridge.mouseX;
+            nativeMenuButtonCursorPinY = org.lwjgl.glfw.CallbackBridge.mouseY;
+        }
+
         static void resetMenuScroll() {
             menuScrollAccumulator = 0f;
+        }
+
+        /**
+         * BTA centers its visible controller cursor when the menu opens, but that
+         * visual center does not necessarily update DroidBridge's GLFW cursor cache.
+         * If the cache is still at its startup default (0,0), BTA's first controller
+         * motion can use that stale value as its virtual-mouse baseline and visibly
+         * snap the cursor to the top-left corner.
+         *
+         * Seed the Java/native GLFW caches silently before the first intentional BTA
+         * controller action. Do not emit a CursorPos callback: BTA already drew the
+         * cursor in the center and only needs glfwGetCursorPos() to agree with it.
+         */
+        private static void seedMenuCursorBaselineIfNeeded(boolean intentionalControllerActivity) {
+            if (!btaNativeControllerOwnsLauncherInput
+                    || menuCursorBaselineSeeded
+                    || !intentionalControllerActivity) {
+                return;
+            }
+
+            try {
+                if (org.lwjgl.glfw.CallbackBridge.isGrabbing()) {
+                    // Never recenter while BTA owns the cursor for in-game camera look.
+                    return;
+                }
+
+                int width = org.lwjgl.glfw.CallbackBridge.windowWidth > 1
+                        ? org.lwjgl.glfw.CallbackBridge.windowWidth
+                        : org.lwjgl.glfw.CallbackBridge.physicalWidth;
+                int height = org.lwjgl.glfw.CallbackBridge.windowHeight > 1
+                        ? org.lwjgl.glfw.CallbackBridge.windowHeight
+                        : org.lwjgl.glfw.CallbackBridge.physicalHeight;
+                if (width <= 1 || height <= 1) return;
+
+                float x = org.lwjgl.glfw.CallbackBridge.mouseX;
+                float y = org.lwjgl.glfw.CallbackBridge.mouseY;
+                boolean invalid = Float.isNaN(x) || Float.isInfinite(x)
+                        || Float.isNaN(y) || Float.isInfinite(y)
+                        || x < 0f || y < 0f || x >= width || y >= height;
+                boolean startupOrigin = Math.abs(x) < 0.001f && Math.abs(y) < 0.001f;
+
+                float baselineX = (invalid || startupOrigin) ? (width - 1f) * 0.5f : x;
+                float baselineY = (invalid || startupOrigin) ? (height - 1f) * 0.5f : y;
+
+                // Always write the Java cursor position back into the native GLFW
+                // cache once. GameActivity can already have centered the software
+                // cursor while BTA's first glfwGetCursorPos() still sees the native
+                // startup origin. This silent sync makes both sides agree before BTA
+                // consumes the first controller event.
+                org.lwjgl.glfw.CallbackBridge.setCursorPosSilently(baselineX, baselineY);
+                appendBta("BTA controller bridge: synchronized first menu cursor baseline="
+                        + baselineX + "," + baselineY + " size=" + width + "x" + height
+                        + (invalid || startupOrigin ? " source=center" : " source=existing"));
+
+                menuCursorBaselineSeeded = true;
+            } catch (Throwable throwable) {
+                Logging.e(TAG, "BTA menu cursor baseline seed failed", throwable);
+            }
         }
 
         static void tickMenuScroll(float deltaScale) {
@@ -1745,6 +1998,14 @@ public final class GamepadInputController {
                 boolean hatLeft
         ) {
             try {
+                seedMenuCursorBaselineIfNeeded(
+                        Math.abs(leftX) > DEADZONE
+                                || Math.abs(leftY) > DEADZONE
+                                || Math.abs(rightX) > DEADZONE
+                                || Math.abs(rightY) > DEADZONE
+                                || hatUp || hatRight || hatDown || hatLeft
+                );
+
                 if (device != null) {
                     org.lwjgl.glfw.CallbackBridge.setBtaGamepadIdentity(
                             device.getId(),
@@ -1752,14 +2013,17 @@ public final class GamepadInputController {
                             device.getDescriptor()
                     );
                 }
+                boolean launcherOwnsBtaMenuCursor = btaNativeControllerOwnsLauncherInput
+                        && !org.lwjgl.glfw.CallbackBridge.isGrabbing();
+
                 org.lwjgl.glfw.CallbackBridge.sendBtaGamepadMotion(
                         device != null ? device.getId() : -1,
                         device != null ? device.getName() : "DroidBridge Android Controller",
                         device != null ? device.getDescriptor() : "droidbridge-bta-controller",
-                        leftX,
-                        leftY,
-                        rightX,
-                        rightY,
+                        launcherOwnsBtaMenuCursor ? 0f : leftX,
+                        launcherOwnsBtaMenuCursor ? 0f : leftY,
+                        launcherOwnsBtaMenuCursor ? 0f : rightX,
+                        launcherOwnsBtaMenuCursor ? 0f : rightY,
                         leftTrigger,
                         rightTrigger,
                         hatUp,
@@ -1781,6 +2045,8 @@ public final class GamepadInputController {
 
         static boolean updateButton(@Nullable InputDevice device, int androidKeyCode, boolean down) {
             try {
+                seedMenuCursorBaselineIfNeeded(down);
+
                 if (device != null) {
                     org.lwjgl.glfw.CallbackBridge.setBtaGamepadIdentity(
                             device.getId(),

@@ -167,12 +167,56 @@ final class DualScreenItemDefinitionTranslator {
         if ("minecraft:select".equals(type)) {
             JSONObject selected = selectCase(node, nowMillis);
             if (selected == null) selected = node.optJSONObject("fallback");
+            if (selected == null) selected = firstCaseModel(node.optJSONArray("cases"));
             addNodeToPlan(plan, selected, inheritedTransform, nowMillis);
             return;
         }
 
-        // Leave unknown future item-definition types alone so the caller can fall back to
-        // normal JSON model handling or the older special renderer.
+        if ("minecraft:condition".equals(type)) {
+            // The bottom HUD does not have every transient ItemStack property available.
+            // Prefer the stable false branch, then true, so condition-based definitions
+            // still produce a real icon rather than an empty slot.
+            JSONObject selected = node.optJSONObject("on_false");
+            if (selected == null) selected = node.optJSONObject("on_true");
+            addNodeToPlan(plan, selected, inheritedTransform, nowMillis);
+            return;
+        }
+
+        if ("minecraft:range_dispatch".equals(type)) {
+            JSONObject selected = node.optJSONObject("fallback");
+            if (selected == null) {
+                JSONArray entries = node.optJSONArray("entries");
+                if (entries != null && entries.length() > 0) {
+                    JSONObject entry = entries.optJSONObject(0);
+                    if (entry != null) selected = entry.optJSONObject("model");
+                }
+            }
+            addNodeToPlan(plan, selected, inheritedTransform, nowMillis);
+            return;
+        }
+
+        // Future/pack-defined wrappers frequently keep their usable model in one of these
+        // conventional fields. Following them is safe and keeps unknown item-definition
+        // types from becoming a blank hotbar slot.
+        JSONObject fallback = node.optJSONObject("fallback");
+        if (fallback == null) fallback = node.optJSONObject("model");
+        if (fallback == null) fallback = node.optJSONObject("on_false");
+        if (fallback == null) fallback = node.optJSONObject("on_true");
+        if (fallback != null && fallback != node) {
+            addNodeToPlan(plan, fallback, inheritedTransform, nowMillis);
+        }
+    }
+
+    @Nullable
+    private static JSONObject firstCaseModel(@Nullable JSONArray cases) {
+        if (cases == null) return null;
+        for (int i = 0; i < cases.length(); i++) {
+            JSONObject c = cases.optJSONObject(i);
+            if (c == null) continue;
+            JSONObject model = c.optJSONObject("model");
+            if (model != null) return model;
+        }
+        return null;
     }
 
     @Nullable

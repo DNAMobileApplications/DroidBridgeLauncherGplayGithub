@@ -79,10 +79,90 @@ public final class ModpackSearchApiClient {
             int offset,
             @Nullable String sortKey
     ) throws Exception {
+        // Normal search is intentionally neutral. Developer picks now live in the
+        // user-controlled Favourites section instead of being injected/pinned at
+        // the top of every Modrinth/CurseForge result page.
         if (source == ModManagerSource.CURSEFORGE) {
-            return searchCurseForge(context, query, gameVersion, loader, limit, offset, sortKey, true);
+            return searchCurseForge(context, query, gameVersion, loader, limit, offset, sortKey, false);
         }
-        return searchModrinth(query, gameVersion, loader, limit, offset, sortKey, true);
+        return searchModrinth(query, gameVersion, loader, limit, offset, sortKey, false);
+    }
+
+    /** Resolve one persisted favourite to a fresh provider project row. */
+    @NonNull
+    public static ModrinthProject resolveFavourite(
+            @NonNull Context context,
+            @NonNull ModManagerSource source,
+            @NonNull ModpackFavouritesStore.FavouriteRecord record,
+            @Nullable String loader
+    ) throws Exception {
+        if (ModpackFavouritesStore.KEY_DEVELOPER_OPTIMOBILE.equals(record.key)) {
+            if (source == ModManagerSource.CURSEFORGE) {
+                ArrayList<String> ids = new ArrayList<>();
+                // Prefer the active loader's exact OptiMobile project first, then
+                // fall back to the stored record. This avoids showing the Fabric
+                // favourite when the modpack browser is filtered for Forge.
+                for (String id : featuredOptiMobileCurseForgeProjectIds(loader)) {
+                    if (!ids.contains(id)) ids.add(id);
+                }
+                if (!isBlank(record.projectId) && !ids.contains(record.projectId.trim())) {
+                    ids.add(record.projectId.trim());
+                }
+                for (String id : ids) {
+                    try {
+                        ModrinthProject project = getCurseForgeProject(context, id);
+                        if (isOptiMobileModpack(project)) return project;
+                    } catch (Throwable ignored) {
+                    }
+                }
+                throw new IOException("Unable to resolve favourite OptiMobile project on CurseForge.");
+            }
+
+            ArrayList<String> slugs = new ArrayList<>();
+            for (String slug : featuredOptiMobileModrinthSlugs(loader)) {
+                if (!slugs.contains(slug)) slugs.add(slug);
+            }
+            if (!isBlank(record.slug) && !slugs.contains(record.slug.trim())) {
+                slugs.add(record.slug.trim());
+            }
+            for (String slug : slugs) {
+                try {
+                    ModrinthProject project = new ModrinthApiClient().getProject(slug);
+                    if (isOptiMobileModpack(project)) return project;
+                } catch (Throwable ignored) {
+                }
+            }
+            throw new IOException("Unable to resolve favourite OptiMobile project on Modrinth.");
+        }
+
+        if (ModpackFavouritesStore.KEY_DEVELOPER_VULKAN_DROID.equals(record.key)) {
+            if (source == ModManagerSource.CURSEFORGE) {
+                String id = isBlank(record.projectId)
+                        ? FEATURED_VULKAN_DROID_CURSEFORGE_PROJECT_ID
+                        : record.projectId.trim();
+                ModrinthProject project = getCurseForgeProject(context, id);
+                applyFeaturedMetadata(project);
+                return project;
+            }
+            ModrinthProject project = new ModrinthApiClient().getProjectWithFallback(
+                    isBlank(record.projectId) ? FEATURED_VULKAN_DROID_MODRINTH_PROJECT_ID : record.projectId.trim(),
+                    isBlank(record.slug) ? FEATURED_VULKAN_DROID_SLUG : record.slug.trim()
+            );
+            applyFeaturedMetadata(project);
+            return project;
+        }
+
+        if (source == ModManagerSource.CURSEFORGE) {
+            if (isBlank(record.projectId)) {
+                throw new IOException("Favourite CurseForge project is missing its project id.");
+            }
+            return getCurseForgeProject(context, record.projectId.trim());
+        }
+
+        String primary = !isBlank(record.projectId) ? record.projectId.trim() : record.slug.trim();
+        String fallback = !isBlank(record.projectId) ? record.slug.trim() : null;
+        if (isBlank(primary)) throw new IOException("Favourite Modrinth project is missing its id and slug.");
+        return new ModrinthApiClient().getProjectWithFallback(primary, fallback);
     }
 
     @NonNull
@@ -131,8 +211,8 @@ public final class ModpackSearchApiClient {
         }
         if (includeFeatured && offset == 0) {
             ensureFeaturedModrinthModpack(gameVersion, loader, hits, limit);
+            pinFeaturedModpackFirst(hits, limit);
         }
-        pinFeaturedModpackFirst(hits, limit);
         return new SearchResult(hits, response.optInt("total_hits", hits.size()));
     }
 
@@ -178,8 +258,8 @@ public final class ModpackSearchApiClient {
         }
         if (includeFeatured && offset == 0) {
             ensureFeaturedCurseForgeModpack(context, gameVersion, loader, hits, limit);
+            pinFeaturedModpackFirst(hits, limit);
         }
-        pinFeaturedModpackFirst(hits, limit);
 
         JSONObject pagination = response.optJSONObject("pagination");
         int total = pagination == null ? hits.size() : pagination.optInt("totalCount", hits.size());

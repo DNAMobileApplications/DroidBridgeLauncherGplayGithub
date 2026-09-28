@@ -59,8 +59,7 @@ public final class AynThorDisplayCompat {
         // native window. On Thor firmware that mismatched pair can reach Mesa as an
         // invalid drawable and terminate inside libgallium_dri.so. Dual-screen mode
         // remains the safe path for true 1920x1080 output on the upper panel.
-        if (LauncherPreferences.isForceFullscreenMode(context)
-                || LauncherPreferences.isIgnoreDisplayCutout(context)) {
+        if (LauncherPreferences.isForceFullscreenMode(context)) {
             return null;
         }
 

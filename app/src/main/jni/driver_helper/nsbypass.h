@@ -21,5 +21,6 @@ bool linker_ns_load(const char* lib_search_path);
 void* linker_ns_dlopen(const char* name, int flag);
 void* linker_ns_dlopen_unique(const char* tmpdir, const char* name, int flag);
 void* linker_ns_dlopen_unique_named(const char* tmpdir, const char* name, const char* unique_soname, int flag);
+void* linker_ns_dlopen_alias_file(const char* alias_dir, const char* name, const char* output_name, const char* unique_soname, int flag);
 
 #endif //LINKER_NSBYPASS_H

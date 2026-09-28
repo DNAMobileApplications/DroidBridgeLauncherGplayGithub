@@ -14,7 +14,7 @@ package ca.dnamobile.droidbridgelauncher.modcompat;
 
 import android.Manifest;
 import android.app.Activity;
-import android.app.AlertDialog;
+import androidx.appcompat.app.AlertDialog;
 import android.content.Context;
 import android.content.Intent;
 import android.content.pm.PackageManager;
@@ -23,6 +23,7 @@ import android.os.Build;
 import android.provider.Settings;
 
 import androidx.annotation.NonNull;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 /**
  * Runtime permission helper for mods that need microphone access, including
@@ -65,7 +66,7 @@ public final class AndroidMicrophonePermission {
             return;
         }
 
-        new AlertDialog.Builder(activity)
+        new MaterialAlertDialogBuilder(activity)
                 .setTitle("Enable microphone")
                 .setMessage("Minecraft voice mods such as Verity and Simple Voice Chat need Android microphone permission before they can use your mic. This only enables microphone access while the game is running.")
                 .setPositiveButton("Allow", (dialog, which) -> request(activity))
@@ -74,7 +75,7 @@ public final class AndroidMicrophonePermission {
     }
 
     public static void showAlreadyGrantedDialog(@NonNull Activity activity) {
-        new AlertDialog.Builder(activity)
+        new MaterialAlertDialogBuilder(activity)
                 .setTitle("Microphone enabled")
                 .setMessage("Android microphone permission is already granted for DroidBridge.")
                 .setPositiveButton(android.R.string.ok, null)

@@ -12,7 +12,7 @@
 
 package ca.dnamobile.droidbridgelauncher.controls;
 
-import android.app.AlertDialog;
+import androidx.appcompat.app.AlertDialog;
 import android.content.Context;
 import android.graphics.Color;
 import android.graphics.drawable.GradientDrawable;
@@ -27,6 +27,9 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
 import java.util.List;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+
+import ca.dnamobile.droidbridgelauncher.ui.LauncherDialogStyle;
 
 /**
  * Shared full-screen keyboard-style key picker used by touch-control editing,
@@ -95,7 +98,7 @@ public final class TouchKeyPickerDialog {
         LinearLayout content = new LinearLayout(context);
         content.setOrientation(LinearLayout.VERTICAL);
         content.setPadding(dp(context, 10f), dp(context, 8f), dp(context, 10f), dp(context, 8f));
-        content.setBackground(makeKeyboardPickerBackground());
+        content.setBackground(makeKeyboardPickerBackground(context));
 
         LinearLayout titleRow = new LinearLayout(context);
         titleRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -104,13 +107,14 @@ public final class TouchKeyPickerDialog {
 
         TextView title = new TextView(context);
         title.setText(titleText);
-        title.setTextColor(Color.WHITE);
+        title.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         title.setTextSize(15f);
         title.setSingleLine(true);
         titleRow.addView(title, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         Button cancel = new Button(context);
         cancel.setText("Cancel");
+        cancel.setTextColor(LauncherDialogStyle.COLOR_ACCENT);
         cancel.setAllCaps(false);
         cancel.setMinHeight(0);
         cancel.setMinimumHeight(0);
@@ -216,7 +220,7 @@ public final class TouchKeyPickerDialog {
             addKeyboardPickerDynamicRows(context, keyboardPage, rowHeightPx, selection, extraKeys);
         }
 
-        AlertDialog dialog = new AlertDialog.Builder(context)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(context)
                 .setView(content)
                 .create();
         dialogRef[0] = dialog;
@@ -266,9 +270,10 @@ public final class TouchKeyPickerDialog {
     }
 
     @NonNull
-    private static GradientDrawable makeKeyboardPickerBackground() {
+    private static GradientDrawable makeKeyboardPickerBackground(@NonNull Context context) {
+        LauncherDialogStyle.syncTheme(context);
         GradientDrawable drawable = new GradientDrawable();
-        drawable.setColor(0xF4202124);
+        drawable.setColor(LauncherDialogStyle.COLOR_DIALOG_BG);
         drawable.setCornerRadius(0f);
         return drawable;
     }
@@ -276,7 +281,7 @@ public final class TouchKeyPickerDialog {
     private static void addKeyboardPickerSection(@NonNull Context context, @NonNull LinearLayout parent, @NonNull String title) {
         TextView section = new TextView(context);
         section.setText(title);
-        section.setTextColor(Color.WHITE);
+        section.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         section.setTextSize(12f);
         section.setSingleLine(true);
         section.setPadding(0, dp(context, 4f), 0, dp(context, 1f));
@@ -340,6 +345,7 @@ public final class TouchKeyPickerDialog {
         button.setMinHeight(0);
         button.setMinimumHeight(0);
         button.setPadding(dp(context, 2f), 0, dp(context, 2f), 0);
+        button.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         button.setBackground(makeKeyboardKeyBackground(context));
         button.setOnClickListener(v -> selection.onKeyPicked(key.keyCode));
         LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, Math.max(0.1f, key.widthDp));
@@ -350,9 +356,9 @@ public final class TouchKeyPickerDialog {
     @NonNull
     private static GradientDrawable makeKeyboardKeyBackground(@NonNull Context context) {
         GradientDrawable drawable = new GradientDrawable();
-        drawable.setColor(0xEE303236);
+        drawable.setColor(LauncherDialogStyle.COLOR_CARD_BG_PRESSED);
         drawable.setCornerRadius(dp(context, 7f));
-        drawable.setStroke(Math.max(1, dp(context, 1f)), 0x55FFFFFF);
+        drawable.setStroke(Math.max(1, dp(context, 1f)), LauncherDialogStyle.COLOR_CARD_STROKE);
         return drawable;
     }
 
@@ -360,7 +366,7 @@ public final class TouchKeyPickerDialog {
     private static TextView valueLabel(@NonNull Context context, @NonNull String text) {
         TextView label = new TextView(context);
         label.setText(text);
-        label.setTextColor(0xFFE0E0E0);
+        label.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         label.setTextSize(13f);
         label.setPadding(0, dp(context, 4f), 0, dp(context, 2f));
         return label;

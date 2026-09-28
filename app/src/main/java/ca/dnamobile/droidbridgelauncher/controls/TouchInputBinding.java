@@ -160,7 +160,8 @@ final class TouchInputBinding {
                 "Open Android keyboard",
                 "Open key sender keyboard",
                 "Joystick / WASD",
-                "Toggle virtual cursor"
+                "Toggle virtual cursor",
+                "Drawer / expand controls"
         };
     }
 
@@ -175,7 +176,8 @@ final class TouchInputBinding {
                 TouchControlActions.KEYBOARD,
                 TouchControlActions.KEY_SENDER_KEYBOARD,
                 TouchControlActions.JOYSTICK,
-                TouchControlActions.VIRTUAL_MOUSE
+                TouchControlActions.VIRTUAL_MOUSE,
+                TouchControlActions.DRAWER
         };
     }
 
@@ -195,6 +197,7 @@ final class TouchInputBinding {
         if (TouchControlActions.JOYSTICK.equals(action)) return EMPTY_OPTIONS;
         if (TouchControlActions.KEY_SENDER_KEYBOARD.equals(action)) return EMPTY_OPTIONS;
         if (TouchControlActions.VIRTUAL_MOUSE.equals(action)) return EMPTY_OPTIONS;
+        if (TouchControlActions.DRAWER.equals(action)) return EMPTY_OPTIONS;
         return EMPTY_OPTIONS;
     }
 

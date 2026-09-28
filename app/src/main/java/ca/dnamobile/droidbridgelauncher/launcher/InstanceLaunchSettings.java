@@ -593,33 +593,44 @@ public final class InstanceLaunchSettings {
         }
     }
 
+    /**
+     * Resolves the visible Graphics API label back to its stable persisted mode.
+     * MaterialAutoCompleteTextView may report an item position from a filtered
+     * adapter, so callers must not treat that position as the full-list index.
+     */
+    @NonNull
+    public static String graphicsApiModeForLabel(@Nullable String label) {
+        if (label == null) return GRAPHICS_API_INHERIT;
+        String[] labels = getGraphicsApiModeLabels();
+        for (int i = 0; i < labels.length; i++) {
+            if (labels[i].equals(label)) return graphicsApiModeForIndex(i);
+        }
+        return GRAPHICS_API_INHERIT;
+    }
+
     @NonNull
     public static String resolveEffectiveGraphicsApiMode(
             @NonNull Context context,
             @NonNull Settings settings
     ) {
         /*
-         * System Vulkan is a global launch-mode switch, not merely a Vulkan-loader
-         * preference. If it is enabled it must win over an old per-instance OpenGL
-         * value; otherwise a user can select OpenGL once, later enable System Vulkan,
-         * and still boot Minecraft's OpenGL backend while DroidBridge prepares Vulkan.
+         * An explicit per-instance Graphics API choice is authoritative. This must be
+         * evaluated before the global launcher switches; otherwise stale global state
+         * can silently replace the API the user selected for this instance.
          */
-        if (LauncherPreferences.isUseSystemVulkanDriver(context)) {
-            return GRAPHICS_API_VULKAN;
-        }
-
         String perInstance = sanitizeGraphicsApiMode(settings.graphicsApiMode);
         if (GRAPHICS_API_VULKAN.equals(perInstance)) return GRAPHICS_API_VULKAN;
         if (GRAPHICS_API_OPENGL.equals(perInstance)) return GRAPHICS_API_OPENGL;
 
         /*
-         * DroidBridge's Default means the safe/default Minecraft backend: OpenGL.
-         * Do not leave this as an unresolved "default" token on Minecraft 26.2+,
-         * because Mojang's crash-recovery/backend preference can otherwise select a
-         * different API than the launcher UI implies.
+         * "Default" intentionally remains DroidBridge's safe Minecraft backend.
+         * "Use launcher default" falls through to the mutually-exclusive global mode.
          */
         if (GRAPHICS_API_DEFAULT.equals(perInstance)) return GRAPHICS_API_OPENGL;
 
+        if (LauncherPreferences.isUseSystemVulkanDriver(context)) {
+            return GRAPHICS_API_VULKAN;
+        }
         if (LauncherPreferences.isUseOpenGlForMinecraft26Plus(context)) {
             return GRAPHICS_API_OPENGL;
         }
@@ -695,7 +706,8 @@ public final class InstanceLaunchSettings {
 
     /**
      * Resolves the renderer that must be used before native graphics libraries are loaded.
-     * Per-instance selection wins over the launcher default; BTA remains locked to Krypton.
+     * Per-instance selection wins over the launcher default. Legacy BTA remains
+     * locked to Krypton, while BTA 8+ respects the selected renderer.
      */
     @NonNull
     public static RendererInterface resolveEffectiveRendererForLaunch(

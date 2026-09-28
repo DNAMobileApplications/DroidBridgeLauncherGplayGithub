@@ -101,6 +101,11 @@ Library: %4$s
     <string name="game_settings_button_disabled">In-game settings COG hidden.</string>
     <string name="android_back_button_action_title">Android Back button</string>
     <string name="android_back_button_action_summary">Choose whether Android Back pauses Minecraft, opens the DroidBridge in-game launcher menu, or is disabled completely.</string>
+    <string name="in_game_menu_keyboard_shortcut_title">Keyboard shortcut for in-game launcher menu</string>
+    <string name="in_game_menu_keyboard_shortcut_summary">Physical-keyboard shortcut that opens the DroidBridge in-game launcher menu before the key reaches Minecraft. Default: Ctrl + Esc. You can choose another key or key combination.</string>
+    <string name="in_game_menu_keyboard_shortcut_disabled">Keyboard shortcut: Disabled</string>
+    <string name="in_game_menu_keyboard_shortcut_capture_title">Choose launcher menu shortcut</string>
+    <string name="in_game_menu_keyboard_shortcut_capture_summary">Press a physical-keyboard shortcut such as Ctrl + Esc, Alt + F8, or Ctrl + Shift + M. Modifier keys are captured together with the primary key. Home, Power, and App Switch are reserved by Android and cannot be used reliably.</string>
     <string name="android_back_button_action_dialog_summary">This applies to Android navigation Back and gesture Back while Minecraft is running.</string>
     <string name="android_back_action_pause_game">Default: Pause Minecraft</string>
     <string name="android_back_action_launcher_menu">Open in-game launcher menu</string>
@@ -113,12 +118,13 @@ Library: %4$s
     <string name="launcher_orientation_dialog_summary">Choose how the DroidBridge launcher rotates. Auto Rotate allows portrait, reverse portrait, landscape, and reverse landscape.</string>
     <string name="game_orientation_title">Game Orientation</string>
     <string name="game_orientation_summary">Current game orientation: %1$s. This controls Minecraft while it is running. Auto Rotate switches between landscape and reverse landscape.</string>
-    <string name="game_orientation_dialog_summary">Choose how Minecraft rotates while it is running. Auto Rotate keeps the game in landscape and switches between normal and reverse landscape.</string>
+    <string name="game_orientation_dialog_summary">Choose how Minecraft rotates while it is running. Auto Rotate keeps the game in landscape and switches between normal and reverse landscape. Portrait (Centered Game View) keeps the phone/tablet portrait while placing Minecraft in a smaller centered landscape-aspect view.</string>
     <string name="app_orientation_title">Screen orientation</string>
     <string name="app_orientation_auto_rotate">Auto Rotate</string>
     <string name="app_orientation_landscape">Landscape</string>
     <string name="app_orientation_reverse_landscape">Reverse Landscape</string>
     <string name="app_orientation_portrait">Portrait</string>
+    <string name="app_orientation_portrait_centered_game">Portrait (Centered Game View)</string>
     <string name="app_orientation_reverse_portrait">Reverse Portrait</string>
     <string name="app_orientation_summary_auto">Launcher auto-rotate allows all four rotations. In-game auto-rotate stays landscape or reverse landscape.</string>
     <string name="app_orientation_summary">Current orientation: %1$s. Launcher screens and Minecraft will stay in this orientation until changed.</string>

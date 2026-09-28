@@ -112,6 +112,11 @@ public class LwjglGlfwKeycode {
     public static final short GLFW_MOUSE_BUTTON_LEFT = 0;
     public static final short GLFW_MOUSE_BUTTON_RIGHT = 1;
     public static final short GLFW_MOUSE_BUTTON_MIDDLE = 2;
+    // Common thumb/side buttons: GLFW buttons 4 and 5 use zero-based indexes 3 and 4.
+    public static final short GLFW_MOUSE_BUTTON_4 = 3;
+    public static final short GLFW_MOUSE_BUTTON_5 = 4;
+    public static final short GLFW_MOUSE_BUTTON_BACK = GLFW_MOUSE_BUTTON_4;
+    public static final short GLFW_MOUSE_BUTTON_FORWARD = GLFW_MOUSE_BUTTON_5;
 
     public static final int GLFW_MOD_SHIFT = 0x1;
     public static final int GLFW_MOD_CONTROL = 0x2;

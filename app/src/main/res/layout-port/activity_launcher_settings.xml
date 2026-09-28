@@ -881,7 +881,22 @@
                             android:text="@string/launcher_logs_summary"
                             android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
 
+                        
                         <com.google.android.material.switchmaterial.SwitchMaterial
+                            android:id="@+id/switchShareLogChooser"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="10dp"
+                            android:text="@string/share_logs_dialog_setting_on" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="@string/share_logs_dialog_setting_summary"
+                            android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+
+<com.google.android.material.switchmaterial.SwitchMaterial
                             android:id="@+id/switchInstallNotifications"
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
@@ -1022,6 +1037,36 @@
                             android:text="@string/dual_screen_swap_summary"
                             android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
 
+                        <com.google.android.material.switchmaterial.SwitchMaterial
+                            android:id="@+id/switchDualScreenAspectRatio"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="10dp"
+                            android:text="Bottom-screen layout: 16:9" />
+
+                        <TextView
+                            android:id="@+id/textDualScreenAspectRatioSummary"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="Switch the lower-screen HUD and control safe area between widescreen 16:9 and classic 4:3 without stretching Minecraft items."
+                            android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+
+                        <com.google.android.material.switchmaterial.SwitchMaterial
+                            android:id="@+id/switchDualScreenFps"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="10dp"
+                            android:text="Bottom-screen FPS: Off" />
+
+                        <TextView
+                            android:id="@+id/textDualScreenFpsSummary"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="Show live FPS on the lower screen using the same Minecraft bitmap font as the Dual Screen HUD."
+                            android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+
                         <TextView
                             android:layout_width="match_parent"
                             android:layout_height="wrap_content"
@@ -1043,6 +1088,29 @@
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
                             android:text="@string/android_back_button_action_summary"
+                            android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="14dp"
+                            android:text="@string/in_game_menu_keyboard_shortcut_title"
+                            android:textAppearance="@style/TextAppearance.Material3.TitleSmall"
+                            android:textStyle="bold" />
+
+                        <com.google.android.material.button.MaterialButton
+                            android:id="@+id/buttonInGameMenuKeyboardShortcut"
+                            style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="8dp"
+                            android:text="@string/in_game_menu_keyboard_shortcut_disabled" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="@string/in_game_menu_keyboard_shortcut_summary"
                             android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
 
                         <TextView
@@ -1091,6 +1159,21 @@
                             android:layout_height="wrap_content"
                             android:layout_marginTop="2dp"
                             android:text="@string/game_orientation_dialog_summary"
+                            android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
+
+                        <com.google.android.material.switchmaterial.SwitchMaterial
+                            android:id="@+id/switchImeViewportPush"
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="12dp"
+                            android:text="@string/settings_game_ime_viewport_push_on"
+                            android:textStyle="bold" />
+
+                        <TextView
+                            android:layout_width="match_parent"
+                            android:layout_height="wrap_content"
+                            android:layout_marginTop="2dp"
+                            android:text="@string/settings_game_ime_viewport_push_summary"
                             android:textAppearance="@style/TextAppearance.Material3.BodySmall" />
 
 

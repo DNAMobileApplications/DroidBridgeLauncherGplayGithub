@@ -75,12 +75,19 @@ jint JNI_OnLoad(JavaVM* vm, void* reserved) {
     return JNI_VERSION_1_4;
 }
 
+/*
+ * These entry points are called from long-lived Android/native helper threads.
+ * The embedded OpenJDK attachment must be daemon: otherwise the native thread
+ * becomes a non-daemon Java Thread-N and DestroyJavaVM waits for it forever at
+ * Minecraft shutdown.  A daemon JNI attachment has identical JNI semantics
+ * while the VM is alive, but does not participate in the VM's shutdown gate.
+ */
 JNIEXPORT void JNICALL Java_ca_dnamobile_droidbridgelauncher_runtime_AWTInputBridge_nativeSendData(JNIEnv* env, jclass clazz, jint type, jint i1, jint i2, jint i3, jint i4) {
     if (runtimeJNIEnvPtr_INPUT == NULL) {
         if (runtimeJavaVMPtr == NULL) {
             return;
         } else {
-            (*runtimeJavaVMPtr)->AttachCurrentThread(runtimeJavaVMPtr, &runtimeJNIEnvPtr_INPUT, NULL);
+            (*runtimeJavaVMPtr)->AttachCurrentThreadAsDaemon(runtimeJavaVMPtr, &runtimeJNIEnvPtr_INPUT, NULL);
         }
     }
 
@@ -110,7 +117,7 @@ JNIEXPORT jintArray JNICALL Java_ca_dnamobile_droidbridgelauncher_runtime_utils_
         if (runtimeJavaVMPtr == NULL) {
             return NULL;
         } else {
-            (*runtimeJavaVMPtr)->AttachCurrentThread(runtimeJavaVMPtr, &runtimeJNIEnvPtr_GRAPHICS, NULL);
+            (*runtimeJavaVMPtr)->AttachCurrentThreadAsDaemon(runtimeJavaVMPtr, &runtimeJNIEnvPtr_GRAPHICS, NULL);
         }
     }
 
@@ -226,7 +233,7 @@ JNIEXPORT void JNICALL Java_ca_dnamobile_droidbridgelauncher_runtime_AWTInputBri
         if (runtimeJavaVMPtr == NULL) {
             return;
         } else {
-            (*runtimeJavaVMPtr)->AttachCurrentThread(runtimeJavaVMPtr, &runtimeJNIEnvPtr_INPUT, NULL);
+            (*runtimeJavaVMPtr)->AttachCurrentThreadAsDaemon(runtimeJavaVMPtr, &runtimeJNIEnvPtr_INPUT, NULL);
         }
     }
     const char* dataChars = clipboardData != NULL ? (*env)->GetStringUTFChars(env, clipboardData, NULL) : NULL;
@@ -244,7 +251,7 @@ Java_ca_dnamobile_droidbridgelauncher_runtime_AWTInputBridge_nativeMoveWindow(JN
         if (runtimeJavaVMPtr == NULL) {
             return;
         } else {
-            (*runtimeJavaVMPtr)->AttachCurrentThread(runtimeJavaVMPtr, &runtimeJNIEnvPtr_INPUT, NULL);
+            (*runtimeJavaVMPtr)->AttachCurrentThreadAsDaemon(runtimeJavaVMPtr, &runtimeJNIEnvPtr_INPUT, NULL);
         }
     }
     if(field_y == NULL) {

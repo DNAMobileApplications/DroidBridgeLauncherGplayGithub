@@ -52,6 +52,7 @@ public final class Renderers {
                 new KryptonRenderer(),
                 new GL4ESRenderer(),
                 new VulkanZinkRenderer(),
+                new KopperZinkRenderer(),
                 new VirGLRenderer(),
                 new DroidBridgeNativeGlfwKgslRenderer(),
                 new PanfrostRenderer()

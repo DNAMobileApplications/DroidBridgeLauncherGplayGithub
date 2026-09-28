@@ -22,6 +22,7 @@ import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 
 import ca.dnamobile.droidbridgelauncher.logs.LauncherLogManager;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 /**
  * Clean DroidBridge exit-message target for the native exit hook.
@@ -59,7 +60,7 @@ public class ErrorActivity extends AppCompatActivity {
         LauncherTheme.applyRainbowBackgroundIfNeeded(this);
 
         final String finalMessage = message;
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Game exited")
                 .setMessage(finalMessage + "\n\nShare latestlog.txt so the crash can be checked?")
                 .setPositiveButton(R.string.button_share_latest_log, (dialog, which) -> LauncherLogManager.shareLatestLog(this))

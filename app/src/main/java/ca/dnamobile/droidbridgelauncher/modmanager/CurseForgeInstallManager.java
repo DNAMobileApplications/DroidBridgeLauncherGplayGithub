@@ -15,10 +15,14 @@ package ca.dnamobile.droidbridgelauncher.modmanager;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import org.json.JSONObject;
+
 import java.io.File;
+import java.io.FileInputStream;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.Locale;
+import java.security.MessageDigest;
 
 public final class CurseForgeInstallManager {
     private static final ModManagerSource SOURCE = ModManagerSource.CURSEFORGE;
@@ -35,10 +39,23 @@ public final class CurseForgeInstallManager {
             @NonNull ModrinthProject project,
             @NonNull ModrinthInstallManager.Listener listener
     ) {
+        installLatestCompatible(api, gameDirectory, minecraftVersion, loader, contentType, project, null, listener);
+    }
+
+    public static void installLatestCompatible(
+            @NonNull CurseForgeApiClient api,
+            @NonNull File gameDirectory,
+            @NonNull String minecraftVersion,
+            @Nullable String loader,
+            @NonNull ModManagerContentType contentType,
+            @NonNull ModrinthProject project,
+            @Nullable File targetDirectoryOverride,
+            @NonNull ModrinthInstallManager.Listener listener
+    ) {
         try {
             HashSet<String> installingProjects = new HashSet<>();
             HashSet<String> installingVersions = new HashSet<>();
-            installProject(api, gameDirectory, minecraftVersion, loader, contentType, project, false, installingProjects, installingVersions, listener);
+            installProject(api, gameDirectory, minecraftVersion, loader, contentType, project, false, targetDirectoryOverride, installingProjects, installingVersions, listener);
             listener.onComplete("Installed " + project.title + ".");
         } catch (Throwable throwable) {
             listener.onError(throwable);
@@ -55,10 +72,24 @@ public final class CurseForgeInstallManager {
             @NonNull ModrinthVersion version,
             @NonNull ModrinthInstallManager.Listener listener
     ) {
+        installSpecificVersion(api, gameDirectory, minecraftVersion, loader, contentType, project, version, null, listener);
+    }
+
+    public static void installSpecificVersion(
+            @NonNull CurseForgeApiClient api,
+            @NonNull File gameDirectory,
+            @NonNull String minecraftVersion,
+            @Nullable String loader,
+            @NonNull ModManagerContentType contentType,
+            @NonNull ModrinthProject project,
+            @NonNull ModrinthVersion version,
+            @Nullable File targetDirectoryOverride,
+            @NonNull ModrinthInstallManager.Listener listener
+    ) {
         try {
             HashSet<String> installingProjects = new HashSet<>();
             HashSet<String> installingVersions = new HashSet<>();
-            installVersion(api, gameDirectory, minecraftVersion, loader, contentType, project, version, false, installingProjects, installingVersions, listener);
+            installVersion(api, gameDirectory, minecraftVersion, loader, contentType, project, version, false, targetDirectoryOverride, installingProjects, installingVersions, listener);
             listener.onComplete("Installed " + project.title + " " + version.versionNumber + ".");
         } catch (Throwable throwable) {
             listener.onError(throwable);
@@ -73,25 +104,36 @@ public final class CurseForgeInstallManager {
             @NonNull ModManagerContentType contentType,
             @NonNull ModrinthProject project,
             boolean dependency,
+            @Nullable File targetDirectoryOverride,
             @NonNull HashSet<String> installingProjects,
             @NonNull HashSet<String> installingVersions,
             @NonNull ModrinthInstallManager.Listener listener
     ) throws Exception {
-        if (!installingProjects.add(project.projectId)) return;
-
-        if (dependency && isProjectAlreadyInstalled(gameDirectory, contentType, project.projectId)) {
-            listener.onStatus("Dependency already installed: " + project.title);
+        String projectKey = project.projectId == null ? "" : project.projectId.trim();
+        if (projectKey.isEmpty()) projectKey = project.title;
+        if (!installingProjects.add(projectKey)) {
+            listener.onStatus("CurseForge dependency cycle already being resolved: " + project.title);
             return;
         }
 
-        listener.onStatus((dependency ? "Installing CurseForge dependency " : "Finding CurseForge version for ") + project.title + "...");
-        ArrayList<ModrinthVersion> versions = api.getProjectVersions(project.projectId, contentType, minecraftVersion, loader);
-        if (versions.isEmpty()) {
-            throw new IllegalStateException("No compatible CurseForge file found for " + project.title
-                    + " (Minecraft " + minecraftVersion + ", " + safeLoader(loader) + ").");
-        }
+        try {
+            if (dependency && isCompatibleProjectAlreadyInstalled(gameDirectory, contentType, project.projectId, minecraftVersion, loader)) {
+                listener.onStatus("Compatible CurseForge dependency already installed: " + project.title);
+                return;
+            }
 
-        installVersion(api, gameDirectory, minecraftVersion, loader, contentType, project, versions.get(0), dependency, installingProjects, installingVersions, listener);
+            listener.onStatus((dependency ? "Installing CurseForge dependency " : "Finding CurseForge version for ") + project.title + "...");
+            ArrayList<ModrinthVersion> versions = api.getProjectVersions(project.projectId, contentType, minecraftVersion, loader);
+            ModrinthVersion selected = firstCompatibleVersion(versions, minecraftVersion, loader, contentType);
+            if (selected == null) {
+                throw new IllegalStateException("No compatible CurseForge file found for " + project.title
+                        + " (Minecraft " + minecraftVersion + ", " + safeLoader(loader) + ").");
+            }
+
+            installVersion(api, gameDirectory, minecraftVersion, loader, contentType, project, selected, dependency, targetDirectoryOverride, installingProjects, installingVersions, listener);
+        } finally {
+            installingProjects.remove(projectKey);
+        }
     }
 
     private static void installVersion(
@@ -103,21 +145,25 @@ public final class CurseForgeInstallManager {
             @NonNull ModrinthProject project,
             @NonNull ModrinthVersion version,
             boolean dependency,
+            @Nullable File targetDirectoryOverride,
             @NonNull HashSet<String> installingProjects,
             @NonNull HashSet<String> installingVersions,
             @NonNull ModrinthInstallManager.Listener listener
     ) throws Exception {
-        if (!installingVersions.add(project.projectId + ":" + version.id)) return;
+        String versionKey = project.projectId + ":" + version.id;
+        if (!installingVersions.add(versionKey)) return;
 
-        if (dependency && isProjectAlreadyInstalled(gameDirectory, contentType, project.projectId)) {
-            listener.onStatus("Dependency already installed: " + project.title);
+        try {
+        if (dependency && isCompatibleProjectAlreadyInstalled(gameDirectory, contentType, project.projectId, minecraftVersion, loader)) {
+            listener.onStatus("Compatible CurseForge dependency already installed: " + project.title);
             return;
         }
 
         if (contentType.supportsDependencies()) {
             for (ModrinthDependency dep : version.dependencies) {
                 if (!dep.isRequired()) continue;
-                installDependency(api, gameDirectory, minecraftVersion, loader, contentType, dep, installingProjects, installingVersions, listener);
+                installDependency(api, gameDirectory, minecraftVersion, loader, contentType, project, dep,
+                        targetDirectoryOverride, installingProjects, installingVersions, listener);
             }
         }
 
@@ -126,7 +172,9 @@ public final class CurseForgeInstallManager {
             throw new IllegalStateException("No downloadable CurseForge file found for " + project.title + " " + version.versionNumber + ".");
         }
 
-        File targetDirectory = contentType.getTargetDirectory(gameDirectory);
+        File targetDirectory = targetDirectoryOverride != null
+                ? targetDirectoryOverride
+                : contentType.getTargetDirectory(gameDirectory, minecraftVersion);
         if (!targetDirectory.exists() && !targetDirectory.mkdirs()) {
             throw new IllegalStateException("Unable to create folder: " + targetDirectory.getAbsolutePath());
         }
@@ -135,7 +183,17 @@ public final class CurseForgeInstallManager {
 
         File target = uniqueTargetFile(targetDirectory, sanitizeFileName(file.filename));
         listener.onStatus("Downloading " + project.title + " " + version.versionNumber + " from CurseForge...");
-        api.downloadToFile(file.url, target);
+        try {
+            api.downloadToFile(file.url, target);
+            verifyDownloadedFile(target, file);
+        } catch (Throwable downloadFailure) {
+            if (target.exists() && !target.delete()) {
+                // A later retry uses a unique target name, so leaving the partial file
+                // behind is safe but worth preserving in the original exception path.
+            }
+            if (downloadFailure instanceof Exception) throw (Exception) downloadFailure;
+            throw new IllegalStateException("CurseForge download failed for " + project.title, downloadFailure);
+        }
 
         File cachedIconFile = cacheProjectIcon(api, gameDirectory, project);
         ModManagerManifest.recordInstalled(
@@ -152,6 +210,9 @@ public final class CurseForgeInstallManager {
                 project.iconUrl,
                 cachedIconFile
         );
+        } finally {
+            installingVersions.remove(versionKey);
+        }
     }
 
     private static void installDependency(
@@ -160,31 +221,156 @@ public final class CurseForgeInstallManager {
             @NonNull String minecraftVersion,
             @Nullable String loader,
             @NonNull ModManagerContentType contentType,
+            @NonNull ModrinthProject parentProject,
             @NonNull ModrinthDependency dep,
+            @Nullable File targetDirectoryOverride,
             @NonNull HashSet<String> installingProjects,
             @NonNull HashSet<String> installingVersions,
             @NonNull ModrinthInstallManager.Listener listener
     ) throws Exception {
-        if (dep.projectId == null || dep.projectId.trim().isEmpty()) return;
+        if (dep.projectId == null || dep.projectId.trim().isEmpty() || "0".equals(dep.projectId.trim())) {
+            throw new IllegalStateException("Required CurseForge dependency is missing a valid project id.");
+        }
 
         String dependencyProjectId = dep.projectId.trim();
-        if (isProjectAlreadyInstalled(gameDirectory, contentType, dependencyProjectId)) {
-            listener.onStatus("Dependency already installed: " + dependencyProjectId);
+        ModrinthProject project = api.getProject(dependencyProjectId);
+
+        if (ModDependencyCompatibility.shouldSkipRequiredDependency(parentProject, project, minecraftVersion)) {
+            listener.onStatus(ModDependencyCompatibility.skippedDependencyStatus(project, minecraftVersion));
             return;
         }
 
-        ModrinthProject project = api.getProject(dependencyProjectId);
-        installProject(api, gameDirectory, minecraftVersion, loader, contentType, project, true, installingProjects, installingVersions, listener);
+        if (isCompatibleProjectAlreadyInstalled(gameDirectory, contentType, dependencyProjectId, minecraftVersion, loader)) {
+            listener.onStatus("Compatible CurseForge dependency already installed: " + project.title);
+            return;
+        }
+
+        installProject(api, gameDirectory, minecraftVersion, loader, contentType, project, true, targetDirectoryOverride, installingProjects, installingVersions, listener);
     }
 
-    private static boolean isProjectAlreadyInstalled(
+
+    private static void verifyDownloadedFile(
+            @NonNull File target,
+            @NonNull ModrinthFile metadata
+    ) throws Exception {
+        if (!target.isFile() || target.length() <= 0L) {
+            throw new IllegalStateException("CurseForge download produced an empty file: " + target.getName());
+        }
+
+        if (metadata.size > 0L && target.length() != metadata.size) {
+            throw new IllegalStateException("CurseForge download size mismatch for " + target.getName()
+                    + ": expected=" + metadata.size + " actual=" + target.length());
+        }
+
+        if (metadata.sha1 == null || metadata.sha1.trim().isEmpty()) return;
+        String actual = sha1Hex(target);
+        if (!metadata.sha1.equalsIgnoreCase(actual)) {
+            throw new SecurityException("CurseForge SHA-1 mismatch for " + target.getName()
+                    + ": expected=" + metadata.sha1 + " actual=" + actual);
+        }
+    }
+
+    @NonNull
+    private static String sha1Hex(@NonNull File file) throws Exception {
+        MessageDigest digest = MessageDigest.getInstance("SHA-1");
+        try (FileInputStream input = new FileInputStream(file)) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                digest.update(buffer, 0, read);
+            }
+        }
+        StringBuilder out = new StringBuilder(40);
+        for (byte b : digest.digest()) {
+            out.append(String.format(Locale.US, "%02x", b & 0xff));
+        }
+        return out.toString();
+    }
+
+    @Nullable
+    private static ModrinthVersion firstCompatibleVersion(
+            @NonNull ArrayList<ModrinthVersion> versions,
+            @NonNull String minecraftVersion,
+            @Nullable String loader,
+            @NonNull ModManagerContentType contentType
+    ) {
+        for (ModrinthVersion candidate : versions) {
+            if (isVersionCompatible(candidate, minecraftVersion, loader, contentType)) return candidate;
+        }
+        return null;
+    }
+
+    private static boolean isVersionCompatible(
+            @NonNull ModrinthVersion version,
+            @NonNull String minecraftVersion,
+            @Nullable String loader,
+            @NonNull ModManagerContentType contentType
+    ) {
+        boolean hasMinecraftVersionMetadata = false;
+        boolean minecraftMatches = false;
+        for (String candidate : version.gameVersions) {
+            String value = candidate == null ? "" : candidate.trim();
+            if (!looksLikeMinecraftVersion(value)) continue;
+            hasMinecraftVersionMetadata = true;
+            if (minecraftVersion.equals(value)) minecraftMatches = true;
+        }
+        if (hasMinecraftVersionMetadata && !minecraftMatches) return false;
+        if (!contentType.isLoaderSpecific()) return true;
+
+        String wanted = ModrinthApiClient.normalizeLoader(loader);
+        if (wanted.isEmpty() || "vanilla".equals(wanted)) return true;
+
+        boolean hasLoaderMetadata = false;
+        for (String candidate : version.loaders) {
+            String normalized = ModrinthApiClient.normalizeLoader(candidate);
+            if (normalized.isEmpty()) continue;
+            hasLoaderMetadata = true;
+            if (wanted.equals(normalized)) return true;
+        }
+        // CurseForge also exposes loader labels in gameVersions for some older files.
+        for (String candidate : version.gameVersions) {
+            String normalized = ModrinthApiClient.normalizeLoader(candidate);
+            if (!isKnownLoader(normalized)) continue;
+            hasLoaderMetadata = true;
+            if (wanted.equals(normalized)) return true;
+        }
+        // The server-side modLoaderType filter is authoritative when a file omits loader metadata.
+        return !hasLoaderMetadata;
+    }
+
+    private static boolean isKnownLoader(@Nullable String value) {
+        return "forge".equals(value) || "fabric".equals(value) || "quilt".equals(value) || "neoforge".equals(value);
+    }
+
+    private static boolean looksLikeMinecraftVersion(@Nullable String value) {
+        if (value == null) return false;
+        String trimmed = value.trim();
+        if (trimmed.isEmpty()) return false;
+        return trimmed.matches("[0-9]+\\.[0-9]+(?:\\.[0-9]+)?(?:[-+._A-Za-z0-9]*)?");
+    }
+
+    private static boolean isCompatibleProjectAlreadyInstalled(
             @NonNull File gameDirectory,
             @NonNull ModManagerContentType contentType,
-            @Nullable String projectId
+            @Nullable String projectId,
+            @NonNull String minecraftVersion,
+            @Nullable String loader
     ) {
-        return projectId != null
-                && !projectId.trim().isEmpty()
-                && ModManagerManifest.isProjectInstalled(gameDirectory, contentType, SOURCE.getId(), projectId.trim());
+        if (projectId == null || projectId.trim().isEmpty()) return false;
+        JSONObject entry = ModManagerManifest.getInstalledEntryForProject(
+                gameDirectory, contentType, SOURCE, projectId.trim());
+        if (entry == null) return false;
+
+        String installedMinecraft = entry.optString("minecraftVersion", "").trim();
+        String installedLoader = ModrinthApiClient.normalizeLoader(entry.optString("loader", ""));
+        String wantedMinecraft = minecraftVersion.trim();
+        String wantedLoader = ModrinthApiClient.normalizeLoader(loader);
+
+        if (installedMinecraft.isEmpty() || !installedMinecraft.equals(wantedMinecraft)) return false;
+        if (contentType.isLoaderSpecific() && !wantedLoader.isEmpty() && !"vanilla".equals(wantedLoader)) {
+            if (installedLoader.isEmpty() || !wantedLoader.equals(installedLoader)) return false;
+        }
+        return true;
     }
 
     @Nullable

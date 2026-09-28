@@ -51,6 +51,7 @@ import ca.dnamobile.droidbridgelauncher.instance.InstanceVersionUpdater;
 import ca.dnamobile.droidbridgelauncher.modmanager.ModpackUpdateManager;
 import ca.dnamobile.droidbridgelauncher.utils.FullscreenUtils;
 import ca.dnamobile.droidbridgelauncher.utils.path.PathManager;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 public final class ModpackUpdateDetailsActivity extends AppCompatActivity {
     public static final String PLATFORM_MODRINTH = "modrinth";
@@ -602,7 +603,7 @@ public final class ModpackUpdateDetailsActivity extends AppCompatActivity {
             labels[i] = filter + "  ·  " + countForFilter(filter) + " versions";
         }
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle("Pick Minecraft Version")
                 .setItems(labels, (unused, which) -> {
                     selectedFilter = minecraftFilters.get(which);
@@ -640,7 +641,7 @@ public final class ModpackUpdateDetailsActivity extends AppCompatActivity {
         message.append("\n\nThe old mods, shaderpacks, and resourcepacks folders will be deleted and rebuilt from the selected pack so stale files do not survive the update.");
         message.append("\n\nExisting saves stay in place. If this pack includes saves, those saves are installed too. Conflicting bundled worlds are copied with a new name instead of overwriting your worlds.");
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle("Update Modpack")
                 .setMessage(message.toString())
                 .setNegativeButton(android.R.string.cancel, null)

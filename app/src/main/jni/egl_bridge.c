@@ -77,6 +77,14 @@ typedef EGLint (*db_egl_get_error_fn)(void);
 
 static void* db_native_glfw_handle = NULL;
 static int db_native_glfw_surface_attached = 0;
+/*
+ * Set only after droidbridgeCreateContext() has successfully rebound the
+ * NativeGLFW EGL context on Minecraft's game/render thread. 26.x may resolve
+ * libGLDroidBridge.so after this point; releasing the context from the linker
+ * hook then leaves LWJGL GL.createCapabilities() with no current context.
+ * Keep the old handoff behavior only for the true pre-context preload path.
+ */
+static int db_native_glfw_game_context_ready = 0;
 /* Snapshot 4+ SDL3 pre-context ownership. This extra ANativeWindow reference and
  * the NativeGLFW EGLWindowSurface exist only while LWJGL resolves Mesa symbols.
  * They must be destroyed before SDL3 calls eglCreateWindowSurface on the same
@@ -649,21 +657,31 @@ __attribute__((visibility("default"), used)) void* droidbridge_runtime_native_gl
     printf("DroidBridgeNativeGLFW: droidbridge_runtime acquire_opengl_handle returned %p\n", egl_handle);
 
     /*
-     * Only Minecraft 26.x uses the split bootstrap/render-thread flow that
-     * requires an explicit handoff here. Older LWJGLX and standard LWJGL paths
-     * call GL.createCapabilities() immediately after this function returns and
-     * therefore require the context to remain current.
+     * 26.x can hit this function in two different phases:
+     *   1) an early preload phase before the game/render context exists, where
+     *      the temporary context must still be handed off;
+     *   2) the render-thread libGLDroidBridge.so resolve after
+     *      droidbridgeCreateContext(), where LWJGL calls GL.createCapabilities()
+     *      immediately after this function returns.
+     *
+     * Releasing in phase (2) is the crash seen on Freedreno: the log reports a
+     * successful makeCurrent/acquire, then explicitly clears the context, and
+     * GL.createCapabilities() fails with "There is no OpenGL context current".
      */
     if (egl_handle != NULL) {
-        if (db_native_glfw_linkerhook_handoff_enabled()) {
+        if (db_native_glfw_linkerhook_handoff_enabled()
+                && !db_native_glfw_game_context_ready) {
             (void) db_native_glfw_release_current_context("linkerhook-acquire-after");
             db_native_glfw_destroy_sdl3_precontext_surface(
                     handle, "linkerhook-acquire-after");
         } else {
-            printf("DroidBridgeNativeGLFW: keeping linkerhook EGL context current for legacy/standard LWJGL path\n");
+            printf("DroidBridgeNativeGLFW: keeping linkerhook EGL context current gameContextReady=%d handoffPolicy=%d\n",
+                   db_native_glfw_game_context_ready,
+                   db_native_glfw_linkerhook_handoff_enabled() ? 1 : 0);
             fflush(stdout);
         }
-    } else if (db_native_glfw_linkerhook_handoff_enabled()) {
+    } else if (db_native_glfw_linkerhook_handoff_enabled()
+            && !db_native_glfw_game_context_ready) {
         /* Do not leak a temporary window surface when provider acquisition
          * fails and the linker hook falls back to another OpenGL route. */
         (void) db_native_glfw_release_current_context("linkerhook-acquire-failed");
@@ -680,6 +698,11 @@ int droidbridge_runtime_native_glfw_release_current_context(void) {
         fflush(stdout);
         return 0;
     }
+    if (db_native_glfw_game_context_ready) {
+        printf("DroidBridgeNativeGLFW: external linkerhook context release skipped; game/render context is already current\n");
+        fflush(stdout);
+        return 0;
+    }
     return db_native_glfw_release_current_context("external-linkerhook-release");
 }
 
@@ -690,6 +713,13 @@ struct PotatoBridge potatoBridge;
 void* loadTurnipVulkan(void);
 void calculateFPS(void);
 static void droidbridgeFramePaceIfNeeded(const char* reason, bool vulkanFrame);
+static int64_t droidbridgeMonotonicNs(void);
+static void droidbridgeResetGlAdaptivePacing(void);
+static void droidbridgeObserveGlSwap(
+        int64_t presentEntryNs,
+        int64_t swapStartNs,
+        int64_t swapEndNs);
+static bool env_enabled(const char* value);
 void load_vulkan(void);
 
 EXTERNAL_API void droidbridgeTerminate(void) {
@@ -853,6 +883,25 @@ Java_ca_dnamobile_droidbridgelauncher_runtime_utils_JREUtils_resizeBridgeWindow(
 }
 
 EXTERNAL_API void* droidbridgeGetCurrentContext(void) {
+    /*
+     * SDL3/Vulkan Minecraft 26.3 does not create an OpenGL context. Some mods
+     * still probe GLFW's current-context entry point during renderer/resource
+     * initialization. GLFW semantics for a GLFW_NO_API/Vulkan window are to
+     * report no current OpenGL context, not to manufacture one.
+     *
+     * On the SDL3-only Vulkan route droidbridgeInitOpenGL() may never install a
+     * legacy bridge table, leaving br_get_current == NULL. Calling it here used
+     * to jump to address 0x0 (seen as droidbridgeGetCurrentContext+0xb0 in the
+     * JVM native crash log). Keep this query side-effect free and null-safe.
+     */
+    if (droidbridge_environ == NULL) {
+        return NULL;
+    }
+
+    if (droidbridge_environ->config_renderer == RENDERER_VULKAN) {
+        return NULL;
+    }
+
     if (db_native_glfw_enabled()) {
         void* handle = db_native_glfw_open();
         if (handle != NULL) {
@@ -867,7 +916,12 @@ EXTERNAL_API void* droidbridgeGetCurrentContext(void) {
         return virglGetCurrentContext();
     }
 
-    return br_get_current();
+    if (br_get_current != NULL) {
+        return br_get_current();
+    }
+
+    /* No legacy GL bridge exists (normal for SDL3/Vulkan). */
+    return NULL;
 }
 
 extern void* droidbridge_vulkan_compat_select_loader(void* realLoaderHandle);
@@ -908,15 +962,54 @@ static void* try_open_vulkan_loader(void) {
 
 void load_vulkan(void) {
     const char* zinkPreferSystemDriver = getenv("DROIDBRIDGE_ZINK_PREFER_SYSTEM_DRIVER");
+    const bool explicitSystemVulkan = env_enabled(getenv("DROIDBRIDGE_USE_SYSTEM_VULKAN"));
+    const bool preferSystemVulkan = explicitSystemVulkan
+            || (zinkPreferSystemDriver != NULL && zinkPreferSystemDriver[0] != '\0'
+                && strcmp(zinkPreferSystemDriver, "0") != 0);
+    const bool kopperRequireCustom = env_enabled(getenv("DROIDBRIDGE_KOPPER_FORCE_NAMESPACE_VULKAN"))
+            && !preferSystemVulkan;
     int deviceApiLevel = android_get_device_api_level();
 
-    if (zinkPreferSystemDriver == NULL && deviceApiLevel >= 28) {
+    if (!preferSystemVulkan && deviceApiLevel >= 28) {
 #ifdef ADRENO_POSSIBLE
+        /*
+         * v9: Do not introduce a new DT_NEEDED ABI from libdroidbridge_runtime
+         * to driver_helper just for Kopper. The v8 direct reference to
+         * loadTurnipVulkanKopper() made the entire runtime fail dlopen when an
+         * incrementally packaged driver_helper did not yet export that symbol.
+         *
+         * DROIDBRIDGE_KOPPER_FORCE_NAMESPACE_VULKAN is already set before this
+         * call, so the long-standing loadTurnipVulkan() ABI selects the Kopper
+         * original-SONAME namespace path in the updated helper. Successful
+         * helper setup publishes DROIDBRIDGE_KOPPER_TURNIP_READY=1.
+         */
         void* result = loadTurnipVulkan();
         if (result != NULL) {
-            printf("AdrenoSupp: Loaded Turnip, loader address: %p\n", result);
+            const bool kopperReady = env_enabled(getenv("DROIDBRIDGE_KOPPER_TURNIP_READY"));
+            printf("AdrenoSupp-v80: Loaded Turnip, loader address: %p kopper=%d ready=%d\n",
+                   result,
+                   kopperRequireCustom ? 1 : 0,
+                   kopperReady ? 1 : 0);
+            fflush(stdout);
+            if (kopperRequireCustom && !kopperReady) {
+                printf("AdrenoSupp-v80: Kopper Turnip handle exists but namespace readiness was not published; refusing ambiguous/system Vulkan path.\n");
+                fflush(stdout);
+                set_vulkan_ptr(NULL);
+                return;
+            }
             void* selected = droidbridge_vulkan_compat_select_loader(result);
             set_vulkan_ptr(selected);
+            if (kopperRequireCustom) {
+                printf("AdrenoSupp-v84: Kopper VULKAN_PTR handoff=%s loader=%p strategy=alias-visible-private-loader\n",
+                       getenv("VULKAN_PTR") != NULL ? getenv("VULKAN_PTR") : "<unset>",
+                       selected);
+                fflush(stdout);
+            }
+            return;
+        }
+        if (kopperRequireCustom) {
+            printf("AdrenoSupp-v75: Kopper requires custom Turnip; refusing system Qualcomm fallback.\n");
+            set_vulkan_ptr(NULL);
             return;
         }
 #endif
@@ -1075,7 +1168,7 @@ int droidbridgeInitOpenGL(void) {
     const char* renderer_mesa_mode = getenv("DROIDBRIDGE_RENDERER_MESA_MODE");
     const char* droidbridge_mesa = getenv("DROIDBRIDGE_MESA");
 
-    printf("EGLBridge-v69: env DROIDBRIDGE_RENDERER=%s DROIDBRIDGE_MESA_MODE=%s DROIDBRIDGE_MESA_DRIVER=%s DROIDBRIDGE_RENDERER_MESA_MODE=%s DROIDBRIDGE_MESA=%s DROIDBRIDGE_EGL=%s LIB_MESA_NAME=%s\n",
+    printf("EGLBridge-v70: env DROIDBRIDGE_RENDERER=%s DROIDBRIDGE_MESA_MODE=%s DROIDBRIDGE_MESA_DRIVER=%s DROIDBRIDGE_RENDERER_MESA_MODE=%s DROIDBRIDGE_MESA=%s DROIDBRIDGE_EGL=%s LIB_MESA_NAME=%s\n",
            renderer != NULL ? renderer : "<null>",
            mesa_mode != NULL ? mesa_mode : "<null>",
            mesa_driver != NULL ? mesa_driver : "<null>",
@@ -1107,7 +1200,7 @@ int droidbridgeInitOpenGL(void) {
          * keeps the same sky/cloud artifacts on 8 Gen 2 and can black-screen on
          * 8 Gen 3.
          */
-        printf("EGLBridge-v69: direct Freedreno direct KGSL selected; using libEGL_mesa.so with MESA_LOADER_DRIVER_OVERRIDE=kgsl (no Turnip/Zink).\n");
+        printf("EGLBridge-v70: direct Freedreno direct KGSL selected; using libEGL_mesa.so with MESA_LOADER_DRIVER_OVERRIDE=kgsl (no Turnip/Zink).\n");
         set_vulkan_ptr(NULL);
         setenv("DROIDBRIDGE_MESA", "1", 1);
         setenv("DROIDBRIDGE_MESA_MODE", "freedreno_kgsl", 1);
@@ -1156,6 +1249,50 @@ int droidbridgeInitOpenGL(void) {
         load_vulkan();
     }
 
+    if (renderer != NULL && strcmp(renderer, "opengles3_desktopgl_zink_kopper") == 0) {
+        /*
+         * Kopper Zink mirrors the current FCL/Zalith route: stay on the normal
+         * GL bridge, but make Mesa choose Zink and disable KMS swrast fallback.
+         * Vulkan has already been selected/loaded by the block above so this
+         * preserves DroidBridge's System Vulkan / Turnip driver selection.
+         */
+        printf("EGLBridge: Using DroidBridge Kopper Zink desktop GL route\n");
+        setenv("GALLIUM_DRIVER", "zink", 1);
+        setenv("MESA_LOADER_DRIVER_OVERRIDE", "zink", 1);
+        setenv("MESA_ANDROID_NO_KMS_SWRAST", "1", 1);
+        setenv("MESA_NO_ERROR", "0", 1);
+        setenv("LIBGL_NOERROR", "0", 1);
+        /*
+         * JavaRuntimeBootstrap installs a stricter BTA 8+ Kopper profile after
+         * the renderer defaults are built. Do not overwrite it here during
+         * native EGL bootstrap: doing so silently changed BTA back to lazy
+         * descriptors + compact/noreorder even though the launch log reported
+         * sync/flushsync/noreorder/nobgc. That leaves Gallium worker work in
+         * flight while BTA performs its startup fullscreen/renderer transition
+         * and can crash libgallium_dri.so with an invalid queued object.
+         *
+         * Keep the normal fast Kopper defaults for every other game.
+         */
+        if (env_enabled(getenv("DROIDBRIDGE_KOPPER_BTA_STABILITY"))) {
+            setenv("ZINK_DESCRIPTORS", "auto", 1);
+            setenv("ZINK_DEBUG", "sync,flushsync,noreorder,nobgc", 1);
+            setenv("mesa_glthread", "false", 1);
+            printf("EGLBridge: BTA 8+ Kopper stability profile preserved descriptors=auto debug=sync,flushsync,noreorder,nobgc glthread=off\n");
+        } else {
+            setenv("ZINK_DESCRIPTORS", "lazy", 1);
+            setenv("ZINK_DEBUG", "compact,noreorder", 1);
+            setenv("mesa_glthread", "false", 1);
+        }
+        setenv("DROIDBRIDGE_EGL_FORCE_DESKTOP_GL", "1", 1);
+        setenv("DROIDBRIDGE_MESA_DESKTOP_GL", "1", 1);
+        printf("EGLBridge: Kopper Vulkan selection system=%s custom=%s driver=%s driverPath=%s namespace=%s\n",
+               getenv("DROIDBRIDGE_USE_SYSTEM_VULKAN") != NULL ? getenv("DROIDBRIDGE_USE_SYSTEM_VULKAN") : "<null>",
+               getenv("DROIDBRIDGE_USE_CUSTOM_TURNIP") != NULL ? getenv("DROIDBRIDGE_USE_CUSTOM_TURNIP") : "<null>",
+               getenv("DROIDBRIDGE_CUSTOM_VULKAN_DRIVER") != NULL ? getenv("DROIDBRIDGE_CUSTOM_VULKAN_DRIVER") : "<null>",
+               getenv("DRIVER_PATH") != NULL ? getenv("DRIVER_PATH") : "<null>",
+               getenv("DROIDBRIDGE_MESA_NAMESPACE_PATH") != NULL ? getenv("DROIDBRIDGE_MESA_NAMESPACE_PATH") : "<null>");
+    }
+
     if (mesa_zink_turnip) {
         /*
          * DroidBridge intentionally keeps DROIDBRIDGE_RENDERER=opengles3 for this path
@@ -1173,7 +1310,7 @@ int droidbridgeInitOpenGL(void) {
     }
 
     if (strcmp(renderer, "freedreno_kgsl") == 0) {
-        printf("EGLBridge-v69: Using DroidBridge Mesa freedreno_kgsl GL bridge backend=kgsl/freedreno\n");
+        printf("EGLBridge-v70: Using DroidBridge Mesa freedreno_kgsl GL bridge backend=kgsl/freedreno\n");
         setenv("DROIDBRIDGE_MESA", "1", 1);
         setenv("DROIDBRIDGE_RENDERER_MESA_MODE", "freedreno_kgsl", 1);
         setenv("DROIDBRIDGE_MESA_DRIVER", "kgsl", 1);
@@ -1302,7 +1439,62 @@ EXTERNAL_API void droidbridgeSetWindowHint(int hint, int value) {
     }
 }
 
+EXTERNAL_API int droidbridgeGetWindowClientApi(void* window) {
+    if (window == NULL || droidbridge_environ == NULL) return GLFW_NO_API;
+
+    /*
+     * Report the API of the queried window, not the latest global window hint.
+     * Vulkan Reforged sets GLFW_NO_API before it asks whether NeoForge's already
+     * existing early-display window was OpenGL. That old handle is the GL bridge
+     * bundle, while a contextless Vulkan window is the process ANativeWindow.
+     */
+    int api;
+    if (droidbridge_environ->mainWindowBundle != NULL
+            && window == (void*) droidbridge_environ->mainWindowBundle) {
+        api = GLFW_OPENGL_API;
+    } else if (droidbridge_environ->droidbridgeWindow != NULL
+            && window == (void*) droidbridge_environ->droidbridgeWindow) {
+        api = GLFW_NO_API;
+    } else {
+        /* Non-main GL contexts are still GL bridge bundles. Keep this fallback
+         * tied to the current bridge mode without overriding the two exact
+         * identities above. */
+        api = droidbridge_environ->config_renderer == RENDERER_VULKAN
+                ? GLFW_NO_API
+                : GLFW_OPENGL_API;
+    }
+
+    printf("DroidBridgeGLFW: GLFW_CLIENT_API window=%p mainBundle=%p nativeWindow=%p result=0x%x\n",
+           window,
+           (void*) droidbridge_environ->mainWindowBundle,
+           (void*) droidbridge_environ->droidbridgeWindow,
+           api);
+    fflush(stdout);
+    return api;
+}
+
+EXTERNAL_API void droidbridgeDestroyWindow(void* window) {
+    if (window == NULL || droidbridge_environ == NULL) return;
+
+    /*
+     * Destroy based on the handle being destroyed, not the latest global GLFW
+     * hint. Vulkan Reforged may already have requested GLFW_NO_API when it
+     * destroys NeoForge's old OpenGL early window. That old handle is still the
+     * GL bridge's mainWindowBundle and must release its EGLWindowSurface before
+     * Vulkan can reuse the underlying ANativeWindow.
+     */
+    if (droidbridge_environ->mainWindowBundle != NULL
+            && window == (void*) droidbridge_environ->mainWindowBundle) {
+        printf("DroidBridgeGLFW: destroying GL window bundle for Vulkan handoff window=%p nativeWindow=%p\n",
+               window,
+               (void*) droidbridge_environ->droidbridgeWindow);
+        fflush(stdout);
+        gl_destroy_context((gl_render_window_t*) window);
+    }
+}
+
 EXTERNAL_API void droidbridgeSwapBuffers(void) {
+    const int64_t presentEntryNs = droidbridgeMonotonicNs();
     droidbridgeFramePaceIfNeeded("glfwSwapBuffers", false);
     calculateFPS();
 
@@ -1333,7 +1525,10 @@ EXTERNAL_API void droidbridgeSwapBuffers(void) {
 
     if (droidbridge_environ->config_renderer == RENDERER_VK_ZINK ||
         droidbridge_environ->config_renderer == RENDERER_GL4ES) {
+        const int64_t swapStartNs = droidbridgeMonotonicNs();
         br_swap_buffers();
+        const int64_t swapEndNs = droidbridgeMonotonicNs();
+        droidbridgeObserveGlSwap(presentEntryNs, swapStartNs, swapEndNs);
     }
 
     if (droidbridge_environ->config_renderer == RENDERER_VIRGL) {
@@ -1389,10 +1584,14 @@ EXTERNAL_API void* droidbridgeCreateContext(void* contextSrc) {
                         (void*) droidbridge_environ->droidbridgeWindow,
                         "droidbridgeCreateContext"
                 )) {
+                    db_native_glfw_game_context_ready = 0;
                     printf("DroidBridgeNativeGLFW: refusing context because eglMakeCurrent did not succeed\n");
                     fflush(stdout);
                     return NULL;
                 }
+                db_native_glfw_game_context_ready = 1;
+                printf("DroidBridgeNativeGLFW: game/render context ready; linkerhook must preserve current context\n");
+                fflush(stdout);
                 return ctx;
             }
         }
@@ -1432,6 +1631,12 @@ static time_t lastTime = 0;
 static int64_t g_framePaceLastNs = 0;
 static uint64_t g_framePaceCounter = 0;
 static volatile int g_glSwapIntervalEnabled = 0;
+static volatile int g_glAdaptivePacingArmed = 0;
+static int g_glFastSwapStreak = 0;
+static int64_t g_glLastPresentEntryNs = 0;
+static int g_glAdaptivePacingLogged = 0;
+static int g_glBlockingSwapObserved = 0;
+static int g_glBlockingSwapStreak = 0;
 static volatile int g_framePaceTargetFpsOverride = 0;
 static volatile int g_vulkanStartupVsyncChecked = 0;
 /* Set only after the LWJGL Vulkan present path is actually observed. The
@@ -1554,7 +1759,9 @@ static void droidbridgeFramePaceIfNeeded(const char* reason, bool vulkanFrame) {
         return;
     }
 
-    bool enabled = pacingRequested && g_glSwapIntervalEnabled;
+    bool enabled = pacingRequested
+            && g_glSwapIntervalEnabled
+            && __atomic_load_n(&g_glAdaptivePacingArmed, __ATOMIC_ACQUIRE) != 0;
 
     if (!enabled) {
         if (g_framePaceLastNs != 0) {
@@ -1599,6 +1806,102 @@ static void droidbridgeFramePaceIfNeeded(const char* reason, bool vulkanFrame) {
                (long long) (sleepNs > 0 ? sleepNs : 0),
                reason != NULL ? reason : "unknown");
         fflush(stdout);
+    }
+}
+
+static void droidbridgeResetGlAdaptivePacing(void) {
+    __atomic_store_n(&g_glAdaptivePacingArmed, 0, __ATOMIC_RELEASE);
+    g_glFastSwapStreak = 0;
+    g_glLastPresentEntryNs = 0;
+    g_glBlockingSwapObserved = 0;
+    g_glBlockingSwapStreak = 0;
+    g_framePaceLastNs = 0;
+    g_framePaceCounter = 0;
+}
+
+static void droidbridgeObserveGlSwap(
+        int64_t presentEntryNs,
+        int64_t swapStartNs,
+        int64_t swapEndNs) {
+    if (!droidbridgeFramePacingEnvEnabled()
+            || !g_glSwapIntervalEnabled
+            || presentEntryNs <= 0
+            || swapStartNs <= 0
+            || swapEndNs < swapStartNs) {
+        droidbridgeResetGlAdaptivePacing();
+        return;
+    }
+
+    const int targetFps = droidbridgeFramePacingTargetFps();
+    const int64_t periodNs = 1000000000LL / (int64_t) targetFps;
+    const int64_t swapDurationNs = swapEndNs - swapStartNs;
+    const int64_t presentIntervalNs = g_glLastPresentEntryNs > 0
+            ? presentEntryNs - g_glLastPresentEntryNs : 0;
+    g_glLastPresentEntryNs = presentEntryNs;
+
+    /* Ignore isolated SurfaceFlinger/world-load stalls. Four consecutive samples are
+     * required before treating EGL as the pacing clock, and a sustained fast sequence
+     * can recover software pacing if the provider becomes nonblocking again. */
+    const bool blockingSample = swapDurationNs >= (periodNs * 3) / 5
+            && presentIntervalNs > 0
+            && presentIntervalNs >= (periodNs * 4) / 5;
+    const bool fastSample = swapDurationNs < periodNs / 4;
+
+    if (blockingSample) {
+        if (g_glBlockingSwapStreak < 1000) g_glBlockingSwapStreak++;
+        g_glFastSwapStreak = 0;
+    } else {
+        g_glBlockingSwapStreak = 0;
+    }
+
+    if (!g_glBlockingSwapObserved && g_glBlockingSwapStreak >= 4) {
+        g_glBlockingSwapObserved = 1;
+        if (__atomic_exchange_n(&g_glAdaptivePacingArmed, 0, __ATOMIC_ACQ_REL) != 0) {
+            printf("DroidBridgeFramePacer: stable blocking EGL VSync observed; software pacing disarmed targetFps=%d swapDurationNs=%lld\n",
+                   targetFps, (long long) swapDurationNs);
+            fflush(stdout);
+        }
+        g_framePaceLastNs = 0;
+        g_framePaceCounter = 0;
+        return;
+    }
+
+    if (g_glBlockingSwapObserved) {
+        if (fastSample && presentIntervalNs > 0
+                && presentIntervalNs < (periodNs * 9) / 10) {
+            if (g_glFastSwapStreak < 1000) g_glFastSwapStreak++;
+            if (g_glFastSwapStreak >= 8) {
+                g_glBlockingSwapObserved = 0;
+                g_glBlockingSwapStreak = 0;
+            } else {
+                return;
+            }
+        } else {
+            g_glFastSwapStreak = 0;
+            return;
+        }
+    }
+
+    if (presentIntervalNs > 0
+            && presentIntervalNs < (periodNs * 9) / 10
+            && swapDurationNs < periodNs / 4) {
+        if (g_glFastSwapStreak < 1000) g_glFastSwapStreak++;
+    } else if (__atomic_load_n(&g_glAdaptivePacingArmed, __ATOMIC_ACQUIRE) == 0) {
+        g_glFastSwapStreak = 0;
+    }
+
+    if (g_glFastSwapStreak >= 6
+            && __atomic_exchange_n(&g_glAdaptivePacingArmed, 1, __ATOMIC_ACQ_REL) == 0) {
+        g_framePaceLastNs = swapEndNs;
+        g_framePaceCounter = 0;
+        if (!g_glAdaptivePacingLogged) {
+            g_glAdaptivePacingLogged = 1;
+            printf("DroidBridgeFramePacer: eglSwapInterval is nonblocking; adaptive software pacing armed targetFps=%d presentIntervalNs=%lld swapDurationNs=%lld\n",
+                   targetFps,
+                   (long long) presentIntervalNs,
+                   (long long) swapDurationNs);
+            fflush(stdout);
+        }
     }
 }
 
@@ -1909,6 +2212,9 @@ EXTERNAL_API void droidbridgeSwapInterval(int interval) {
     int normalized = interval > 0 ? 1 : 0;
     const int previous_interval = g_glSwapIntervalEnabled;
     g_glSwapIntervalEnabled = normalized;
+    if (previous_interval != normalized) {
+        droidbridgeResetGlAdaptivePacing();
+    }
 
     /*
      * Krypton/GL4ES can return success from eglSwapInterval(1) while Android's

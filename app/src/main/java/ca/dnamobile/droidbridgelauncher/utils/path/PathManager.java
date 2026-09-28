@@ -185,6 +185,24 @@ public final class PathManager {
         if (!file.exists()) file.mkdirs();
     }
 
+    public static void deleteRecursivelyChecked(@Nullable File file) throws IOException {
+        if (file == null || !file.exists()) return;
+
+        if (file.isDirectory()) {
+            File[] children = file.listFiles();
+            if (children == null) {
+                throw new IOException("Unable to list directory for deletion: " + file.getAbsolutePath());
+            }
+            for (File child : children) {
+                deleteRecursivelyChecked(child);
+            }
+        }
+
+        if (file.exists() && !file.delete()) {
+            throw new IOException("Unable to delete path: " + file.getAbsolutePath());
+        }
+    }
+
     public static void deleteQuietly(@Nullable File file) {
         if (file == null || !file.exists()) return;
         try {

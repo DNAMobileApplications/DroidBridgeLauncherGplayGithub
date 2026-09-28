@@ -30,15 +30,18 @@ public final class DistantHorizonsIrisConfigMitigation {
     private static final String TAG = "DistantHorizonsIrisConfig";
     private static final int MAX_CONFIG_SCAN_DEPTH = 5;
 
-    // DH 3.x reads this as renderingApi = "OPEN_GL". Older/newer builds and hand-edited
-    // configs may contain quotes, no quotes, AUTO, BLAZE_3D, or BLAZE3D, so match all of them.
-    private static final Pattern RENDERING_API_ASSIGNMENT = Pattern.compile(
-            "(?im)^([ \\t]*#?[ \\t]*renderingApi[ \\t]*=[ \\t]*)(\\\"?)(AUTO|BLAZE_3D|BLAZE3D|Blaze_3D|Blaze3D)(\\\"?)(.*)$"
+    // DH 3.3.x exposes a rendering *engine* selector, not a raw Minecraft
+    // backend selector. BLAZE_3D is the engine that follows Minecraft's current
+    // backend (OpenGL or Vulkan). Writing VULKAN here is invalid in DH 3.3.2 and
+    // causes the config loader to fall back before Iris forces OPEN_GL.
+    private static final Pattern RENDERING_ENGINE_ASSIGNMENT = Pattern.compile(
+            "(?im)^([ \\t]*#?[ \\t]*renderingEngine[ \\t]*=[ \\t]*)(\\\"?)(AUTO|BLAZE_3D|BLAZE3D|Blaze_3D|Blaze3D|OPEN_GL|OpenGL|VULKAN|Vulkan)(\\\"?)(.*)$"
     );
 
-    // Fallback for builds where the key name changes slightly but still describes the renderer API/engine.
-    private static final Pattern RENDER_API_LIKE_ASSIGNMENT = Pattern.compile(
-            "(?im)^([ \\t]*#?[ \\t]*[^#\\n=]*(?:render|renderer)[^#\\n=]*(?:api|engine)[^#\\n=]*=[ \\t]*)(\\\"?)(AUTO|BLAZE_3D|BLAZE3D|Blaze_3D|Blaze3D)(\\\"?)(.*)$"
+    // Older DH configs used renderingApi. Keep repairing that key too, but use
+    // the same engine values so a stale DroidBridge VULKAN value is never left behind.
+    private static final Pattern LEGACY_RENDERING_API_ASSIGNMENT = Pattern.compile(
+            "(?im)^([ \\t]*#?[ \\t]*renderingApi[ \\t]*=[ \\t]*)(\\\"?)(AUTO|BLAZE_3D|BLAZE3D|Blaze_3D|Blaze3D|OPEN_GL|OpenGL|VULKAN|Vulkan)(\\\"?)(.*)$"
     );
 
     private static final Pattern EXPERIMENTAL_HEADER = Pattern.compile(
@@ -49,8 +52,9 @@ public final class DistantHorizonsIrisConfigMitigation {
     }
 
     @NonNull
-    public static ArrayList<String> prepare(@Nullable File gameDir) {
+    public static ArrayList<String> prepare(@Nullable File gameDir, @NonNull String graphicsApiMode) {
         ArrayList<String> messages = new ArrayList<>();
+        String targetRenderingEngine = resolveTargetRenderingEngine(graphicsApiMode);
         if (gameDir == null) {
             messages.add("Skipped: game directory is null");
             return messages;
@@ -86,8 +90,8 @@ public final class DistantHorizonsIrisConfigMitigation {
             }
 
             if (!primaryConfig.isFile()) {
-                writeMinimalOpenGlConfig(primaryConfig);
-                messages.add("Created primary DH config with renderingApi=OPEN_GL at " + primaryConfig.getAbsolutePath());
+                writeMinimalConfig(primaryConfig, targetRenderingEngine);
+                messages.add("Created primary DH config with renderingEngine=" + targetRenderingEngine + " at " + primaryConfig.getAbsolutePath());
                 if (!containsFile(candidates, primaryConfig)) candidates.add(primaryConfig);
             }
 
@@ -95,8 +99,8 @@ public final class DistantHorizonsIrisConfigMitigation {
             // reference configs/DistantHorizons.toml. Write both so the active DH path cannot miss
             // the forced renderer value on Android launchers with custom game directories.
             if (!pluralConfig.isFile()) {
-                writeMinimalOpenGlConfig(pluralConfig);
-                messages.add("Created fallback DH config with renderingApi=OPEN_GL at " + pluralConfig.getAbsolutePath());
+                writeMinimalConfig(pluralConfig, targetRenderingEngine);
+                messages.add("Created fallback DH config with renderingEngine=" + targetRenderingEngine + " at " + pluralConfig.getAbsolutePath());
                 if (!containsFile(candidates, pluralConfig)) candidates.add(pluralConfig);
             }
 
@@ -112,11 +116,11 @@ public final class DistantHorizonsIrisConfigMitigation {
                 if (!file.isFile() || file.length() > 1024L * 1024L * 2L) continue;
 
                 String original = new String(Files.readAllBytes(file.toPath()), StandardCharsets.UTF_8);
-                String patched = patchDistantHorizonsConfigText(original);
+                String patched = patchDistantHorizonsConfigText(original, targetRenderingEngine);
                 if (!patched.equals(original)) {
                     Files.write(file.toPath(), patched.getBytes(StandardCharsets.UTF_8));
                     changedAny = true;
-                    messages.add("Forced DH renderingApi=OPEN_GL in " + file.getAbsolutePath());
+                    messages.add("Forced DH renderingEngine=" + targetRenderingEngine + " in " + file.getAbsolutePath());
                 } else {
                     messages.add("DH config already appears patched: " + file.getAbsolutePath());
                 }
@@ -125,7 +129,7 @@ public final class DistantHorizonsIrisConfigMitigation {
             }
 
             if (!changedAny) {
-                messages.add("No AUTO/BLAZE_3D renderingApi values remained after scan; DH should read OPEN_GL if this is the active config path.");
+                messages.add("No stale renderer-engine values remained after scan; DH should read " + targetRenderingEngine + " if this is the active config path.");
             }
         } catch (Throwable throwable) {
             messages.add("Failed: " + throwable.getClass().getSimpleName() + ": " + (throwable.getMessage() == null ? "" : throwable.getMessage()));
@@ -137,11 +141,11 @@ public final class DistantHorizonsIrisConfigMitigation {
     }
 
     @NonNull
-    private static String patchDistantHorizonsConfigText(@NonNull String original) {
-        String patched = replaceAssignments(original, RENDERING_API_ASSIGNMENT);
-        patched = replaceAssignments(patched, RENDER_API_LIKE_ASSIGNMENT);
+    private static String patchDistantHorizonsConfigText(@NonNull String original, @NonNull String targetRenderingEngine) {
+        String patched = replaceAssignments(original, RENDERING_ENGINE_ASSIGNMENT, targetRenderingEngine);
+        patched = replaceAssignments(patched, LEGACY_RENDERING_API_ASSIGNMENT, targetRenderingEngine);
 
-        if (containsRenderingApiAssignment(patched)) {
+        if (containsRenderingEngineAssignment(patched)) {
             return patched;
         }
 
@@ -149,7 +153,7 @@ public final class DistantHorizonsIrisConfigMitigation {
         if (headerMatcher.find()) {
             int insert = headerMatcher.end();
             return patched.substring(0, insert)
-                    + "\nrenderingApi = \"OPEN_GL\""
+                    + "\nrenderingEngine = \"" + targetRenderingEngine + "\""
                     + patched.substring(insert);
         }
 
@@ -157,11 +161,11 @@ public final class DistantHorizonsIrisConfigMitigation {
         return patched
                 + separator
                 + "\n[client.advanced.graphics.experimental]\n"
-                + "renderingApi = \"OPEN_GL\"\n";
+                + "renderingEngine = \"" + targetRenderingEngine + "\"\n";
     }
 
     @NonNull
-    private static String replaceAssignments(@NonNull String text, @NonNull Pattern pattern) {
+    private static String replaceAssignments(@NonNull String text, @NonNull Pattern pattern, @NonNull String targetRenderingEngine) {
         Matcher matcher = pattern.matcher(text);
         StringBuffer buffer = new StringBuffer();
         while (matcher.find()) {
@@ -169,24 +173,34 @@ public final class DistantHorizonsIrisConfigMitigation {
             if (prefix.trim().startsWith("#")) {
                 prefix = prefix.replaceFirst("(?m)^[ \\t]*#[ \\t]*", "");
             }
-            matcher.appendReplacement(buffer, Matcher.quoteReplacement(prefix + "\"OPEN_GL\"" + matcher.group(5)));
+            matcher.appendReplacement(buffer, Matcher.quoteReplacement(prefix + "\"" + targetRenderingEngine + "\"" + matcher.group(5)));
         }
         matcher.appendTail(buffer);
         return buffer.toString();
     }
 
-    private static boolean containsRenderingApiAssignment(@NonNull String text) {
-        Matcher matcher = Pattern.compile("(?im)^[ \\t]*renderingApi[ \\t]*=").matcher(text);
+    private static boolean containsRenderingEngineAssignment(@NonNull String text) {
+        Matcher matcher = Pattern.compile("(?im)^[ \\t]*renderingEngine[ \\t]*=").matcher(text);
         return matcher.find();
     }
 
-    private static void writeMinimalOpenGlConfig(@NonNull File file) throws Exception {
+    private static void writeMinimalConfig(@NonNull File file, @NonNull String targetRenderingEngine) throws Exception {
         File parent = file.getParentFile();
         if (parent != null && !parent.isDirectory()) parent.mkdirs();
-        String text = "# Created by DroidBridge Launcher to avoid the Distant Horizons + Iris BLAZE_3D startup crash.\n"
+        String text = "# Created by DroidBridge Launcher to keep the Distant Horizons rendering engine aligned with Minecraft.\n"
                 + "[client.advanced.graphics.experimental]\n"
-                + "renderingApi = \"OPEN_GL\"\n";
+                + "renderingEngine = \"" + targetRenderingEngine + "\"\n";
         Files.write(file.toPath(), text.getBytes(StandardCharsets.UTF_8));
+    }
+
+
+    @NonNull
+    private static String resolveTargetRenderingEngine(@Nullable String graphicsApiMode) {
+        String normalized = graphicsApiMode == null ? "" : graphicsApiMode.trim().toLowerCase(Locale.ROOT);
+        // BLAZE_3D follows Minecraft's active backend and is the only DH 3.3.x
+        // engine that can bind to Minecraft's Vulkan path. OPEN_GL remains the
+        // compatibility choice for Iris while Minecraft itself is on OpenGL.
+        return normalized.contains("vulkan") ? "BLAZE_3D" : "OPEN_GL";
     }
 
     @NonNull
@@ -352,7 +366,7 @@ public final class DistantHorizonsIrisConfigMitigation {
             }
         }
         if (!failed) {
-            Logging.i(TAG, "OPEN_GL config " + (updates > 0 ? "updated" : "verified"));
+            Logging.i(TAG, "renderer config " + (updates > 0 ? "updated" : "verified"));
         }
     }
 }

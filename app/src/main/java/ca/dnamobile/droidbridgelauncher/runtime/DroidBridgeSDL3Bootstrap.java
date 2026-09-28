@@ -44,14 +44,18 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 import ca.dnamobile.droidbridgelauncher.GameActivity;
+import ca.dnamobile.droidbridgelauncher.input.InputEventDiagnosticLogger;
 import ca.dnamobile.droidbridgelauncher.logs.LauncherLogManager;
 
 public final class DroidBridgeSDL3Bootstrap {
     private static final Object LOCK = new Object();
+    // Launcher profiles may be composite IDs such as fabric-loader-0.19.5-26.3.
+    // Match the Minecraft token at a numeric boundary instead of requiring it
+    // to be the first token in the launcher/profile id.
     private static final Pattern SNAPSHOT_PATTERN =
-            Pattern.compile("^26\\.3-snapshot-(\\d+)(?:$|[^0-9].*)");
+            Pattern.compile("(?:^|[^0-9])26\\.3-snapshot-(\\d+)(?:$|[^0-9].*)");
     private static final Pattern RELEASE_PATTERN =
-            Pattern.compile("^26\\.(\\d+)(?:$|[^0-9].*)");
+            Pattern.compile("(?:^|[^0-9])26\\.(\\d+)(?:$|[^0-9].*)");
 
     /*
      * RenderPearl selects persistent mapped immutable buffers whenever desktop
@@ -110,6 +114,19 @@ public final class DroidBridgeSDL3Bootstrap {
     private static volatile boolean transientPauseLogged;
     private static volatile boolean hostStopped;
     private static volatile boolean surfaceProducerAttached;
+    /*
+     * A retained TextureView keeps its Java Surface/ANativeWindow object alive
+     * across a real Android stop/resume. With a sub-100% render scale, however,
+     * Android can reconnect the EGL drawable at the physical display size while
+     * Minecraft keeps the smaller GL viewport. The visible result is the game
+     * rendering only in the lower-left corner until a live resolution change
+     * forces the TextureView producer/EGL surface geometry to be applied again.
+     *
+     * Arm one presentation-only repair after a genuine stop -> resume. The repair
+     * is restricted to wrapped OpenGL and keeps the exact same retained Surface;
+     * the Vulkan path is deliberately untouched.
+     */
+    private static volatile boolean retainedScaledGeometryRefreshPending;
     private static volatile int lastLoggedOverlayLeft = Integer.MIN_VALUE;
     private static volatile int lastLoggedOverlayTop = Integer.MIN_VALUE;
     private static volatile int lastLoggedOverlayWidth = -1;
@@ -142,10 +159,20 @@ public final class DroidBridgeSDL3Bootstrap {
      * through the existing retained TextureView. This is startup-only and never
      * replaces the SurfaceTexture/ANativeWindow fixed by the v4 lifecycle work.
      */
-    private static final int POST_WINDOW_RESOLUTION_MAX_POLLS = 180;
+    // Slow devices can spend >18 seconds in Java/Fabric bootstrap before the real
+    // SDL_Window exists. The previous 180 x 100 ms deadline could expire literally
+    // one frame before SDL created the window, leaving scaled launches with the
+    // device-size menu input transform until the user nudged the resolution slider.
+    // Keep this lightweight startup watcher alive for up to 60 seconds; it exits as
+    // soon as the real SDL window is stable, so normal/fast devices are unchanged.
+    private static final int POST_WINDOW_RESOLUTION_MAX_POLLS = 600;
     private static final long POST_WINDOW_RESOLUTION_POLL_MS = 100L;
-    private static final long POST_WINDOW_RENDER_SETTLE_MS = 2500L;
-    private static final long POST_WINDOW_RENDER_FALLBACK_MS = 8000L;
+    private static final long POST_WINDOW_RENDER_SETTLE_MS = 500L;
+    // Do not leave startup input geometry waiting on an FPS sample. On 26.3 the
+    // TextureView can already be scaled while Minecraft's real SDL_Window is still
+    // reporting the device resolution. A live slider change fixes this immediately,
+    // so perform the same non-zero resize shortly after the SDL window stabilizes.
+    private static final long POST_WINDOW_RENDER_FALLBACK_MS = 900L;
     private static volatile int postWindowResolutionGeneration;
     private static volatile boolean postWindowResolutionScheduled;
     private static volatile boolean postWindowResolutionComplete;
@@ -193,6 +220,10 @@ public final class DroidBridgeSDL3Bootstrap {
     public static void configure(@NonNull Activity activity, @Nullable String versionId) {
         synchronized (LOCK) {
             selectedVersion = versionId == null ? "" : versionId.trim();
+            try {
+                Os.unsetenv("DROIDBRIDGE_SDL3_PLATFORM_READY");
+            } catch (Throwable ignored) {
+            }
             requested = requiresAndroidSdlPlatform(selectedVersion);
             sdlOpenGlCompatibilityRequested = false;
             sdlOpenGlEglLibrary = null;
@@ -206,6 +237,7 @@ public final class DroidBridgeSDL3Bootstrap {
             postWindowResolutionPulseInProgress = false;
             postWindowResolutionBaselineWidth = -1;
             postWindowResolutionBaselineHeight = -1;
+            retainedScaledGeometryRefreshPending = false;
             if (requested) {
                 try {
                     Os.setenv("DROIDBRIDGE_SDL3_FORCE_VULKAN_IDENTITY", "1", true);
@@ -514,6 +546,11 @@ public final class DroidBridgeSDL3Bootstrap {
                 hostStopped = false;
                 setPresentationPausedLocked(false, "initial SDL Surface ready");
                 SDLActivity.nativeFocusChanged(activity.hasWindowFocus());
+                try {
+                    Os.setenv("DROIDBRIDGE_SDL3_PLATFORM_READY", "1", true);
+                } catch (Throwable throwable) {
+                    throw new IllegalStateException("Unable to publish SDL3 platform-ready marker", throwable);
+                }
                 append("DroidBridgeSDL3: platform ready renderer-independent surface="
                         + snapshot.renderWidth + "x" + snapshot.renderHeight
                         + " device=" + snapshot.deviceWidth + "x" + snapshot.deviceHeight
@@ -607,9 +644,9 @@ public final class DroidBridgeSDL3Bootstrap {
 
                     boolean rendererSettled = firstRenderedFrameAtMs > 0L
                             && now - firstRenderedFrameAtMs >= POST_WINDOW_RENDER_SETTLE_MS;
-                    boolean fallbackSettled = windowReadyAtMs > 0L
+                    boolean windowSettled = windowReadyAtMs > 0L
                             && now - windowReadyAtMs >= POST_WINDOW_RENDER_FALLBACK_MS;
-                    if ((rendererSettled || fallbackSettled)
+                    if ((rendererSettled || windowSettled)
                             && performPostWindowResolutionInitialization(
                             generation, windowWidth, windowHeight)) {
                         return;
@@ -618,6 +655,15 @@ public final class DroidBridgeSDL3Bootstrap {
 
                 attempts++;
                 if (attempts >= POST_WINDOW_RESOLUTION_MAX_POLLS) {
+                    // A valid SDL window is enough to make one final attempt. Never
+                    // leave a scaled TextureView paired with the original device-size
+                    // SDL input transform simply because FPS telemetry was late.
+                    if (ready && performPostWindowResolutionInitialization(
+                            generation, windowWidth, windowHeight)) {
+                        append("DroidBridgeSDL3: startup resolution pulse forced at poll deadline"
+                                + " window=" + windowWidth + "x" + windowHeight);
+                        return;
+                    }
                     synchronized (LOCK) {
                         if (generation == postWindowResolutionGeneration) {
                             postWindowResolutionScheduled = false;
@@ -756,13 +802,20 @@ public final class DroidBridgeSDL3Bootstrap {
         if (!wrappedOpenGl && !directFreedreno) return;
 
         try {
+            String kind = sdlOpenGlRendererKind == null
+                    ? (directFreedreno ? "freedreno_kgsl" : "unknown")
+                    : sdlOpenGlRendererKind;
+            boolean ltw = "ltw".equalsIgnoreCase(kind);
+
             /*
-             * The native SDL_GL_GetProcAddress bridge performs the authoritative
-             * capability filtering for MobileGlues and Krypton. This marker is set
-             * before SDL and LWJGL initialize, so GL.createCapabilities() never sees
-             * persistent mapping as available.
+             * LTW implements persistent storage itself and defaults dynamic
+             * storage to coherent/persistent mappings. On 26.3 the failure was
+             * caused by SDL transiently clearing LTW's live wrapper context, not
+             * by RenderPearl using GL_ARB_buffer_storage. Keep LTW's advertised
+             * buffer capabilities intact; the native SDL3 context guard preserves
+             * the live LTW context across SDL's transient clear.
              */
-            Os.setenv("DROIDBRIDGE_SDL3_DISABLE_PERSISTENT_MAPPING", "1", true);
+            Os.setenv("DROIDBRIDGE_SDL3_DISABLE_PERSISTENT_MAPPING", ltw ? "0" : "1", true);
 
             /* Mesa also consumes these variables before it creates the context. */
             if (directFreedreno) {
@@ -773,15 +826,13 @@ public final class DroidBridgeSDL3Bootstrap {
                 Os.setenv("DROIDBRIDGE_SDL3_FREEDRENO_MUTABLE_BUFFERS", "1", true);
             }
 
-            String kind = sdlOpenGlRendererKind == null
-                    ? (directFreedreno ? "freedreno_kgsl" : "unknown")
-                    : sdlOpenGlRendererKind;
             append("DroidBridgeSDL3: Snapshot 4 buffer compatibility enabled"
                     + " kind=" + kind
                     + " wrapped=" + wrappedOpenGl
                     + " directFreedreno=" + directFreedreno
-                    + " maxGL=4.3 persistentMapping=false extensions='"
-                    + SNAPSHOT4_SAFE_EXTENSION_OVERRIDE + "'");
+                    + " persistentMapping=" + ltw
+                    + (ltw ? " contextGuard=true" : " maxGL=4.3 extensions='"
+                    + SNAPSHOT4_SAFE_EXTENSION_OVERRIDE + "'"));
         } catch (Throwable throwable) {
             throw new IllegalStateException(
                     "Unable to configure SDL3 Snapshot 4 buffer compatibility", throwable);
@@ -1284,7 +1335,7 @@ public final class DroidBridgeSDL3Bootstrap {
                 Math.max(0f, sdlWindowHeight - 1f)
         );
 
-        // Mojo's SDL path uses ACTION_MOVE for launcher-generated absolute motion.
+        // The compatible SDL path uses ACTION_MOVE for launcher-generated absolute motion.
         // SDL's Android backend accepts both MOVE and HOVER_MOVE, but MOVE also
         // guarantees the normal window mouse-motion path used by menu hover state.
         int resolvedAction = action == MotionEvent.ACTION_HOVER_MOVE
@@ -1362,8 +1413,9 @@ public final class DroidBridgeSDL3Bootstrap {
                 || roundedPixelHeight != lastSdlMousePixelHeight;
         boolean meaningfulMismatch = Math.abs(actualSdlX - sentSdlX) > 1.25f
                 || Math.abs(actualSdlY - sentSdlY) > 1.25f;
-        if (geometryChanged || meaningfulMismatch
-                || now - lastSdlMouseSyncLogUptimeMs >= 1500L) {
+        if (InputEventDiagnosticLogger.isEnabled()
+                && (geometryChanged || meaningfulMismatch
+                || now - lastSdlMouseSyncLogUptimeMs >= 1500L)) {
             lastSdlMouseSyncLogUptimeMs = now;
             lastSdlMouseWindowWidth = roundedWindowWidth;
             lastSdlMouseWindowHeight = roundedWindowHeight;
@@ -1456,8 +1508,33 @@ public final class DroidBridgeSDL3Bootstrap {
         // therefore may not trigger a normal GrabListener edge).
         CallbackBridge.setSdlGrabState(enabled);
         recenterLauncherCursorForMode(enabled, enabled ? "relative-mode" : "menu-mode");
-        append("DroidBridgeSDL3: SDL relative mouse=" + enabled
-                + " launcherGrab=" + CallbackBridge.isGrabbing());
+
+        // SDL hides Android's hardware pointer while relative mouse mode is active.
+        // Several Android SDL3/device combinations do not restore the PointerIcon
+        // when Minecraft opens a GUI again, leaving a fully functional but invisible
+        // mouse. Re-assert the normal arrow whenever SDL returns to absolute mode.
+        if (!enabled) {
+            Activity activity = activityRef.get();
+            Runnable restorePointer = () -> {
+                try {
+                    SDLActivity.setSystemCursor(0); // SDL_SYSTEM_CURSOR_ARROW
+                } catch (Throwable throwable) {
+                    if (InputEventDiagnosticLogger.isEnabled()) {
+                        append("DroidBridgeSDL3: unable to restore Android menu pointer: "
+                                + throwable);
+                    }
+                }
+            };
+            if (activity != null) {
+                activity.runOnUiThread(restorePointer);
+            } else {
+                new Handler(Looper.getMainLooper()).post(restorePointer);
+            }
+        }
+        if (InputEventDiagnosticLogger.isEnabled()) {
+            append("DroidBridgeSDL3: SDL relative mouse=" + enabled
+                    + " launcherGrab=" + CallbackBridge.isGrabbing());
+        }
     }
 
     public static void recenterLauncherMenuCursor(@NonNull String reason) {
@@ -1480,12 +1557,14 @@ public final class DroidBridgeSDL3Bootstrap {
         } else {
             CallbackBridge.sendCursorPos(centerX, centerY);
         }
-        append("DroidBridgeSDL3: cursor recentered reason=" + reason
-                + " mode=" + (relativeMode ? "relative-silent" : "menu-absolute")
-                + " target=" + centerX + "," + centerY
-                + " cursor=" + getSdlCursorCoordinateWidth() + "x"
-                + getSdlCursorCoordinateHeight()
-                + " render=" + getSdlLogicalWidth() + "x" + getSdlLogicalHeight());
+        if (InputEventDiagnosticLogger.isEnabled()) {
+            append("DroidBridgeSDL3: cursor recentered reason=" + reason
+                    + " mode=" + (relativeMode ? "relative-silent" : "menu-absolute")
+                    + " target=" + centerX + "," + centerY
+                    + " cursor=" + getSdlCursorCoordinateWidth() + "x"
+                    + getSdlCursorCoordinateHeight()
+                    + " render=" + getSdlLogicalWidth() + "x" + getSdlLogicalHeight());
+        }
     }
 
     /** Virtual mouse click generated by DroidBridge's controller mapper. */
@@ -1508,6 +1587,12 @@ public final class DroidBridgeSDL3Bootstrap {
                 break;
             case 2:
                 androidMask = MotionEvent.BUTTON_TERTIARY;
+                break;
+            case 3:
+                androidMask = MotionEvent.BUTTON_BACK;
+                break;
+            case 4:
+                androidMask = MotionEvent.BUTTON_FORWARD;
                 break;
             default:
                 return false;
@@ -1807,6 +1892,14 @@ public final class DroidBridgeSDL3Bootstrap {
         if (!requested || !initialized) return;
         synchronized (LOCK) {
             boolean retained = canPreserveAttachedSurfaceAcrossStop();
+            retainedScaledGeometryRefreshPending = retained
+                    && sdlOpenGlCompatibilityRequested
+                    && lastResizeRenderWidth > 0
+                    && lastResizeRenderHeight > 0
+                    && lastResizeDeviceWidth > 0
+                    && lastResizeDeviceHeight > 0
+                    && (lastResizeRenderWidth != lastResizeDeviceWidth
+                    || lastResizeRenderHeight != lastResizeDeviceHeight);
             pauseHostLocked(retained
                     ? "Android onStop with retained Surface"
                     : "Android onStop waiting for Surface");
@@ -1826,6 +1919,7 @@ public final class DroidBridgeSDL3Bootstrap {
         SDL.setContext(activity);
         SDLActivity.setDroidBridgeHostActivity(activity);
         if (!initialized) return;
+        boolean refreshRetainedScaledGeometry = false;
         try {
             Surface surface = publishedSurface;
             if (surface != null && surface.isValid()) {
@@ -1834,12 +1928,130 @@ public final class DroidBridgeSDL3Bootstrap {
             synchronized (LOCK) {
                 resumeHostIfReadyLocked("host resume");
                 if (!hostStopped) SDLActivity.mIsResumedCalled = true;
+                if (!hostStopped && retainedScaledGeometryRefreshPending) {
+                    retainedScaledGeometryRefreshPending = false;
+                    refreshRetainedScaledGeometry = true;
+                }
             }
             SDLActivity.mHasFocus = activity.hasWindowFocus();
             SDLActivity.nativeFocusChanged(activity.hasWindowFocus());
             transientPauseLogged = false;
         } catch (Throwable throwable) {
             append("DroidBridgeSDL3: resume focus callback failed: " + throwable);
+        }
+
+        if (refreshRetainedScaledGeometry) {
+            /*
+             * nativeResume() has already restored SDL's logical 1286x724-style
+             * window correctly. The broken state is one layer lower: Android can
+             * reconnect the retained TextureView/EGL drawable at the physical
+             * 1920x1080-style size, leaving Minecraft's smaller GL viewport in the
+             * lower-left corner. Reassert the existing TextureView buffer and tell
+             * SDL that the SAME native Surface changed. Do not resend logical
+             * resolution/orientation state and do not replace the Surface object.
+             *
+             * Post once instead of delaying 48 ms so the correction happens as the
+             * Activity resumes rather than a few rendered frames later; this also
+             * removes the visible hitch caused by the old extra logical resize.
+             */
+            new Handler(Looper.getMainLooper()).post(
+                    () -> refreshRetainedScaledOpenGlPresentation("host resume")
+            );
+        }
+    }
+
+    /**
+     * Repairs only the retained wrapped-OpenGL presentation after Android resume.
+     *
+     * The live resolution control fixes this bug because MinecraftGLSurface first
+     * reapplies SurfaceTexture.setDefaultBufferSize(...) and SDL then receives a
+     * native surface-change notification. The previous workaround replayed only
+     * nativeSetScreenResolution()/onNativeResize(); the latest log proves SDL was
+     * already reporting the correct scaled window before that replay, so it could
+     * not repair the full-size resumed EGL drawable.
+     */
+    private static void refreshRetainedScaledOpenGlPresentation(
+            @NonNull String reason
+    ) {
+        final int renderWidth;
+        final int renderHeight;
+        final int deviceWidth;
+        final int deviceHeight;
+        final Surface retainedSurface;
+        final MinecraftGLSurface minecraftSurface;
+
+        synchronized (LOCK) {
+            if (!requested || !initialized || hostStopped
+                    || !sdlOpenGlCompatibilityRequested) {
+                return;
+            }
+
+            retainedSurface = publishedSurface;
+            minecraftSurface = minecraftSurfaceRef.get();
+            if (!surfaceCreatedSent
+                    || !surfaceProducerAttached
+                    || retainedSurface == null
+                    || !retainedSurface.isValid()
+                    || minecraftSurface == null) {
+                append("DroidBridgeSDL3: retained scaled presentation refresh skipped"
+                        + " reason=" + reason + " surface/view not ready");
+                return;
+            }
+
+            renderWidth = lastResizeRenderWidth;
+            renderHeight = lastResizeRenderHeight;
+            deviceWidth = lastResizeDeviceWidth;
+            deviceHeight = lastResizeDeviceHeight;
+
+            if (renderWidth <= 0 || renderHeight <= 0
+                    || deviceWidth <= 0 || deviceHeight <= 0
+                    || (renderWidth == deviceWidth && renderHeight == deviceHeight)) {
+                return;
+            }
+        }
+
+        float[] before = new float[9];
+        boolean queriedBefore = DroidBridgeSDL3NativeWindowBridge.querySdlMouseState(before);
+        try {
+            /*
+             * Reassert only the retained TextureView producer buffer. Do not call
+             * refreshSize(): that generic path is allowed to issue a new logical
+             * SDL resize if Android reports transiently different insets/layout
+             * dimensions during Activity resume.
+             */
+            boolean bufferReasserted =
+                    minecraftSurface.reassertRetainedSdlOpenGlBufferAfterResume();
+            if (!bufferReasserted) {
+                append("DroidBridgeSDL3: retained scaled presentation refresh skipped"
+                        + " reason=" + reason + " TextureView buffer not ready");
+                return;
+            }
+
+            // Re-publish the exact same Surface token, then refresh SDL's native
+            // surface/EGL binding. This is OpenGL-only; Vulkan never enters here.
+            SDLActivity.setDroidBridgeNativeSurface(retainedSurface);
+            SDLActivity.onNativeSurfaceChanged();
+
+            float[] after = new float[9];
+            boolean queriedAfter = DroidBridgeSDL3NativeWindowBridge.querySdlMouseState(after);
+            String beforeText = queriedBefore
+                    ? Math.round(before[2]) + "x" + Math.round(before[3])
+                    + " pixels=" + Math.round(before[4]) + "x" + Math.round(before[5])
+                    : "unavailable";
+            String afterText = queriedAfter
+                    ? Math.round(after[2]) + "x" + Math.round(after[3])
+                    + " pixels=" + Math.round(after[4]) + "x" + Math.round(after[5])
+                    : "unavailable";
+            append("DroidBridgeSDL3: retained scaled OpenGL presentation refreshed"
+                    + " reason=" + reason
+                    + " render=" + renderWidth + "x" + renderHeight
+                    + " device=" + deviceWidth + "x" + deviceHeight
+                    + " sdlBefore=" + beforeText
+                    + " sdlAfter=" + afterText
+                    + " sameSurface=true logicalResizeResent=false");
+        } catch (Throwable throwable) {
+            append("DroidBridgeSDL3: retained scaled presentation refresh failed"
+                    + " reason=" + reason + " error=" + throwable);
         }
     }
 
@@ -1917,6 +2129,7 @@ public final class DroidBridgeSDL3Bootstrap {
             lastResizeDeviceHeight = -1;
             transientPauseLogged = false;
             hostStopped = false;
+            retainedScaledGeometryRefreshPending = false;
             postWindowResolutionGeneration++;
             postWindowResolutionScheduled = false;
             postWindowResolutionComplete = false;
@@ -1972,6 +2185,27 @@ public final class DroidBridgeSDL3Bootstrap {
             }
 
             SDL.setupJNI();
+
+            /*
+             * Android 10's embedded OpenJDK can otherwise map a second SDL3 image.
+             * Publish the exact ART image only after nativeSetupJNI has populated
+             * its JavaVM, callback classes and per-thread JNI state. LWJGL can then
+             * reuse this JNI-ready image instead of initializing an empty copy.
+             */
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q
+                    && "ltw".equalsIgnoreCase(sdlOpenGlRendererKind)) {
+                boolean artSdlPublished =
+                        DroidBridgeSDL3NativeWindowBridge.publishArtSdl3Handle();
+                append("DroidBridgeSDL3: Android 10 LTW SDL compatibility"
+                        + " sharedImage=" + artSdlPublished
+                        + " artDispatcher=false"
+                        + " touchInitBypass=true");
+                if (!artSdlPublished) {
+                    append("DroidBridgeSDL3: WARNING Android 10 LTW could not publish "
+                            + "the ART/JNI SDL handle");
+                }
+            }
+
             SDL.initialize();
             SDL.setContext(activity);
             SDLActivity.setDroidBridgeHostActivity(activity);

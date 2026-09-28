@@ -18,6 +18,9 @@ import android.util.Log;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import org.json.JSONArray;
+import org.json.JSONObject;
+
 import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -43,6 +46,26 @@ public final class VulkanModLwjglMitigation {
     private static final String LEGACY_MARKER_ENTRY = "META-INF/javalauncher/vulkanmod_lwjgl_override";
     private static final String ZALITH_LEGACY_MARKER_ENTRY = "META-INF/zalith/vulkanmod_lwjgl_override";
     private static final String WORK_DIR_NAME = ".javalauncher_patch";
+    private static final String JARJAR_METADATA_ENTRY = "META-INF/jarjar/metadata.json";
+    private static final String VULKAN_CLASS_ENTRY = "net/vulkanmod/vulkan/Vulkan.class";
+    private static final String VK_INSTANCE_FACTORY_CLASS_ENTRY =
+            "net/vulkanmod/vulkan/VkInstanceFactory.class";
+    private static final String QUEUE_CLASS_ENTRY =
+            "net/vulkanmod/vulkan/queue/Queue.class";
+    private static final String QUEUE_FAMILY_INDICES_OWNER =
+            "net/vulkanmod/vulkan/queue/Queue$QueueFamilyIndices";
+    private static final String TRANSFER_QUEUE_ERROR =
+            "Failed to find queue family with transfer support";
+    private static final String RAW_SURFACE_METHOD = "nglfwCreateWindowSurface";
+    private static final String RAW_SURFACE_DESCRIPTOR = "(JJJJ)I";
+    private static final String PUBLIC_SURFACE_METHOD = "glfwCreateWindowSurface";
+    private static final String LEGACY_DROIDBRIDGE_BUNDLE_SURFACE_METHOD = "droidbridgeCreateWindowSurface";
+    private static final String SAFE_SURFACE_DESCRIPTOR =
+            "(Lorg/lwjgl/vulkan/VkInstance;JLorg/lwjgl/vulkan/VkAllocationCallbacks;Ljava/nio/LongBuffer;)I";
+    private static final String THREAD_OWNER = "java/lang/Thread";
+    private static final String THREAD_START_METHOD = "start";
+    private static final String THREAD_RUN_METHOD = "run";
+    private static final String VOID_METHOD_DESCRIPTOR = "()V";
 
     private static final String LEGACY_1201_ANDROID_LIBS_ASSET =
             "modcompat/vulkanmod-android-libs_0.1.0.jar";
@@ -91,20 +114,36 @@ public final class VulkanModLwjglMitigation {
                         boolean stripLegacyVmaShaderc = hasLegacy1201AndroidLibs
                                 && isLegacy1201VulkanModJar(modJar)
                                 && !isLegacy1201AndroidLibsJar(modJar);
+                        boolean stripForgeJarJarVma = hasForgeJarJarMetadata(modJar);
+                        boolean patchForgeRawSurface = stripForgeJarJarVma
+                                && containsForgeSurfaceCompatibilityWork(modJar);
+                        boolean patchForgeInstanceInitThread = stripForgeJarJarVma
+                                && containsForgeInstanceInitThreadRepair(modJar);
+                        boolean patchForgeTransferQueueFallback = stripForgeJarJarVma
+                                && containsForgeTransferQueueFallbackWork(modJar);
+                        boolean stripBundledLwjgl = containsBundledLwjglToStrip(
+                                modJar,
+                                stripLegacyVmaShaderc,
+                                stripForgeJarJarVma
+                        );
 
-                        if (!containsBundledLwjglToStrip(modJar, stripLegacyVmaShaderc)) {
-                            appendLog("VulkanMod mitigation: no bundled LWJGL entries to strip in " + modJar.getName());
-                            Log.i(TAG, "VulkanMod found but no bundled LWJGL entries to strip were detected: " + modJar.getName());
+                        if (!stripBundledLwjgl
+                                && !patchForgeRawSurface
+                                && !patchForgeInstanceInitThread
+                                && !patchForgeTransferQueueFallback) {
+                            appendLog("VulkanMod mitigation: no bundled LWJGL entries or Forge Android compatibility work to patch in " + modJar.getName());
+                            Log.i(TAG, "VulkanMod found but no LWJGL/JarJar or Forge Android compatibility work was detected: " + modJar.getName());
                             continue;
                         }
 
-                        if (isAlreadyPatched(modJar, stripLegacyVmaShaderc)) {
-                            appendLog("VulkanMod mitigation: already patched " + modJar.getAbsolutePath());
-                            Log.i(TAG, "VulkanMod already patched: " + modJar.getName());
-                            continue;
-                        }
-
-                        patchVulkanModJar(modJar, stripLegacyVmaShaderc);
+                        patchVulkanModJar(
+                                modJar,
+                                stripLegacyVmaShaderc,
+                                stripForgeJarJarVma,
+                                patchForgeRawSurface,
+                                patchForgeInstanceInitThread,
+                                patchForgeTransferQueueFallback
+                        );
                         appendLog("VulkanMod mitigation: patched successfully " + modJar.getAbsolutePath());
                         Log.i(TAG, "Patched VulkanMod LWJGL compatibility: " + modJar.getAbsolutePath());
                     } catch (Throwable throwable) {
@@ -167,6 +206,10 @@ public final class VulkanModLwjglMitigation {
         }
     }
 
+    private static boolean hasForgeJarJarMetadata(@NonNull File jarFile) throws IOException {
+        return hasEntry(jarFile, JARJAR_METADATA_ENTRY);
+    }
+
     @Nullable
     private static File[] listJarFiles(@NonNull File modsDir) {
         return modsDir.listFiles(file -> file.isFile()
@@ -175,15 +218,39 @@ public final class VulkanModLwjglMitigation {
 
     private static boolean containsBundledLwjglToStrip(
             @NonNull File jarFile,
-            boolean stripLegacyVmaShaderc
+            boolean stripLegacyVmaShaderc,
+            boolean stripForgeJarJarVma
     ) throws IOException {
         try (ZipFile zipFile = new ZipFile(jarFile)) {
             Enumeration<? extends ZipEntry> entries = zipFile.entries();
+            ZipEntry jarJarMetadata = null;
+
             while (entries.hasMoreElements()) {
                 ZipEntry entry = entries.nextElement();
-                if (shouldStripBundledLwjgl(entry.getName(), stripLegacyVmaShaderc)) {
+                if (shouldStripBundledLwjgl(
+                        entry.getName(),
+                        stripLegacyVmaShaderc,
+                        stripForgeJarJarVma
+                )) {
                     return true;
                 }
+                if (JARJAR_METADATA_ENTRY.equals(entry.getName())) {
+                    jarJarMetadata = entry;
+                }
+            }
+
+            // Forge/NeoForge JarJar keeps a metadata entry for every embedded jar.
+            // Older DroidBridge patches removed lwjgl-vulkan itself but left this
+            // metadata behind, which makes ModLauncher abort while resolving a path
+            // that no longer exists. Treat stale metadata as patch work too so an
+            // already-modified instance repairs itself without requiring a reinstall.
+            if (jarJarMetadata != null) {
+                byte[] metadata = readZipEntryBytes(zipFile, jarJarMetadata);
+                return jarJarMetadataContainsStrippedPath(
+                        metadata,
+                        stripLegacyVmaShaderc,
+                        stripForgeJarJarVma
+                );
             }
         }
         return false;
@@ -208,7 +275,11 @@ public final class VulkanModLwjglMitigation {
 
     private static void patchVulkanModJar(
             @NonNull File jarFile,
-            boolean stripLegacyVmaShaderc
+            boolean stripLegacyVmaShaderc,
+            boolean stripForgeJarJarVma,
+            boolean patchForgeRawSurface,
+            boolean patchForgeInstanceInitThread,
+            boolean patchForgeTransferQueueFallback
     ) throws IOException {
         File parentDir = jarFile.getParentFile();
         if (parentDir == null) {
@@ -228,7 +299,7 @@ public final class VulkanModLwjglMitigation {
 
         copyFile(jarFile, backup);
 
-        boolean stripped = false;
+        boolean changed = false;
         try (ZipFile zipFile = new ZipFile(jarFile);
              ZipOutputStream output = new ZipOutputStream(new FileOutputStream(tempFile))) {
 
@@ -239,23 +310,77 @@ public final class VulkanModLwjglMitigation {
                 ZipEntry inEntry = entries.nextElement();
                 String name = inEntry.getName();
 
-                if (shouldStripBundledLwjgl(name, stripLegacyVmaShaderc)) {
-                    Log.i(TAG, "Stripping nested LWJGL jar entry: " + name);
-                    stripped = true;
+                // A previous DroidBridge pass may already have written the marker
+                // while leaving Forge/NeoForge JarJar metadata stale. Replace the
+                // marker at the end instead of copying it and creating a duplicate.
+                if (MARKER_ENTRY.equals(name)) {
                     continue;
                 }
 
+                if (shouldStripBundledLwjgl(
+                        name,
+                        stripLegacyVmaShaderc,
+                        stripForgeJarJarVma
+                )) {
+                    Log.i(TAG, "Stripping nested LWJGL jar entry: " + name);
+                    changed = true;
+                    continue;
+                }
+
+                byte[] replacementBytes = null;
+                if (JARJAR_METADATA_ENTRY.equals(name) && !inEntry.isDirectory()) {
+                    byte[] originalMetadata = readZipEntryBytes(zipFile, inEntry);
+                    replacementBytes = rewriteJarJarMetadata(
+                            originalMetadata,
+                            stripLegacyVmaShaderc,
+                            stripForgeJarJarVma
+                    );
+                    if (replacementBytes != null) {
+                        changed = true;
+                        Log.i(TAG, "Removed stripped LWJGL paths from NeoForge/Forge JarJar metadata");
+                    }
+                } else if (patchForgeRawSurface
+                        && VULKAN_CLASS_ENTRY.equals(name)
+                        && !inEntry.isDirectory()) {
+                    byte[] originalClass = readZipEntryBytes(zipFile, inEntry);
+                    replacementBytes = patchForgeRawSurfaceCall(originalClass);
+                    changed = true;
+                    Log.i(TAG, "Redirected Forge/NeoForge VulkanMod raw GLFW surface call through the Android-safe public LWJGL surface API");
+                } else if (patchForgeInstanceInitThread
+                        && VK_INSTANCE_FACTORY_CLASS_ENTRY.equals(name)
+                        && !inEntry.isDirectory()) {
+                    byte[] originalClass = readZipEntryBytes(zipFile, inEntry);
+                    replacementBytes = repairForgeInstanceInitThreadStart(originalClass);
+                    changed = true;
+                    Log.i(TAG, "Restored Forge/NeoForge Vulkan instance initialization to its original helper thread");
+                } else if (patchForgeTransferQueueFallback
+                        && QUEUE_CLASS_ENTRY.equals(name)
+                        && !inEntry.isDirectory()) {
+                    byte[] originalClass = readZipEntryBytes(zipFile, inEntry);
+                    replacementBytes = patchForgeTransferQueueFallback(originalClass);
+                    changed = true;
+                    Log.i(TAG, "Patched Forge/NeoForge VulkanMod transfer queue fallback to use the graphics queue when VK_QUEUE_TRANSFER_BIT is omitted");
+                }
+
                 ZipEntry outEntry = new ZipEntry(name);
-                outEntry.setMethod(inEntry.getMethod());
-                if (inEntry.getMethod() == ZipEntry.STORED) {
-                    outEntry.setSize(inEntry.getSize());
-                    outEntry.setCompressedSize(inEntry.getCompressedSize());
-                    outEntry.setCrc(inEntry.getCrc());
+                // Rewritten metadata can no longer reuse the original STORED size/CRC.
+                // Deflating only that metadata entry keeps the rest of the jar untouched.
+                if (replacementBytes != null) {
+                    outEntry.setMethod(ZipEntry.DEFLATED);
+                } else {
+                    outEntry.setMethod(inEntry.getMethod());
+                    if (inEntry.getMethod() == ZipEntry.STORED) {
+                        outEntry.setSize(inEntry.getSize());
+                        outEntry.setCompressedSize(inEntry.getCompressedSize());
+                        outEntry.setCrc(inEntry.getCrc());
+                    }
                 }
                 outEntry.setTime(inEntry.getTime());
                 output.putNextEntry(outEntry);
 
-                if (!inEntry.isDirectory()) {
+                if (replacementBytes != null) {
+                    output.write(replacementBytes);
+                } else if (!inEntry.isDirectory()) {
                     try (InputStream input = zipFile.getInputStream(inEntry)) {
                         int read;
                         while ((read = input.read(buffer)) != -1) {
@@ -267,7 +392,7 @@ public final class VulkanModLwjglMitigation {
                 output.closeEntry();
             }
 
-            if (stripped) {
+            if (changed) {
                 ZipEntry marker = new ZipEntry(MARKER_ENTRY);
                 output.putNextEntry(marker);
                 output.write("patched".getBytes(StandardCharsets.UTF_8));
@@ -275,10 +400,10 @@ public final class VulkanModLwjglMitigation {
             }
         }
 
-        if (!stripped) {
+        if (!changed) {
             deleteIfExists(tempFile);
             deleteIfExists(backup);
-            appendLog("VulkanMod mitigation: nothing stripped, leaving original jar untouched");
+            appendLog("VulkanMod mitigation: nothing changed, leaving original jar untouched");
             return;
         }
 
@@ -317,9 +442,899 @@ public final class VulkanModLwjglMitigation {
         copyFile(backup, jarFile);
     }
 
+    @NonNull
+    private static byte[] readZipEntryBytes(
+            @NonNull ZipFile zipFile,
+            @NonNull ZipEntry entry
+    ) throws IOException {
+        try (InputStream input = zipFile.getInputStream(entry);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+            return output.toByteArray();
+        }
+    }
+
+    private static boolean jarJarMetadataContainsStrippedPath(
+            @NonNull byte[] metadataBytes,
+            boolean stripLegacyVmaShaderc,
+            boolean stripForgeJarJarVma
+    ) throws IOException {
+        try {
+            JSONObject root = new JSONObject(new String(metadataBytes, StandardCharsets.UTF_8));
+            JSONArray jars = root.optJSONArray("jars");
+            if (jars == null) return false;
+
+            for (int i = 0; i < jars.length(); i++) {
+                JSONObject jar = jars.optJSONObject(i);
+                if (jar == null) continue;
+                String path = jar.optString("path", "");
+                if (!path.isEmpty() && shouldStripBundledLwjgl(
+                        path,
+                        stripLegacyVmaShaderc,
+                        stripForgeJarJarVma
+                )) {
+                    return true;
+                }
+            }
+            return false;
+        } catch (Throwable throwable) {
+            throw new IOException("Could not inspect Forge/NeoForge JarJar metadata", throwable);
+        }
+    }
+
+    @Nullable
+    private static byte[] rewriteJarJarMetadata(
+            @NonNull byte[] metadataBytes,
+            boolean stripLegacyVmaShaderc,
+            boolean stripForgeJarJarVma
+    ) throws IOException {
+        try {
+            JSONObject root = new JSONObject(new String(metadataBytes, StandardCharsets.UTF_8));
+            JSONArray jars = root.optJSONArray("jars");
+            if (jars == null) return null;
+
+            JSONArray kept = new JSONArray();
+            int removed = 0;
+
+            for (int i = 0; i < jars.length(); i++) {
+                Object value = jars.get(i);
+                if (value instanceof JSONObject) {
+                    JSONObject jar = (JSONObject) value;
+                    String path = jar.optString("path", "");
+                    if (!path.isEmpty() && shouldStripBundledLwjgl(
+                        path,
+                        stripLegacyVmaShaderc,
+                        stripForgeJarJarVma
+                )) {
+                        removed++;
+                        continue;
+                    }
+                }
+                kept.put(value);
+            }
+
+            if (removed == 0) return null;
+
+            root.put("jars", kept);
+            return (root.toString(2) + "\n").getBytes(StandardCharsets.UTF_8);
+        } catch (Throwable throwable) {
+            throw new IOException("Could not rewrite Forge/NeoForge JarJar metadata", throwable);
+        }
+    }
+
+
+
+    private static boolean containsForgeTransferQueueFallbackWork(@NonNull File jarFile) throws IOException {
+        try (ZipFile zipFile = new ZipFile(jarFile)) {
+            ZipEntry entry = zipFile.getEntry(QUEUE_CLASS_ENTRY);
+            if (entry == null || entry.isDirectory()) return false;
+            byte[] classBytes = readZipEntryBytes(zipFile, entry);
+            return findTransferQueueThrowOffset(classBytes) >= 0;
+        }
+    }
+
+    @NonNull
+    private static byte[] patchForgeTransferQueueFallback(@NonNull byte[] original) throws IOException {
+        byte[] rewritten = original.clone();
+        ParsedConstantPool pool = parseConstantPool(rewritten);
+
+        int graphicsFamilyRef = findFieldRef(
+                pool,
+                QUEUE_FAMILY_INDICES_OWNER,
+                "graphicsFamily",
+                "I"
+        );
+        if (graphicsFamilyRef <= 0) {
+            throw new IOException("VulkanMod graphics queue-family field was not found");
+        }
+
+        int throwOffset = findTransferQueueThrowOffset(rewritten);
+        if (throwOffset < 0) {
+            throw new IOException("VulkanMod transfer-queue fallback target was not found");
+        }
+
+        // Reforged currently throws when no queue family explicitly advertises
+        // VK_QUEUE_TRANSFER_BIT. Vulkan explicitly allows graphics/compute queue
+        // families to omit that bit because transfer commands are implicitly
+        // supported there. Preserve bytecode length and existing stack-map/frame
+        // offsets by replacing only the 10-byte exception construction:
+        //
+        //   new RuntimeException
+        //   dup
+        //   ldc "Failed to find queue family with transfer support"
+        //   invokespecial RuntimeException.<init>
+        //   athrow
+        //
+        // with:
+        //
+        //   aload_1
+        //   getfield QueueFamilyIndices.graphicsFamily
+        //   istore <candidate local>
+        //   nop x4
+        //
+        // Execution then falls through to the mod's existing
+        // transferFamily = candidate assignment.
+        int candidateLocal = unsigned(rewritten[throwOffset - 5]);
+        rewritten[throwOffset] = 0x2b; // ALOAD_1
+        rewritten[throwOffset + 1] = (byte) 0xb4; // GETFIELD
+        rewritten[throwOffset + 2] = (byte) ((graphicsFamilyRef >>> 8) & 0xFF);
+        rewritten[throwOffset + 3] = (byte) (graphicsFamilyRef & 0xFF);
+        rewritten[throwOffset + 4] = 0x36; // ISTORE
+        rewritten[throwOffset + 5] = (byte) candidateLocal;
+        rewritten[throwOffset + 6] = 0;
+        rewritten[throwOffset + 7] = 0;
+        rewritten[throwOffset + 8] = 0;
+        rewritten[throwOffset + 9] = 0;
+
+        if (findTransferQueueThrowOffset(rewritten) >= 0) {
+            throw new IOException("VulkanMod transfer-queue fallback patch did not remove the invalid explicit-transfer requirement");
+        }
+        return rewritten;
+    }
+
+    private static int findTransferQueueThrowOffset(@NonNull byte[] classBytes) throws IOException {
+        ParsedConstantPool pool = parseConstantPool(classBytes);
+        int transferErrorString = findStringConstant(pool, TRANSFER_QUEUE_ERROR);
+        if (transferErrorString <= 0 || transferErrorString > 0xFF) return -1;
+
+        ClassReader reader = new ClassReader(classBytes);
+        reader.position(pool.constantPoolEnd);
+        reader.skip(6); // access, this class, super class
+        int interfaceCount = reader.u2();
+        reader.skip(interfaceCount * 2);
+
+        int fieldCount = reader.u2();
+        for (int i = 0; i < fieldCount; i++) skipClassMember(reader);
+
+        int methodCount = reader.u2();
+        for (int i = 0; i < methodCount; i++) {
+            reader.u2(); // access
+            int nameIndex = reader.u2();
+            int descriptorIndex = reader.u2();
+            int attributeCount = reader.u2();
+            String methodName = utf8At(pool.utf8, nameIndex);
+            String methodDescriptor = utf8At(pool.utf8, descriptorIndex);
+
+            for (int attribute = 0; attribute < attributeCount; attribute++) {
+                int attributeNameIndex = reader.u2();
+                long attributeLengthLong = reader.u4();
+                if (attributeLengthLong > Integer.MAX_VALUE) {
+                    throw new IOException("Class attribute is too large");
+                }
+                int attributeLength = (int) attributeLengthLong;
+                int attributeStart = reader.position();
+
+                if ("findQueueFamilies".equals(methodName)
+                        && "(Lorg/lwjgl/vulkan/VkPhysicalDevice;)Lnet/vulkanmod/vulkan/queue/Queue$QueueFamilyIndices;".equals(methodDescriptor)
+                        && "Code".equals(utf8At(pool.utf8, attributeNameIndex))) {
+                    reader.u2(); // max stack
+                    reader.u2(); // max locals
+                    long codeLengthLong = reader.u4();
+                    if (codeLengthLong > Integer.MAX_VALUE) {
+                        throw new IOException("Method bytecode is too large");
+                    }
+                    int codeLength = (int) codeLengthLong;
+                    int codeOffset = reader.position();
+                    reader.require(codeLength);
+
+                    for (int offset = codeOffset + 6; offset + 9 < codeOffset + codeLength; offset++) {
+                        // The three bytes immediately before NEW are:
+                        // ILOAD <candidate local>, ICONST_M1. The preceding
+                        // IF_ICMPNE remains intact and skips this block when a
+                        // genuine explicit transfer family was found.
+                        if (unsigned(classBytes[offset - 6]) != 0x15
+                                || unsigned(classBytes[offset - 4]) != 0x02
+                                || unsigned(classBytes[offset - 3]) != 0xa0
+                                || unsigned(classBytes[offset]) != 0xbb
+                                || unsigned(classBytes[offset + 3]) != 0x59
+                                || unsigned(classBytes[offset + 4]) != 0x12
+                                || unsigned(classBytes[offset + 5]) != transferErrorString
+                                || unsigned(classBytes[offset + 6]) != 0xb7
+                                || unsigned(classBytes[offset + 9]) != 0xbf) {
+                            continue;
+                        }
+                        return offset;
+                    }
+                    return -1;
+                }
+
+                reader.position(attributeStart + attributeLength);
+            }
+        }
+        return -1;
+    }
+
+    private static boolean containsForgeInstanceInitThreadRepair(@NonNull File jarFile) throws IOException {
+        try (ZipFile zipFile = new ZipFile(jarFile)) {
+            ZipEntry entry = zipFile.getEntry(VK_INSTANCE_FACTORY_CLASS_ENTRY);
+            if (entry == null || entry.isDirectory()) return false;
+            byte[] classBytes = readZipEntryBytes(zipFile, entry);
+            ParsedConstantPool pool = parseConstantPool(classBytes);
+            int startRef = findMethodRef(
+                    pool,
+                    THREAD_OWNER,
+                    THREAD_START_METHOD,
+                    VOID_METHOD_DESCRIPTOR
+            );
+            int runRef = findMethodRef(
+                    pool,
+                    THREAD_OWNER,
+                    THREAD_RUN_METHOD,
+                    VOID_METHOD_DESCRIPTOR
+            );
+            // A clean Reforged build calls Thread.start(). One of the earlier
+            // Android experiments changed that exact Methodref to Thread.run().
+            // Repair only that unmistakable state so unrelated Thread.run() use is
+            // never touched.
+            return startRef <= 0 && runRef > 0;
+        }
+    }
+
+    @NonNull
+    private static byte[] repairForgeInstanceInitThreadStart(@NonNull byte[] original) throws IOException {
+        ParsedConstantPool pool = parseConstantPool(original);
+        int startMethodRef = findMethodRef(
+                pool,
+                THREAD_OWNER,
+                THREAD_START_METHOD,
+                VOID_METHOD_DESCRIPTOR
+        );
+        if (startMethodRef > 0) return original;
+
+        int runMethodRef = findMethodRef(
+                pool,
+                THREAD_OWNER,
+                THREAD_RUN_METHOD,
+                VOID_METHOD_DESCRIPTOR
+        );
+        if (runMethodRef <= 0) {
+            throw new IOException("Forge/NeoForge Vulkan instance-init Thread.run() repair target was not found");
+        }
+
+        int nameAndTypeIndex = pool.value2[runMethodRef];
+        if (!validIndex(nameAndTypeIndex, pool.tags.length)
+                || pool.tags[nameAndTypeIndex] != 12) {
+            throw new IOException("Invalid Vulkan instance-init Thread.run() NameAndType constant");
+        }
+
+        int nameUtf8Index = pool.value1[nameAndTypeIndex];
+        ensureUtf8IsPrivateToNameAndType(pool, nameAndTypeIndex, nameUtf8Index, -1);
+
+        byte[] rewritten = rewriteUtf8Constant(
+                original,
+                pool,
+                nameUtf8Index,
+                THREAD_START_METHOD
+        );
+
+        ParsedConstantPool rewrittenPool = parseConstantPool(rewritten);
+        if (findMethodRef(
+                rewrittenPool,
+                THREAD_OWNER,
+                THREAD_START_METHOD,
+                VOID_METHOD_DESCRIPTOR
+        ) <= 0) {
+            throw new IOException("Could not restore Vulkan instance-init Thread.start()");
+        }
+
+        return rewritten;
+    }
+
+    private static boolean containsForgeSurfaceCompatibilityWork(@NonNull File jarFile) throws IOException {
+        try (ZipFile zipFile = new ZipFile(jarFile)) {
+            ZipEntry entry = zipFile.getEntry(VULKAN_CLASS_ENTRY);
+            if (entry == null || entry.isDirectory()) return false;
+            byte[] classBytes = readZipEntryBytes(zipFile, entry);
+            ParsedConstantPool pool = parseConstantPool(classBytes);
+            return findMethodRef(
+                    pool,
+                    "org/lwjgl/glfw/GLFWVulkan",
+                    RAW_SURFACE_METHOD,
+                    RAW_SURFACE_DESCRIPTOR
+            ) > 0 || findMethodRef(
+                    pool,
+                    "org/lwjgl/glfw/GLFWVulkan",
+                    LEGACY_DROIDBRIDGE_BUNDLE_SURFACE_METHOD,
+                    SAFE_SURFACE_DESCRIPTOR
+            ) > 0;
+        }
+    }
+
+    @NonNull
+    private static byte[] patchForgeRawSurfaceCall(@NonNull byte[] original) throws IOException {
+        ParsedConstantPool originalPool = parseConstantPool(original);
+
+        // v39 test builds redirected the already-safe object call through a
+        // DroidBridge bundle-unwrapping helper. Once GLFW window destruction is
+        // implemented correctly, Vulkan Reforged creates a fresh GLFW_NO_API
+        // window whose handle is already the ANativeWindow. Repair those jars
+        // back to LWJGL's normal public surface entry point.
+        int legacyBundleMethodRef = findMethodRef(
+                originalPool,
+                "org/lwjgl/glfw/GLFWVulkan",
+                LEGACY_DROIDBRIDGE_BUNDLE_SURFACE_METHOD,
+                SAFE_SURFACE_DESCRIPTOR
+        );
+        if (legacyBundleMethodRef > 0) {
+            int nameAndTypeIndex = originalPool.value2[legacyBundleMethodRef];
+            if (!validIndex(nameAndTypeIndex, originalPool.tags.length)
+                    || originalPool.tags[nameAndTypeIndex] != 12) {
+                throw new IOException("Invalid legacy DroidBridge GLFW surface NameAndType constant");
+            }
+            int nameUtf8Index = originalPool.value1[nameAndTypeIndex];
+            ensureUtf8IsPrivateToNameAndType(
+                    originalPool,
+                    nameAndTypeIndex,
+                    nameUtf8Index,
+                    -1
+            );
+            return rewriteUtf8Constant(
+                    original,
+                    originalPool,
+                    nameUtf8Index,
+                    PUBLIC_SURFACE_METHOD
+            );
+        }
+
+        int rawMethodRef = findMethodRef(
+                originalPool,
+                "org/lwjgl/glfw/GLFWVulkan",
+                RAW_SURFACE_METHOD,
+                RAW_SURFACE_DESCRIPTOR
+        );
+        if (rawMethodRef <= 0) {
+            throw new IOException("Forge/NeoForge raw GLFW Vulkan surface target was not found");
+        }
+
+        int nameAndTypeIndex = originalPool.value2[rawMethodRef];
+        if (!validIndex(nameAndTypeIndex, originalPool.tags.length)
+                || originalPool.tags[nameAndTypeIndex] != 12) {
+            throw new IOException("Invalid raw GLFW surface NameAndType constant");
+        }
+
+        int nameUtf8Index = originalPool.value1[nameAndTypeIndex];
+        int descriptorUtf8Index = originalPool.value2[nameAndTypeIndex];
+        ensureUtf8IsPrivateToNameAndType(originalPool, nameAndTypeIndex, nameUtf8Index, descriptorUtf8Index);
+
+        byte[] rewritten = rewriteUtf8Constants(
+                original,
+                originalPool,
+                nameUtf8Index,
+                PUBLIC_SURFACE_METHOD,
+                descriptorUtf8Index,
+                SAFE_SURFACE_DESCRIPTOR
+        );
+
+        ParsedConstantPool pool = parseConstantPool(rewritten);
+        int safeMethodRef = findMethodRef(
+                pool,
+                "org/lwjgl/glfw/GLFWVulkan",
+                PUBLIC_SURFACE_METHOD,
+                SAFE_SURFACE_DESCRIPTOR
+        );
+        if (safeMethodRef <= 0) {
+            throw new IOException("Could not rewrite raw GLFW surface method reference");
+        }
+
+        ClassReader reader = new ClassReader(rewritten);
+        reader.position(pool.constantPoolEnd);
+        reader.skip(6); // access, this class, super class
+        int interfaceCount = reader.u2();
+        reader.skip(interfaceCount * 2);
+
+        int fieldCount = reader.u2();
+        for (int i = 0; i < fieldCount; i++) skipClassMember(reader);
+
+        int methodCount = reader.u2();
+        for (int i = 0; i < methodCount; i++) {
+            reader.u2(); // access
+            int nameIndex = reader.u2();
+            int descriptorIndex = reader.u2();
+            int attributeCount = reader.u2();
+            String methodName = utf8At(pool.utf8, nameIndex);
+            String methodDescriptor = utf8At(pool.utf8, descriptorIndex);
+
+            for (int attribute = 0; attribute < attributeCount; attribute++) {
+                int attributeNameIndex = reader.u2();
+                long attributeLengthLong = reader.u4();
+                if (attributeLengthLong > Integer.MAX_VALUE) {
+                    throw new IOException("Class attribute is too large");
+                }
+                int attributeLength = (int) attributeLengthLong;
+                int attributeStart = reader.position();
+
+                if ("createSurface".equals(methodName)
+                        && "(J)V".equals(methodDescriptor)
+                        && "Code".equals(utf8At(pool.utf8, attributeNameIndex))) {
+                    reader.u2(); // max stack
+                    reader.u2(); // max locals
+                    long codeLengthLong = reader.u4();
+                    if (codeLengthLong > Integer.MAX_VALUE) {
+                        throw new IOException("Method bytecode is too large");
+                    }
+                    int codeLength = (int) codeLengthLong;
+                    int codeOffset = reader.position();
+                    reader.require(codeLength);
+
+                    int sequenceOffset = findForgeRawSurfaceSequence(
+                            rewritten,
+                            codeOffset,
+                            codeLength,
+                            pool,
+                            safeMethodRef
+                    );
+                    if (sequenceOffset < 0) {
+                        throw new IOException("Exact Forge/NeoForge raw GLFW surface bytecode sequence was not found");
+                    }
+
+                    // Original:
+                    //   GETSTATIC instance
+                    //   INVOKEVIRTUAL VkInstance.address()J
+                    //   GETSTATIC window
+                    //   LCONST_0
+                    //   ALOAD_3
+                    //   INVOKESTATIC MemoryUtil.memAddress(LongBuffer)J
+                    //   INVOKESTATIC GLFWVulkan.nglfwCreateWindowSurface(JJJJ)I
+                    //
+                    // Rewritten, preserving bytecode length and all branch/frame offsets:
+                    //   GETSTATIC instance
+                    //   NOP x3
+                    //   GETSTATIC window
+                    //   ACONST_NULL
+                    //   ALOAD_3
+                    //   NOP x3
+                    //   INVOKESTATIC GLFWVulkan.glfwCreateWindowSurface(VkInstance, long, callbacks, LongBuffer)I
+                    for (int offset = 3; offset <= 5; offset++) {
+                        rewritten[sequenceOffset + offset] = 0;
+                    }
+                    rewritten[sequenceOffset + 9] = 0x01; // ACONST_NULL
+                    for (int offset = 11; offset <= 13; offset++) {
+                        rewritten[sequenceOffset + offset] = 0;
+                    }
+                    return rewritten;
+                }
+
+                reader.position(attributeStart + attributeLength);
+            }
+        }
+
+        throw new IOException("Vulkan.createSurface(long) was not found");
+    }
+
+    private static int findForgeRawSurfaceSequence(
+            @NonNull byte[] bytes,
+            int codeOffset,
+            int codeLength,
+            @NonNull ParsedConstantPool pool,
+            int safeMethodRef
+    ) {
+        int end = codeOffset + codeLength - 17;
+        for (int offset = codeOffset; offset <= end; offset++) {
+            if (unsigned(bytes[offset]) != 0xB2
+                    || unsigned(bytes[offset + 3]) != 0xB6
+                    || unsigned(bytes[offset + 6]) != 0xB2
+                    || unsigned(bytes[offset + 9]) != 0x09
+                    || unsigned(bytes[offset + 10]) != 0x2D
+                    || unsigned(bytes[offset + 11]) != 0xB8
+                    || unsigned(bytes[offset + 14]) != 0xB8) {
+                continue;
+            }
+
+            int instanceFieldRef = readU2(bytes, offset + 1);
+            int addressMethodRef = readU2(bytes, offset + 4);
+            int windowFieldRef = readU2(bytes, offset + 7);
+            int memAddressMethodRef = readU2(bytes, offset + 12);
+            int surfaceMethodRef = readU2(bytes, offset + 15);
+
+            if (surfaceMethodRef != safeMethodRef) continue;
+            if (!referenceMatches(
+                    pool,
+                    instanceFieldRef,
+                    9,
+                    "net/vulkanmod/vulkan/Vulkan",
+                    "instance",
+                    "Lorg/lwjgl/vulkan/VkInstance;"
+            )) continue;
+            if (!referenceMatches(
+                    pool,
+                    addressMethodRef,
+                    10,
+                    "org/lwjgl/vulkan/VkInstance",
+                    "address",
+                    "()J"
+            )) continue;
+            if (!referenceMatches(
+                    pool,
+                    windowFieldRef,
+                    9,
+                    "net/vulkanmod/vulkan/Vulkan",
+                    "window",
+                    "J"
+            )) continue;
+            if (!referenceMatches(
+                    pool,
+                    memAddressMethodRef,
+                    10,
+                    "org/lwjgl/system/MemoryUtil",
+                    "memAddress",
+                    "(Ljava/nio/LongBuffer;)J"
+            )) continue;
+
+            return offset;
+        }
+        return -1;
+    }
+
+    private static void ensureUtf8IsPrivateToNameAndType(
+            @NonNull ParsedConstantPool pool,
+            int targetNameAndType,
+            int nameUtf8Index,
+            int descriptorUtf8Index
+    ) throws IOException {
+        for (int index = 1; index < pool.tags.length; index++) {
+            if (index == targetNameAndType || pool.tags[index] != 12) continue;
+            boolean sharesName = pool.value1[index] == nameUtf8Index;
+            boolean sharesDescriptor = descriptorUtf8Index > 0
+                    && pool.value2[index] == descriptorUtf8Index;
+            if (sharesName || sharesDescriptor) {
+                throw new IOException("Target method UTF8 constants are shared; refusing unsafe rewrite");
+            }
+        }
+    }
+
+    @NonNull
+    private static byte[] rewriteUtf8Constant(
+            @NonNull byte[] original,
+            @NonNull ParsedConstantPool pool,
+            int targetIndex,
+            @NonNull String targetValue
+    ) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream(original.length + 32);
+        output.write(original, 0, 10); // magic, versions, constant-pool count
+
+        for (int index = 1; index < pool.tags.length; index++) {
+            if (pool.tags[index] == 0) continue; // second slot of long/double
+            int start = pool.entryStart[index];
+            int end = pool.entryEnd[index];
+            if (start < 0 || end <= start) {
+                throw new IOException("Invalid constant-pool entry boundaries");
+            }
+
+            if (index == targetIndex) {
+                byte[] utf8Bytes = targetValue.getBytes(StandardCharsets.UTF_8);
+                if (utf8Bytes.length > 0xFFFF) throw new IOException("UTF8 constant is too long");
+                output.write(1);
+                output.write((utf8Bytes.length >>> 8) & 0xFF);
+                output.write(utf8Bytes.length & 0xFF);
+                output.write(utf8Bytes, 0, utf8Bytes.length);
+            } else {
+                output.write(original, start, end - start);
+            }
+        }
+
+        output.write(original, pool.constantPoolEnd, original.length - pool.constantPoolEnd);
+        return output.toByteArray();
+    }
+
+    @NonNull
+    private static byte[] rewriteUtf8Constants(
+            @NonNull byte[] original,
+            @NonNull ParsedConstantPool pool,
+            int firstIndex,
+            @NonNull String firstValue,
+            int secondIndex,
+            @NonNull String secondValue
+    ) throws IOException {
+        ByteArrayOutputStream output = new ByteArrayOutputStream(original.length + 128);
+        output.write(original, 0, 10); // magic, versions, constant-pool count
+
+        for (int index = 1; index < pool.tags.length; index++) {
+            if (pool.tags[index] == 0) continue; // second slot of long/double
+            int start = pool.entryStart[index];
+            int end = pool.entryEnd[index];
+            if (start < 0 || end <= start) {
+                throw new IOException("Invalid constant-pool entry boundaries");
+            }
+
+            if (index == firstIndex || index == secondIndex) {
+                String value = index == firstIndex ? firstValue : secondValue;
+                byte[] utf8Bytes = value.getBytes(StandardCharsets.UTF_8);
+                if (utf8Bytes.length > 0xFFFF) throw new IOException("UTF8 constant is too long");
+                output.write(1);
+                output.write((utf8Bytes.length >>> 8) & 0xFF);
+                output.write(utf8Bytes.length & 0xFF);
+                output.write(utf8Bytes, 0, utf8Bytes.length);
+            } else {
+                output.write(original, start, end - start);
+            }
+        }
+
+        output.write(original, pool.constantPoolEnd, original.length - pool.constantPoolEnd);
+        return output.toByteArray();
+    }
+
+    @NonNull
+    private static ParsedConstantPool parseConstantPool(@NonNull byte[] bytes) throws IOException {
+        ClassReader reader = new ClassReader(bytes);
+        if (reader.u4() != 0xCAFEBABEL) throw new IOException("Invalid class magic");
+        reader.u2(); // minor
+        reader.u2(); // major
+        int constantPoolCount = reader.u2();
+
+        int[] tags = new int[constantPoolCount];
+        int[] value1 = new int[constantPoolCount];
+        int[] value2 = new int[constantPoolCount];
+        int[] entryStart = new int[constantPoolCount];
+        int[] entryEnd = new int[constantPoolCount];
+        String[] utf8 = new String[constantPoolCount];
+
+        for (int index = 1; index < constantPoolCount; index++) {
+            entryStart[index] = reader.position();
+            int tag = reader.u1();
+            tags[index] = tag;
+            switch (tag) {
+                case 1: {
+                    int length = reader.u2();
+                    utf8[index] = new String(reader.bytes(length), StandardCharsets.UTF_8);
+                    break;
+                }
+                case 3:
+                case 4:
+                    reader.skip(4);
+                    break;
+                case 5:
+                case 6:
+                    reader.skip(8);
+                    entryEnd[index] = reader.position();
+                    index++;
+                    if (index < constantPoolCount) {
+                        entryStart[index] = -1;
+                        entryEnd[index] = -1;
+                    }
+                    continue;
+                case 7:
+                case 8:
+                case 16:
+                case 19:
+                case 20:
+                    value1[index] = reader.u2();
+                    break;
+                case 9:
+                case 10:
+                case 11:
+                case 12:
+                case 17:
+                case 18:
+                    value1[index] = reader.u2();
+                    value2[index] = reader.u2();
+                    break;
+                case 15:
+                    value1[index] = reader.u1();
+                    value2[index] = reader.u2();
+                    break;
+                default:
+                    throw new IOException("Unsupported class constant tag " + tag);
+            }
+            entryEnd[index] = reader.position();
+        }
+
+        return new ParsedConstantPool(
+                tags,
+                value1,
+                value2,
+                entryStart,
+                entryEnd,
+                utf8,
+                reader.position()
+        );
+    }
+
+    private static int findMethodRef(
+            @NonNull ParsedConstantPool pool,
+            @NonNull String owner,
+            @NonNull String name,
+            @NonNull String descriptor
+    ) {
+        for (int index = 1; index < pool.tags.length; index++) {
+            if (referenceMatches(pool, index, 10, owner, name, descriptor)) return index;
+        }
+        return -1;
+    }
+
+    private static int findFieldRef(
+            @NonNull ParsedConstantPool pool,
+            @NonNull String owner,
+            @NonNull String name,
+            @NonNull String descriptor
+    ) {
+        for (int index = 1; index < pool.tags.length; index++) {
+            if (referenceMatches(pool, index, 9, owner, name, descriptor)) return index;
+        }
+        return -1;
+    }
+
+    private static int findStringConstant(
+            @NonNull ParsedConstantPool pool,
+            @NonNull String value
+    ) {
+        for (int index = 1; index < pool.tags.length; index++) {
+            if (pool.tags[index] != 8) continue;
+            if (value.equals(utf8At(pool.utf8, pool.value1[index]))) return index;
+        }
+        return -1;
+    }
+
+    private static boolean referenceMatches(
+            @NonNull ParsedConstantPool pool,
+            int referenceIndex,
+            int expectedTag,
+            @NonNull String expectedOwner,
+            @NonNull String expectedName,
+            @NonNull String expectedDescriptor
+    ) {
+        if (!validIndex(referenceIndex, pool.tags.length)
+                || pool.tags[referenceIndex] != expectedTag) {
+            return false;
+        }
+        int classIndex = pool.value1[referenceIndex];
+        int nameAndTypeIndex = pool.value2[referenceIndex];
+        if (!validIndex(classIndex, pool.tags.length) || pool.tags[classIndex] != 7) return false;
+        if (!validIndex(nameAndTypeIndex, pool.tags.length) || pool.tags[nameAndTypeIndex] != 12) return false;
+
+        String owner = utf8At(pool.utf8, pool.value1[classIndex]);
+        String name = utf8At(pool.utf8, pool.value1[nameAndTypeIndex]);
+        String descriptor = utf8At(pool.utf8, pool.value2[nameAndTypeIndex]);
+        return expectedOwner.equals(owner)
+                && expectedName.equals(name)
+                && expectedDescriptor.equals(descriptor);
+    }
+
+    private static void skipClassMember(@NonNull ClassReader reader) throws IOException {
+        reader.skip(6); // access, name, descriptor
+        int attributeCount = reader.u2();
+        for (int i = 0; i < attributeCount; i++) {
+            reader.u2();
+            long length = reader.u4();
+            if (length > Integer.MAX_VALUE) throw new IOException("Class attribute is too large");
+            reader.skip((int) length);
+        }
+    }
+
+    private static boolean validIndex(int index, int length) {
+        return index > 0 && index < length;
+    }
+
+    @Nullable
+    private static String utf8At(@NonNull String[] utf8, int index) {
+        return validIndex(index, utf8.length) ? utf8[index] : null;
+    }
+
+    private static int readU2(@NonNull byte[] bytes, int offset) {
+        return (unsigned(bytes[offset]) << 8) | unsigned(bytes[offset + 1]);
+    }
+
+    private static int unsigned(byte value) {
+        return value & 0xFF;
+    }
+
+    private static final class ParsedConstantPool {
+        final int[] tags;
+        final int[] value1;
+        final int[] value2;
+        final int[] entryStart;
+        final int[] entryEnd;
+        final String[] utf8;
+        final int constantPoolEnd;
+
+        ParsedConstantPool(
+                @NonNull int[] tags,
+                @NonNull int[] value1,
+                @NonNull int[] value2,
+                @NonNull int[] entryStart,
+                @NonNull int[] entryEnd,
+                @NonNull String[] utf8,
+                int constantPoolEnd
+        ) {
+            this.tags = tags;
+            this.value1 = value1;
+            this.value2 = value2;
+            this.entryStart = entryStart;
+            this.entryEnd = entryEnd;
+            this.utf8 = utf8;
+            this.constantPoolEnd = constantPoolEnd;
+        }
+    }
+
+    private static final class ClassReader {
+        private final byte[] bytes;
+        private int position;
+
+        ClassReader(@NonNull byte[] bytes) {
+            this.bytes = bytes;
+        }
+
+        int position() {
+            return position;
+        }
+
+        void position(int newPosition) throws IOException {
+            if (newPosition < 0 || newPosition > bytes.length) {
+                throw new IOException("Invalid class position " + newPosition);
+            }
+            position = newPosition;
+        }
+
+        int u1() throws IOException {
+            require(1);
+            return unsigned(bytes[position++]);
+        }
+
+        int u2() throws IOException {
+            require(2);
+            int value = readU2(bytes, position);
+            position += 2;
+            return value;
+        }
+
+        long u4() throws IOException {
+            require(4);
+            long value = ((long) unsigned(bytes[position]) << 24)
+                    | ((long) unsigned(bytes[position + 1]) << 16)
+                    | ((long) unsigned(bytes[position + 2]) << 8)
+                    | unsigned(bytes[position + 3]);
+            position += 4;
+            return value;
+        }
+
+        @NonNull
+        byte[] bytes(int length) throws IOException {
+            require(length);
+            byte[] value = new byte[length];
+            System.arraycopy(bytes, position, value, 0, length);
+            position += length;
+            return value;
+        }
+
+        void skip(int length) throws IOException {
+            require(length);
+            position += length;
+        }
+
+        void require(int length) throws IOException {
+            if (length < 0 || position > bytes.length - length) {
+                throw new IOException("Truncated class file");
+            }
+        }
+    }
+
     private static boolean shouldStripBundledLwjgl(
             @NonNull String entryName,
-            boolean stripLegacyVmaShaderc
+            boolean stripLegacyVmaShaderc,
+            boolean stripForgeJarJarVma
     ) {
         String normalized = entryName.replace('\\', '/').toLowerCase(java.util.Locale.ROOT);
         int slash = normalized.lastIndexOf('/');
@@ -328,6 +1343,13 @@ public final class VulkanModLwjglMitigation {
         if (!fileName.endsWith(".jar") || !fileName.contains("lwjgl")) return false;
 
         if (fileName.contains("vulkan")) return true;
+
+        // DroidBridge's Android LWJGL bridge already contains the VMA Java package
+        // and Android VMA native. Forge/NeoForge exposes JarJar dependencies as
+        // modules, so keeping VulkanMod's bundled lwjgl-vma creates a split-package
+        // module collision before the game can start. Shaderc is intentionally kept
+        // because the DroidBridge bridge does not provide the Shaderc Java package.
+        if (stripForgeJarJarVma && fileName.contains("vma")) return true;
 
         // VulkanMod 0.5.x for Minecraft 1.20.1 was built around LWJGL 3.3.2
         // VMA/Shaderc classes. DroidBridge launches it with the Android LWJGL

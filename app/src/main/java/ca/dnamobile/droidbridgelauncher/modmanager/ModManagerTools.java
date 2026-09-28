@@ -13,11 +13,12 @@
 package ca.dnamobile.droidbridgelauncher.modmanager;
 
 import android.app.Activity;
-import android.app.AlertDialog;
 import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 import ca.dnamobile.droidbridgelauncher.R;
 import ca.dnamobile.droidbridgelauncher.data.AccountStore;
@@ -56,7 +57,7 @@ public final class ModManagerTools {
             return false;
         }
 
-        new AlertDialog.Builder(activity)
+        new MaterialAlertDialogBuilder(activity)
                 .setTitle(R.string.account_required_title)
                 .setMessage(R.string.account_required_before_install_message)
                 .setNegativeButton(android.R.string.cancel, null)
@@ -73,7 +74,7 @@ public final class ModManagerTools {
             return false;
         }
 
-        new AlertDialog.Builder(activity)
+        new MaterialAlertDialogBuilder(activity)
                 .setTitle(R.string.offline_locked_title)
                 .setMessage(R.string.offline_locked_message)
                 .setNegativeButton(android.R.string.cancel, null)

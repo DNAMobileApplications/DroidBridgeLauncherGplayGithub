@@ -40,8 +40,10 @@ import ca.dnamobile.droidbridgelauncher.modcompat.DiscordRpcCompatPatch;
 import ca.dnamobile.droidbridgelauncher.modcompat.ControllerModCompat;
 import ca.dnamobile.droidbridgelauncher.modcompat.FFmpegPluginCompat;
 import ca.dnamobile.droidbridgelauncher.renderer.DriverPluginManager;
+import ca.dnamobile.droidbridgelauncher.renderer.BtaRendererPolicy;
 import ca.dnamobile.droidbridgelauncher.renderer.DroidBridgeMesaSupport;
 import ca.dnamobile.droidbridgelauncher.renderer.LiteGlesLaunchPreloader;
+import ca.dnamobile.droidbridgelauncher.renderer.KopperZinkRenderer;
 import ca.dnamobile.droidbridgelauncher.renderer.MobileGluesConfigHelper;
 import ca.dnamobile.droidbridgelauncher.renderer.AdrenoSyncFenceFdGuard;
 import ca.dnamobile.droidbridgelauncher.renderer.RendererInterface;
@@ -54,6 +56,15 @@ public final class JavaRuntimeBootstrap {
     private static final String TAG = "JavaRuntimeBootstrap";
     private static final Pattern MINECRAFT_RELEASE_PATTERN = Pattern.compile("(?<!\\d)(\\d+)\\.(\\d+)(?:\\.(\\d+))?");
 
+    /*
+     * prepare() runs immediately before applyPreparedVulkanCompatibilityJvmArgs().
+     * Remember only the renderer class needed for pre-JVM native-loader routing so
+     * LWJGL 3.4 cannot load Android's system Vulkan loader before Kopper/Turnip.
+     * This value is overwritten on every launch.
+     */
+    private static volatile boolean sPreparedKopperZink = false;
+    private static volatile boolean sPreparedLtwRenderer = false;
+
     private JavaRuntimeBootstrap() {
     }
 
@@ -64,6 +75,8 @@ public final class JavaRuntimeBootstrap {
             @NonNull RendererInterface renderer
     ) {
         PathManager.initContextConstants(context);
+        sPreparedKopperZink = KopperZinkRenderer.isRenderer(renderer);
+        sPreparedLtwRenderer = isLtwRenderer(renderer);
 
         // Some Adreno GPU devices require this because of the FD Guard loading too many files which causes crashing
         AdrenoSyncFenceFdGuard.startIfNeeded(renderer);
@@ -177,13 +190,19 @@ public final class JavaRuntimeBootstrap {
         }
 
         if (isLtwRenderer(renderer)) {
+            boolean minecraft26Plus = isMinecraft26OrNewer(plan.getEffectiveMinecraftVersionId());
             env.put("DROIDBRIDGE_RENDERER", "opengles3_ltw");
+            env.put("POJAV_RENDERER", "opengles3_ltw");
             env.put("DROIDBRIDGE_EGL", "libltw.so");
             env.put("DROIDBRIDGE_EGL_LIBRARY", "libltw.so");
-            env.put("DROIDBRIDGE_EGL_LIBRARY", "libltw.so");
             env.put("DROIDBRIDGE_RENDERER_LIBRARY", "libltw.so");
-            env.put("DROIDBRIDGE_RENDERER_LIBRARY", "libltw.so");
-            env.put("LIBGL_ES", "3");
+            env.put("POJAV_RENDERER_LIBRARY", "libltw.so");
+            env.put("POJAVEXEC_EGL", "libltw.so");
+            env.put("POJAVEXEC_EGL_LIBRARY", "libltw.so");
+            env.put("LIBGL_ES", minecraft26Plus ? "2" : "3");
+            env.put("LIBGL_NOERROR", minecraft26Plus ? "1" : "");
+            env.put("LTW_NEVER_FLUSH_BUFFERS", minecraft26Plus ? "1" : "0");
+            env.put("LTW_COHERENT_DYNAMIC_STORAGE", minecraft26Plus ? "1" : "0");
             env.put("DROIDBRIDGE_USE_SYSTEM_VULKAN", "1");
             env.put("DRIVER_PATH", "");
             env.put("VK_ICD_FILENAMES", "");
@@ -193,8 +212,10 @@ public final class JavaRuntimeBootstrap {
             env.put("MESA_LOADER_DRIVER_OVERRIDE", "");
             env.put("GALLIUM_DRIVER", "");
             env.put("OSMESA_LIB", "");
-            env.put("LTW_NEVER_FLUSH_BUFFERS", "0");
-            env.put("LTW_COHERENT_DYNAMIC_STORAGE", "0");
+            String message = "RuntimeBootstrap: LTW compatibility profile minecraft26Plus="
+                    + minecraft26Plus + " version=" + plan.getEffectiveMinecraftVersionId();
+            Logging.i(TAG, message);
+            safeAppendLog(message);
         }
 
         // DroidBridge Mesa needs a strict env order. Do not run the generic
@@ -219,6 +240,7 @@ public final class JavaRuntimeBootstrap {
 
         applyLiteGlesEnvironmentOverrides(env, liteGles);
         applyMobileGluesConfigEnvironment(context, renderer, env);
+        applyMobileGluesZeroToOneDepthCompatibility(plan, renderer, env);
         applySnapshot5PlusMobileGluesShaderCompatibility(plan, renderer, env);
 
         String mesaDriverPath = isLtwRenderer(renderer) || liteGles != null || DroidBridgeMesaSupport.isDroidBridgeMesaRenderer(renderer)
@@ -252,10 +274,13 @@ public final class JavaRuntimeBootstrap {
         }
         applySystemVulkanCompatibilityEnvironment(plan, env);
         applyLegacyMesaCompatibilityProfileIfNeeded(plan, renderer, env);
+        applyLegacyOptiFineShaderCompatibilityProfileIfNeeded(plan, renderer, env);
+        applyBta8MesaCompatibilityProfileIfNeeded(plan, renderer, env);
         applySnapshot5PlusFreedrenoPersistentMapCompatibility(plan, renderer, env);
         applyVulkanVsyncEnvironment(context, plan, env);
         applyNativeMesaVsyncEnvironment(plan, renderer, env);
         applyWrappedSdl3OpenGlVsyncEnvironment(context, plan, renderer, env);
+        applyLtwSdl3ColorCompatibility(plan, renderer, env);
 
         String jsph = findJsphLibrary(paths);
         if (jsph != null) {
@@ -292,7 +317,8 @@ public final class JavaRuntimeBootstrap {
             @NonNull RendererInterface renderer,
             @NonNull LinkedHashMap<String, String> env
     ) {
-        if (!DroidBridgeMesaSupport.isDroidBridgeMesaRenderer(renderer)) return;
+        if (!DroidBridgeMesaSupport.isDroidBridgeMesaRenderer(renderer)
+                && !KopperZinkRenderer.isRenderer(renderer)) return;
         if (!shouldUseLegacyMesaCompatibilityProfile(plan)) return;
 
         /*
@@ -326,10 +352,158 @@ public final class JavaRuntimeBootstrap {
                 + renderer.getRendererId());
     }
 
+    private static void applyLegacyOptiFineShaderCompatibilityProfileIfNeeded(
+            @NonNull LaunchPlan plan,
+            @NonNull RendererInterface renderer,
+            @NonNull LinkedHashMap<String, String> env
+    ) {
+        if (!isLegacyOptiFineLaunch(plan)) return;
+
+        boolean mesaDesktopRenderer = DroidBridgeMesaSupport.isDroidBridgeMesaRenderer(renderer)
+                || DroidBridgeMesaSupport.isMesaZinkTurnipRenderer(renderer)
+                || DroidBridgeMesaSupport.isPureVulkanZinkRenderer(renderer)
+                || KopperZinkRenderer.isRenderer(renderer);
+        if (!mesaDesktopRenderer) return;
+
+        /*
+         * OptiFine's LWJGL2-era shader pipeline compiles old GLSL sources such as
+         * Minecraft's #version 120 post shaders. Do not globally advertise GLSL
+         * 4.60 to this path; legacy compatibility code may use the reported language
+         * version when selecting shader behavior. Keep the desktop compatibility
+         * context and let each shader's own #version directive define its grammar.
+         *
+         * Validation also stays enabled for this path. Legacy OptiFine can reach
+         * GL_INVALID_VALUE/GL_INVALID_OPERATION during shader/FBO construction, so
+         * suppressing validation is unsafe here.
+         */
+        env.put("DROIDBRIDGE_LEGACY_OPTIFINE_SHADER_COMPAT", "1");
+        env.put("DROIDBRIDGE_EGL_FORCE_COMPAT_PROFILE", "1");
+        env.put("DROIDBRIDGE_EGL_FORCE_CORE_PROFILE", "");
+        env.put("MESA_GL_VERSION_OVERRIDE", "4.6COMPAT");
+        env.put("MESA_GLSL_VERSION_OVERRIDE", "");
+        env.put("DROIDBRIDGE_PROP_MESA_GL_VERSION_OVERRIDE", "4.6COMPAT");
+        env.put("DROIDBRIDGE_PROP_MESA_GLSL_VERSION_OVERRIDE", "");
+        env.put("MESA_NO_ERROR", "0");
+        env.put("LIBGL_NOERROR", "0");
+        env.put("mesa_glthread", "false");
+
+        String message = "RuntimeBootstrap: legacy OptiFine shader compatibility profile"
+                + " version=" + plan.getVersionId()
+                + " renderer=" + renderer.getRendererId()
+                + " gl=4.6COMPAT glslOverride=unset validation=on glthread=off";
+        Logging.i(TAG, message);
+        safeAppendLog(message);
+    }
+
+    private static boolean isLegacyOptiFineLaunch(@NonNull LaunchPlan plan) {
+        String versionId = safeLower(plan.getVersionId());
+        String mainClass = safeLower(plan.getMainClass());
+        String classPath = safeLower(plan.getClassPath());
+        boolean optiFine = versionId.contains("optifine") || classPath.contains("optifine");
+        if (!optiFine) return false;
+        return shouldUseLegacyMesaCompatibilityProfile(plan)
+                || mainClass.contains("launchwrapper");
+    }
+
+    /**
+     * BTA 8 is modern LWJGL3 and requires desktop OpenGL 4.1+, but its renderer
+     * still carries compatibility-era player/item state. A strict Mesa Core
+     * profile renders the world correctly while the player and first-person hand
+     * can collapse to black. Give BTA 8+ a modern 4.6 compatibility context
+     * without enabling any of the old LWJGL2/fixed-function launcher shims.
+     */
+    private static void applyBta8MesaCompatibilityProfileIfNeeded(
+            @NonNull LaunchPlan plan,
+            @NonNull RendererInterface renderer,
+            @NonNull LinkedHashMap<String, String> env
+    ) {
+        if (!BtaRendererPolicy.isBta8OrNewer(plan.getVersionId(), null)) return;
+        if (!DroidBridgeMesaSupport.isDroidBridgeMesaRenderer(renderer)
+                && !KopperZinkRenderer.isRenderer(renderer)) return;
+
+        // Context profile only: BTA 8 remains on the modern LWJGL3/GLFW path.
+        env.put("DROIDBRIDGE_GL_LEGACY_COMPAT_PROFILE", "");
+        env.put("DROIDBRIDGE_LEGACY_OPTIFINE_SHADER_COMPAT", "");
+        env.put("DROIDBRIDGE_MESA_LEGACY_COMPAT_PROFILE", "");
+        env.put("DROIDBRIDGE_EGL_FORCE_COMPAT_PROFILE", "1");
+        env.put("DROIDBRIDGE_EGL_FORCE_CORE_PROFILE", "");
+        env.put("MESA_GL_VERSION_OVERRIDE", "4.6COMPAT");
+        env.put("MESA_GLSL_VERSION_OVERRIDE", "460");
+        env.put("DROIDBRIDGE_DISABLE_LEGACY_OCCLUSION_QUERY", "");
+        env.put("DROIDBRIDGE_LEGACY_OCCLUSION_QUERY_STUB", "");
+
+        /*
+         * BTA 8+ exercises compatibility-profile state, dynamic textures and
+         * mipmap/resource updates immediately before entering a world. With
+         * Kopper running on Turnip, Mesa 26.1.x can otherwise crash inside
+         * libgallium_dri.so while those operations are still being reordered or
+         * compiled asynchronously. Keep this workaround scoped to BTA + Kopper:
+         * modern Minecraft retains the normal fast Kopper profile.
+         *
+         * - auto: use Mesa's normal descriptor manager instead of forcing lazy.
+         * - sync: full Vulkan barriers before every draw/dispatch.
+         * - flushsync: make flush/present completion synchronous.
+         * - noreorder: preserve GL command order.
+         * - nobgc: disable asynchronous background pipeline compilation.
+         */
+        if (KopperZinkRenderer.isRenderer(renderer)) {
+            env.put("ZINK_DESCRIPTORS", "auto");
+            env.put("ZINK_DEBUG", "sync,flushsync,noreorder,nobgc");
+            env.put("mesa_glthread", "false");
+
+            /*
+             * BTA 8.0.x can poison Mesa's persistent shader/disk cache during
+             * its first renderer/world transition on Zink/Turnip. Once that
+             * happens, later launches reproducibly fault in the same Gallium
+             * worker address before the menu/world is usable, even with Zink's
+             * own background compiler and Mesa glthread disabled. Do not let
+             * BTA read or write that persistent cache at all. This is purposely
+             * BTA + Kopper only; normal Minecraft keeps the disk cache.
+             *
+             * Set both names because Mesa 26.x uses MESA_SHADER_CACHE_DISABLE,
+             * while older Mesa compatibility code may still consult the GLSL
+             * spelling. "true" is the value expected by Mesa's boolean option
+             * parser and overrides any earlier renderer/plugin default.
+             */
+            env.put("MESA_SHADER_CACHE_DISABLE", "true");
+            env.put("MESA_GLSL_CACHE_DISABLE", "true");
+
+            /*
+             * mesa_glthread only disables Mesa's GL command marshalling thread.
+             * Gallium has a second, independent threaded_context worker selected
+             * through GALLIUM_THREAD. The BTA 8/Kopper failure is consistently a
+             * native libgallium_dri worker-thread SIGSEGV at the same offset, even
+             * with glthread and Zink background compilation disabled. Disable the
+             * Gallium threaded context as well so BTA's startup texture/mipmap
+             * uploads execute synchronously on the owning GL context.
+             *
+             * This stays BTA + Kopper only; other games keep Gallium threading.
+             */
+            env.put("GALLIUM_THREAD", "0");
+            env.put("DROIDBRIDGE_KOPPER_BTA_STABILITY", "1");
+        } else {
+            env.put("DROIDBRIDGE_KOPPER_BTA_STABILITY", "");
+        }
+
+        String message = "RuntimeBootstrap: BTA 8+ Mesa visual compatibility profile"
+                + " version=" + plan.getVersionId()
+                + " profile=4.6COMPAT lwjgl=modern legacyShims=false"
+                + (KopperZinkRenderer.isRenderer(renderer)
+                ? " kopperStability=sync+flushsync+noreorder+nobgc descriptors=auto shaderCache=off galliumThread=off"
+                : "");
+        Logging.i(TAG, message);
+        safeAppendLog(message);
+    }
+
     private static boolean shouldUseLegacyMesaCompatibilityProfile(@NonNull LaunchPlan plan) {
         String versionId = safeLower(plan.getVersionId());
         String mainClass = safeLower(plan.getMainClass());
         String classPath = safeLower(plan.getClassPath());
+
+        // BTA 8+ still inherits beta 1.7.3, but its client is modern LWJGL3 and
+        // requires desktop OpenGL 4.1+. Do not classify bta-v8.x as legacy merely
+        // because the version id begins with the letter 'b'.
+        if (BtaRendererPolicy.isBta8OrNewer(plan.getVersionId(), null)) return false;
 
         if (isLegacyNamedMinecraftVersion(versionId)) return true;
         if (isLegacyReleaseString(versionId)) return true;
@@ -432,18 +606,33 @@ public final class JavaRuntimeBootstrap {
         env.put("DROIDBRIDGE_VULKAN_FORCE_FIFO", "0");
         env.put("MESA_VK_WSI_PRESENT_MODE", "");
 
-        // Minecraft 26.2/Sodium currently requests glfwSwapInterval(0) even
-        // when options.txt says enableVsync:true (the working log proves this).
-        // Reuse the native bridge's existing FORCE_VSYNC clamp so the game
-        // option, not the Vulkan setting, controls direct Mesa presentation.
-        env.put("FORCE_VSYNC", enabled ? "true" : "false");
-        env.put("DROIDBRIDGE_VSYNC_FRAME_PACING", "1");
+        boolean bta8 = BtaRendererPolicy.isBta8OrNewer(plan.getVersionId(), null);
+        if (bta8) {
+            /*
+             * BTA 8 toggles VSync live with GLFW. Do not clamp that call to the
+             * launch-time options.txt value and do not arm the generic native
+             * software pacer. The isolated BTA GLFW shim owns an adaptive
+             * single-pacer fallback: real eglSwapInterval gets first chance to
+             * block, and Java only waits for the remaining frame time when EGL
+             * returns early. This avoids the 10-15 FPS multi-wait failure.
+             */
+            env.put("FORCE_VSYNC", "");
+            env.put("DROIDBRIDGE_VSYNC_FRAME_PACING", "0");
+        } else {
+            // Minecraft 26.2/Sodium currently requests glfwSwapInterval(0) even
+            // when options.txt says enableVsync:true (the working log proves this).
+            // Reuse the native bridge's existing FORCE_VSYNC clamp so the game
+            // option, not the Vulkan setting, controls direct Mesa presentation.
+            env.put("FORCE_VSYNC", enabled ? "true" : "false");
+            env.put("DROIDBRIDGE_VSYNC_FRAME_PACING", "1");
+        }
         env.put("DROIDBRIDGE_VSYNC_TARGET_FPS", Integer.toString(targetFps));
 
         String message = "RuntimeBootstrap: Freedreno VSync "
                 + (enabled ? "enabled" : "disabled")
                 + " from options.txt enableVsync=" + enabled
                 + " targetFps=" + targetFps
+                + " bta8LiveGlfw=" + bta8
                 + "; Vulkan/Zink VSync preference ignored for direct KGSL OpenGL";
         Logging.i(TAG, message);
         safeAppendLog(message);
@@ -478,13 +667,19 @@ public final class JavaRuntimeBootstrap {
     ) {
         final boolean mobileGlues = isMobileGluesRenderer(renderer);
         final boolean krypton = isKryptonRenderer(renderer);
+        final boolean ltw = isLtwRenderer(renderer);
+        final boolean ltwSdl3 = ltw
+                && (isMinecraft26_3Snapshot(plan.getVersionId())
+                    || isMinecraft26_3Snapshot(plan.getEffectiveMinecraftVersionId()));
         final boolean legacyKryptonLwjgl2 = krypton
                 && shouldUseLegacyMesaCompatibilityProfile(plan);
 
         /*
          * MobileGlues and Krypton both present through DroidBridge's EGL/GLFW
          * bridge on pre-26.2 releases and through the SDL3-aware path on newer
-         * releases. Do not version-gate Krypton's launch-time VSync setup.
+         * releases. LTW joins that wrapped SDL3 presentation path on 26.3.
+         * Do not version-gate Krypton's launch-time VSync setup, but keep LTW
+         * scoped to 26.3 so its already-working 26.1.2/26.2 GLFW path is unchanged.
          *
          * The old 26.2-only Krypton gate incorrectly sent normal releases such
          * as 1.20.1 and 1.21.11 through the generic cleanup branch below. That
@@ -497,7 +692,36 @@ public final class JavaRuntimeBootstrap {
          * separate because only old LWJGL2 clients make glfwSwapInterval itself
          * authoritative for live OFF requests.
          */
-        final boolean supportedWrappedOpenGl = mobileGlues || krypton;
+        final boolean supportedWrappedOpenGl = mobileGlues || krypton || ltwSdl3;
+
+        if (supportedWrappedOpenGl
+                && BtaRendererPolicy.isBta8OrNewer(plan.getVersionId(), null)) {
+            boolean launchVsync = readMinecraftVsyncOption(plan.getGameDirectory());
+            int targetFps = resolveDisplayRefreshRateFps(context);
+
+            // BTA 8 owns live VSync through glfwSwapInterval. Never freeze the
+            // state to options.txt and never stack DroidBridge's generic native
+            // pacer on top of the BTA GLFW adaptive fallback.
+            env.put("DROIDBRIDGE_MOBILEGLUES_FORCE_VSYNC", "0");
+            env.put("DROIDBRIDGE_VSYNC_FRAME_PACING", "0");
+            env.put("DROIDBRIDGE_VSYNC_TARGET_FPS", Integer.toString(targetFps));
+
+            // Do not add a color-space workaround here. BTA 8's visual repair is
+            // shader/FBO-state specific; changing the default framebuffer transfer
+            // function would risk altering the otherwise-correct world colors.
+            env.put("DROIDBRIDGE_MOBILEGLUES_DISABLE_FRAMEBUFFER_SRGB", "0");
+            env.put("DROIDBRIDGE_SDL3_FORCE_OPAQUE_SURFACE", "0");
+            env.put("DROIDBRIDGE_SDL3_LEGACY_SRGB_PASSTHROUGH", "0");
+
+            String message = "RuntimeBootstrap: BTA 8+ wrapped OpenGL live VSync profile"
+                    + " renderer=" + renderer.getRendererName()
+                    + " launchVsync=" + launchVsync
+                    + " nativePacer=false adaptiveGlfwPacer=true"
+                    + " targetFps=" + targetFps;
+            Logging.i(TAG, message);
+            safeAppendLog(message);
+            return;
+        }
 
         if (!supportedWrappedOpenGl) {
             /*
@@ -525,24 +749,31 @@ public final class JavaRuntimeBootstrap {
              * live VSync state. Preserve the launch-time pacing state only for an
              * actual System Vulkan launch; normal Krypton/OpenGL remains unchanged.
              */
-            boolean preserveSystemVulkanFifo = plan.isUseSystemVulkanDriver()
-                    && isEnabledEnvironmentValue(env.get("DROIDBRIDGE_USE_SYSTEM_VULKAN"))
-                    && isEnabledEnvironmentValue(env.get("DROIDBRIDGE_VULKAN_FORCE_FIFO"));
-            int targetFps = preserveSystemVulkanFifo
+            String rendererRoute = safeLower(env.get("DROIDBRIDGE_RENDERER"));
+            String mesaMode = safeLower(env.get("DROIDBRIDGE_MESA_MODE"));
+            boolean zinkPresentation = rendererRoute.contains("zink")
+                    || mesaMode.contains("zink")
+                    || safeLower(renderer.getRendererName()).contains("zink");
+            boolean preserveVulkanFifo = isEnabledEnvironmentValue(
+                    env.get("DROIDBRIDGE_VULKAN_FORCE_FIFO"))
+                    && ((plan.isUseSystemVulkanDriver()
+                            && isEnabledEnvironmentValue(env.get("DROIDBRIDGE_USE_SYSTEM_VULKAN")))
+                        || zinkPresentation);
+            int targetFps = preserveVulkanFifo
                     ? parseTargetFps(env.get("DROIDBRIDGE_VSYNC_TARGET_FPS"))
                     : 60;
 
             env.put("DROIDBRIDGE_MOBILEGLUES_FORCE_VSYNC", "0");
             // Preserve the live VSync state for a real System Vulkan launch.
             // Vulkan FIFO owns pacing; GLFW/SDL event polling never sleeps or counts frames.
-            env.put("DROIDBRIDGE_VSYNC_FRAME_PACING", preserveSystemVulkanFifo ? "1" : "0");
+            env.put("DROIDBRIDGE_VSYNC_FRAME_PACING", preserveVulkanFifo ? "1" : "0");
             env.put("DROIDBRIDGE_VSYNC_TARGET_FPS", Integer.toString(targetFps));
             env.put("DROIDBRIDGE_MOBILEGLUES_DISABLE_FRAMEBUFFER_SRGB", "0");
             env.put("DROIDBRIDGE_SDL3_FORCE_OPAQUE_SURFACE", "0");
             env.put("DROIDBRIDGE_SDL3_LEGACY_SRGB_PASSTHROUGH", "0");
 
-            if (preserveSystemVulkanFifo) {
-                String message = "RuntimeBootstrap: preserved initial System Vulkan VSync state"
+            if (preserveVulkanFifo) {
+                String message = "RuntimeBootstrap: preserved initial Vulkan/Zink VSync state"
                         + " renderer=" + renderer.getRendererName()
                         + " targetFps=" + targetFps
                         + " version=" + plan.getVersionId();
@@ -616,7 +847,9 @@ public final class JavaRuntimeBootstrap {
 
         String rendererName = mobileGlues
                 ? "MobileGlues"
-                : (legacyKryptonLwjgl2 ? "Legacy LWJGL2 Krypton" : "Krypton");
+                : (ltwSdl3
+                    ? "LTW"
+                    : (legacyKryptonLwjgl2 ? "Legacy LWJGL2 Krypton" : "Krypton"));
         String message = "RuntimeBootstrap: " + rendererName + " presentation"
                 + " vsync=" + enabled
                 + " vulkanFallbackVsync=" + vulkanFallbackVsync
@@ -629,6 +862,57 @@ public final class JavaRuntimeBootstrap {
                 + " version=" + plan.getVersionId();
         Logging.i(TAG, message);
         safeAppendLog(message);
+    }
+
+    private static void applyLtwSdl3ColorCompatibility(
+            @NonNull LaunchPlan plan,
+            @NonNull RendererInterface renderer,
+            @NonNull LinkedHashMap<String, String> env
+    ) {
+        if (!isLtwRenderer(renderer)) return;
+
+        /*
+         * Minecraft 26.3 moved the OpenGL presentation path to SDL3. SDL asks
+         * for an sRGB EGL default framebuffer there, while LTW exposes desktop
+         * OpenGL over GLES and Minecraft's output is already display encoded.
+         * Leaving SDL's sRGB surface request intact applies the transfer twice:
+         * Mojang red becomes pink and the whole game looks washed out/too bright.
+         *
+         * DroidBridge already fixes this exact presentation mismatch for
+         * MobileGlues/Krypton in the SDL3 EGL shim. v5 also put LTW through the
+         * same guarded EGL path, so enable that existing byte-pass-through
+         * behavior for LTW on 26.3 rather than changing LTW shaders or GL state.
+         */
+        boolean legacySrgbPassthrough =
+                isMinecraft26_3Snapshot(plan.getVersionId())
+                        || isMinecraft26_3Snapshot(plan.getEffectiveMinecraftVersionId());
+
+        env.put("DROIDBRIDGE_SDL3_FORCE_OPAQUE_SURFACE",
+                legacySrgbPassthrough ? "1" : "0");
+        env.put("DROIDBRIDGE_SDL3_LEGACY_SRGB_PASSTHROUGH",
+                legacySrgbPassthrough ? "1" : "0");
+        env.put("DROIDBRIDGE_MOBILEGLUES_DISABLE_FRAMEBUFFER_SRGB", "0");
+
+        String message = "RuntimeBootstrap: LTW SDL3 color compatibility"
+                + " legacySrgbPassthrough=" + legacySrgbPassthrough
+                + " forceOpaqueSurface=" + legacySrgbPassthrough
+                + " version=" + plan.getEffectiveMinecraftVersionId();
+        Logging.i(TAG, message);
+        safeAppendLog(message);
+    }
+
+    private static boolean isMinecraft26OrNewer(@NonNull String minecraftVersion) {
+        String value = minecraftVersion.trim().toLowerCase(Locale.ROOT);
+        Matcher matcher = MINECRAFT_RELEASE_PATTERN.matcher(value);
+        int minecraftMajor = -1;
+        while (matcher.find()) {
+            try {
+                minecraftMajor = Integer.parseInt(matcher.group(1));
+            } catch (Throwable ignored) {
+                // Keep the last successfully parsed Minecraft token.
+            }
+        }
+        return minecraftMajor >= 26;
     }
 
     private static boolean isMinecraft26_2OrNewer(@NonNull String minecraftVersion) {
@@ -652,11 +936,30 @@ public final class JavaRuntimeBootstrap {
     }
 
     private static boolean isMinecraft26_3Snapshot(@NonNull String minecraftVersion) {
+        /*
+         * Snapshot 4's SDL3/default-framebuffer presentation behavior carried
+         * through the 26.3 pre-releases, release candidates and final release.
+         * Launcher profile IDs are not guaranteed to begin with the Minecraft
+         * version (Fabric commonly uses e.g. fabric-loader-0.19.5-26.3), so
+         * checking startsWith("26.3-...") incorrectly disables the legacy sRGB
+         * byte-pass-through/opaque-surface path on final Fabric 26.3.
+         *
+         * Resolve the last dotted version token just like isMinecraft26_2OrNewer()
+         * does. The inherited Minecraft version is normally the last such token.
+         */
         String value = minecraftVersion.trim().toLowerCase(Locale.ROOT);
-        return value.startsWith("26.3-snapshot")
-                || value.contains("26.3-snapshot-")
-                || value.startsWith("26.3-pre")
-                || value.startsWith("26.3-rc");
+        Matcher matcher = MINECRAFT_RELEASE_PATTERN.matcher(value);
+        int minecraftMajor = -1;
+        int minecraftMinor = -1;
+        while (matcher.find()) {
+            try {
+                minecraftMajor = Integer.parseInt(matcher.group(1));
+                minecraftMinor = Integer.parseInt(matcher.group(2));
+            } catch (Throwable ignored) {
+                // Keep the last successfully parsed token.
+            }
+        }
+        return minecraftMajor == 26 && minecraftMinor == 3;
     }
 
     /**
@@ -703,6 +1006,48 @@ public final class JavaRuntimeBootstrap {
                 + " bufferStorage=real directStateAccess=enabled"
                 + " nativeMap=preferred staging=nonPersistentFallbackOnly"
                 + " framebufferNames=guarded adaptiveVsync=true";
+        Logging.i(TAG, message);
+        safeAppendLog(message);
+    }
+
+    private static boolean requiresMobileGluesZeroToOneDepth(
+            @NonNull String minecraftVersion
+    ) {
+        String value = minecraftVersion.trim().toLowerCase(Locale.ROOT)
+                .replace('_', '-')
+                .replace(' ', '-');
+        while (value.contains("--")) value = value.replace("--", "-");
+
+        // Minecraft 26.2 is the first release where the OpenGL renderer used by
+        // DH expects the modern 0..1 clip-depth convention. Keep this narrowly
+        // scoped to the two versions under test so 26.1.2 and older keep their
+        // known-good -1..1 MobileGlues path.
+        return value.equals("26.2")
+                || value.startsWith("26.2-")
+                || value.startsWith("26.2.")
+                || value.equals("26.3")
+                || value.startsWith("26.3-")
+                || value.startsWith("26.3.");
+    }
+
+    private static void applyMobileGluesZeroToOneDepthCompatibility(
+            @NonNull LaunchPlan plan,
+            @NonNull RendererInterface renderer,
+            @NonNull LinkedHashMap<String, String> env
+    ) {
+        if (!MobileGluesConfigHelper.isMobileGluesRenderer(renderer)) return;
+        if (plan.isUseSystemVulkanDriver()) return;
+
+        String effective = plan.getEffectiveMinecraftVersionId();
+        String launch = plan.getVersionId();
+        boolean enabled = (effective != null && requiresMobileGluesZeroToOneDepth(effective))
+                || (launch != null && requiresMobileGluesZeroToOneDepth(launch));
+        if (!enabled) return;
+
+        env.put("DROIDBRIDGE_MOBILEGLUES_ZERO_TO_ONE_DEPTH", "1");
+        String message = "RuntimeBootstrap: MobileGlues 26.2+ zero-to-one clip-depth compatibility enabled"
+                + " version=" + plan.getVersionId()
+                + " origin=LOWER_LEFT depth=ZERO_TO_ONE";
         Logging.i(TAG, message);
         safeAppendLog(message);
     }
@@ -858,6 +1203,13 @@ public final class JavaRuntimeBootstrap {
     ) {
         String effectiveMode = resolveEffectiveSystemVulkanCompatibilityMode(plan);
 
+        // Reset Android-10 SDL compatibility switches for every prepared launch.
+        // LTW + LWJGL 3.4.1 on API 29 and older enables only the verified
+        // SDL 3.2.22 touch-enumeration bypass below; whole-video ART dispatch
+        // remains disabled so SDL video ownership stays on Minecraft's thread.
+        setEnv("DROIDBRIDGE_SDL3_ART_DISPATCH", "0");
+        setEnv("DROIDBRIDGE_SDL3_ANDROID10_SKIP_INIT_TOUCH", "0");
+
         // Minecraft 26.2's Android System Vulkan path still emits a generic LWJGL
         // native-library failure before the Vulkan backend initializes. Enable
         // LWJGL's own loader diagnostics for this path even when Automatic uses
@@ -886,13 +1238,96 @@ public final class JavaRuntimeBootstrap {
                 plan.getLwjglNativeDirectory().getAbsolutePath().contains("lwjgl3.4.1");
         if (modernLwjgl341Component) {
             File componentNatives = plan.getLwjglNativeDirectory();
-            File spvc = new File(componentNatives, "libspirv-cross.so");
-            File shaderc = new File(componentNatives, "libshaderc.so");
-            File vma = new File(componentNatives, "liblwjgl_vma.so");
+            File componentSpvc = new File(componentNatives, "libspirv-cross.so");
+            File spvc = componentSpvc;
+            File componentShaderc = new File(componentNatives, "libshaderc.so");
+            File shaderc = componentShaderc;
+            File componentVma = new File(componentNatives, "liblwjgl_vma.so");
+            File vma = componentVma;
+
+            // The SPIRV-Cross file currently staged in the LWJGL 3.4.1 component
+            // is the desktop GNU/Linux build (same bytes as the app's
+            // libspirv-cross-c-shared.so), not an Android ELF. Android 10's
+            // linker correctly rejects it before SDL/LTW starts. For LTW on
+            // API 29 and older, use DroidBridge's Android-21 SPVC build instead.
+            // Its exported SPVC C entry-point set matches the component build,
+            // and LTW/OpenGL only needs a loadable SPVC provider during the
+            // 26.3 NativeLibrariesBootstrap phase.
+            boolean android10ModernLwjglNativeCompatibility =
+                    Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q;
+            if (android10ModernLwjglNativeCompatibility) {
+                // Android 10's linker namespace cannot dlopen libraries from the
+                // launcher's private files/lwjgl3.4.1 directory when the request
+                // originates from the embedded JVM. Route the 26.2+ shader toolchain
+                // through DroidBridge's APK-native copies for every renderer, not
+                // only LTW. This is the same class of namespace-safe loading MJ uses
+                // by preparing native providers before the JVM resolves LWJGL modules.
+                File compatibilitySpvc = new File(PathManager.DIR_NATIVE_LIB, "libspirv-cross.so");
+                File compatibilityShaderc = new File(PathManager.DIR_NATIVE_LIB, "libshaderc.so");
+                File compatibilityVma = new File(PathManager.DIR_NATIVE_LIB, "liblwjgl_vma.so");
+
+                if (compatibilitySpvc.isFile()) spvc = compatibilitySpvc;
+                if (compatibilityShaderc.isFile()) shaderc = compatibilityShaderc;
+                if (compatibilityVma.isFile()) vma = compatibilityVma;
+
+                args.removeIf(arg -> arg.startsWith("-Dorg.lwjgl.librarypath="));
+                args.add("-Dorg.lwjgl.librarypath=" + componentNatives.getAbsolutePath());
+
+                String nativePathMessage = "RuntimeBootstrap: Android 10 LWJGL 3.4 native compatibility"
+                        + " api=" + Build.VERSION.SDK_INT
+                        + " renderer=" + (sPreparedLtwRenderer ? "ltw" : "other")
+                        + " libraryPath=" + componentNatives.getAbsolutePath()
+                        + " spvc=" + spvc.getAbsolutePath()
+                        + " shaderc=" + shaderc.getAbsolutePath()
+                        + " vmaPreload=" + vma.getAbsolutePath();
+                Logging.i(TAG, nativePathMessage);
+                safeAppendLog(nativePathMessage);
+
+                if (sPreparedLtwRenderer) {
+                    // Keep the verified Android-10 SDL 3.2 touch-enumeration bypass
+                    // only for LTW/SDL3. Other renderers must not inherit it.
+                    setEnv("DROIDBRIDGE_SDL3_ART_DISPATCH", "0");
+                    setEnv("DROIDBRIDGE_SDL3_ANDROID10_SKIP_INIT_TOUCH", "1");
+
+                    String artSdlHandle = System.getenv("DROIDBRIDGE_SDL3_ART_HANDLE");
+                    String artSdlMessage = "RuntimeBootstrap: Android 10 LTW ART SDL publication"
+                            + " available=" + (artSdlHandle != null && !artSdlHandle.isEmpty())
+                            + " handle=" + (artSdlHandle == null || artSdlHandle.isEmpty()
+                                    ? "<missing>" : artSdlHandle);
+                    Logging.i(TAG, artSdlMessage);
+                    safeAppendLog(artSdlMessage);
+                }
+            }
 
             args.removeIf(arg -> arg.startsWith("-Dorg.lwjgl.spvc.libname=")
                     || arg.startsWith("-Dorg.lwjgl.shaderc.libname=")
                     || arg.startsWith("-Dorg.lwjgl.system.allocator="));
+
+            // The LWJGL 3.4.1 OpenAL component is built with the newer Oboe/NDK
+            // toolchain. Some Android 10 vendor linkers (notably the LG G7 /
+            // LM-G710) reject that library before Minecraft ever reaches SDL or
+            // the selected renderer. DroidBridge already ships an Android-21
+            // OpenAL build with the same public AL/ALC entry points, so keep the
+            // modern LWJGL Java classes and redirect only the audio provider on
+            // API 29 and older.
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
+                File compatibilityOpenAl = new File(PathManager.DIR_NATIVE_LIB, "libopenal.so");
+                args.removeIf(arg -> arg.startsWith("-Dorg.lwjgl.openal.libname="));
+                if (compatibilityOpenAl.isFile()) {
+                    args.add("-Dorg.lwjgl.openal.libname=" + compatibilityOpenAl.getAbsolutePath());
+                    String openAlMessage = "RuntimeBootstrap: Android 10 OpenAL compatibility provider"
+                            + " api=" + Build.VERSION.SDK_INT
+                            + " path=" + compatibilityOpenAl.getAbsolutePath();
+                    Logging.i(TAG, openAlMessage);
+                    safeAppendLog(openAlMessage);
+                } else {
+                    String openAlMessage = "RuntimeBootstrap: Android 10 OpenAL compatibility provider missing"
+                            + " api=" + Build.VERSION.SDK_INT
+                            + " path=" + compatibilityOpenAl.getAbsolutePath();
+                    Logging.e(TAG, openAlMessage);
+                    safeAppendLog(openAlMessage);
+                }
+            }
 
             // Android has no bundled jemalloc in this component. LWJGL already
             // falls back to StdlibAllocator after a noisy UnsatisfiedLinkError;
@@ -909,13 +1344,49 @@ public final class JavaRuntimeBootstrap {
 
             String toolchainMessage = "RuntimeBootstrap: LWJGL 3.4 Android shader toolchain"
                     + " spvcExpected=0.68.0"
-                    + " spvcComponent=" + spvc.isFile()
-                    + " shadercComponent=" + shaderc.isFile()
-                    + " vmaComponent=" + vma.isFile()
+                    + " spvcComponent=" + componentSpvc.isFile()
+                    + " spvcCompatibility=" + (spvc != componentSpvc)
+                    + " shadercComponent=" + componentShaderc.isFile()
+                    + " shadercCompatibility=" + (shaderc != componentShaderc)
+                    + " vmaComponent=" + componentVma.isFile()
+                    + " vmaCompatibility=" + (vma != componentVma)
                     + " allocator=system"
-                    + " spvcPath=" + spvc.getAbsolutePath();
+                    + " spvcPath=" + spvc.getAbsolutePath()
+                    + " shadercPath=" + shaderc.getAbsolutePath()
+                    + " vmaPath=" + vma.getAbsolutePath();
             Logging.i(TAG, toolchainMessage);
             safeAppendLog(toolchainMessage);
+        }
+
+        /*
+         * Modern Minecraft/LWJGL 3.4 eagerly loads org.lwjgl.vulkan during
+         * NativeLibrariesBootstrap even when the game renderer is OpenGL. For
+         * Kopper that happens before DroidBridge's ndlopen hook exists, so the
+         * Android Qualcomm loader can become resident first. Force the very first
+         * Vulkan load through DroidBridge's proxy; the proxy bootstraps the
+         * Turnip-bound loader when Kopper + System Vulkan OFF is active.
+         */
+        if (sPreparedKopperZink && !plan.isUseSystemVulkanDriver()) {
+            File proxy = new File(PathManager.DIR_NATIVE_LIB, "libdroidbridge_vulkan_proxy.so");
+            if (!proxy.isFile()) {
+                String message = "RuntimeBootstrap: Kopper early Vulkan proxy is missing: "
+                        + proxy.getAbsolutePath();
+                Logging.e(TAG, message);
+                safeAppendLog(message);
+                return (lwjglVulkanLoaderDiagnostics || modernLwjgl341Component)
+                        ? plan.copyWithJvmArgs(args)
+                        : plan;
+            }
+
+            args.removeIf(arg -> arg.startsWith("-Dorg.lwjgl.vulkan.libname="));
+            args.add("-Dorg.lwjgl.vulkan.libname=" + proxy.getAbsolutePath());
+
+            String message = "RuntimeBootstrap: Kopper forcing early LWJGL Vulkan proxy"
+                    + " systemVulkan=false"
+                    + " path=" + proxy.getAbsolutePath();
+            Logging.i(TAG, message);
+            safeAppendLog(message);
+            return plan.copyWithJvmArgs(args);
         }
 
         if (InstanceLaunchSettings.VULKAN_COMPAT_DISABLED.equals(effectiveMode)
@@ -975,6 +1446,20 @@ public final class JavaRuntimeBootstrap {
             // shield baseline until its atlas path is separately validated.
             if (isMinecraft26_2Family(plan.getEffectiveMinecraftVersionId())) {
                 return InstanceLaunchSettings.VULKAN_COMPAT_SPRITE_UPLOAD_LAYOUT_REPAIR;
+            }
+
+            /*
+             * AYN Thor firmware currently exposes the Adreno 740 system Vulkan 1.3.128
+             * driver. Minecraft 26.3 can create its device/swapchain on that driver but
+             * the process can die natively as soon as real presentation/resource work
+             * begins, before Java can produce a crash report. Use DroidBridge's existing
+             * maximum-compatibility proxy only for this exact 26.3 + Thor + System Vulkan
+             * automatic path. Newer Qualcomm devices (including the Odin 3/Adreno 830)
+             * retain the validated lightweight shield-only 26.3 path.
+             */
+            if (isMinecraft26_3Family(plan.getEffectiveMinecraftVersionId())
+                    && isAynThorBuild()) {
+                return InstanceLaunchSettings.VULKAN_COMPAT_MAXIMUM;
             }
             return InstanceLaunchSettings.VULKAN_COMPAT_SHIELD_MODEL;
         }
@@ -1235,6 +1720,34 @@ public final class JavaRuntimeBootstrap {
         return major == 26 && minor == 2;
     }
 
+    private static boolean isMinecraft26_3Family(@Nullable String versionId) {
+        if (versionId == null) return false;
+        Matcher matcher = MINECRAFT_RELEASE_PATTERN.matcher(
+                versionId.trim().toLowerCase(Locale.ROOT));
+        int major = -1;
+        int minor = -1;
+        while (matcher.find()) {
+            try {
+                major = Integer.parseInt(matcher.group(1));
+                minor = Integer.parseInt(matcher.group(2));
+            } catch (Throwable ignored) {
+                // Keep the last successfully parsed Minecraft version token.
+            }
+        }
+        return major == 26 && minor == 3;
+    }
+
+    private static boolean isAynThorBuild() {
+        StringBuilder identity = new StringBuilder();
+        appendDeviceIdentity(identity, Build.MANUFACTURER);
+        appendDeviceIdentity(identity, Build.BRAND);
+        appendDeviceIdentity(identity, Build.MODEL);
+        appendDeviceIdentity(identity, Build.PRODUCT);
+        appendDeviceIdentity(identity, Build.DEVICE);
+        String value = identity.toString().toLowerCase(Locale.ROOT);
+        return value.contains("ayn") && value.contains("thor");
+    }
+
     private static boolean isMinecraft26_2Or26_3Family(@Nullable String versionId) {
         if (versionId == null) return false;
         Matcher matcher = MINECRAFT_RELEASE_PATTERN.matcher(
@@ -1366,12 +1879,15 @@ public final class JavaRuntimeBootstrap {
 
         if (isLtwRenderer(renderer)) {
             env.put("DROIDBRIDGE_RENDERER", "opengles3_ltw");
+            env.put("POJAV_RENDERER", "opengles3_ltw");
             env.put("DROIDBRIDGE_EGL", "libltw.so");
             env.put("DROIDBRIDGE_EGL_LIBRARY", "libltw.so");
-            env.put("DROIDBRIDGE_EGL_LIBRARY", "libltw.so");
             env.put("DROIDBRIDGE_RENDERER_LIBRARY", "libltw.so");
-            env.put("DROIDBRIDGE_RENDERER_LIBRARY", "libltw.so");
-            env.put("LIBGL_ES", "3");
+            env.put("POJAV_RENDERER_LIBRARY", "libltw.so");
+            env.put("POJAVEXEC_EGL", "libltw.so");
+            env.put("POJAVEXEC_EGL_LIBRARY", "libltw.so");
+            // LIBGL_ES/LIBGL_NOERROR and LTW's storage/flush profile are set in
+            // the version-aware block above. Do not overwrite them here.
             env.put("DROIDBRIDGE_USE_SYSTEM_VULKAN", "1");
             env.put("DRIVER_PATH", "");
             env.put("VK_ICD_FILENAMES", "");
@@ -1381,8 +1897,42 @@ public final class JavaRuntimeBootstrap {
             env.put("OSMESA_LIB", "");
             env.put("GALLIUM_DRIVER", "");
             env.put("MESA_LOADER_DRIVER_OVERRIDE", "");
-            env.put("LTW_NEVER_FLUSH_BUFFERS", "0");
-            env.put("LTW_COHERENT_DYNAMIC_STORAGE", "0");
+            return;
+        }
+
+        if (KopperZinkRenderer.isRenderer(renderer)) {
+            env.put("DROIDBRIDGE_RENDERER", KopperZinkRenderer.RENDERER_ID);
+            env.put("POJAV_RENDERER", KopperZinkRenderer.RENDERER_ID);
+            env.put("DROIDBRIDGE_RENDERER_LIBRARY", KopperZinkRenderer.MAIN_LIBRARY);
+            env.put("POJAV_RENDERER_LIBRARY", KopperZinkRenderer.MAIN_LIBRARY);
+            env.put("DROIDBRIDGE_EGL", KopperZinkRenderer.EGL_LIBRARY);
+            env.put("DROIDBRIDGE_EGL_LIBRARY", KopperZinkRenderer.EGL_LIBRARY);
+            env.put("POJAVEXEC_EGL", KopperZinkRenderer.EGL_LIBRARY);
+            env.put("POJAVEXEC_EGL_LIBRARY", KopperZinkRenderer.EGL_LIBRARY);
+            env.put("LIBGL_ES", "3");
+            env.put("GALLIUM_DRIVER", "zink");
+            env.put("MESA_LOADER_DRIVER_OVERRIDE", "zink");
+            env.put("force_gl_vendor", "Mesa/DroidBridge");
+            env.put("MESA_ANDROID_NO_KMS_SWRAST", "1");
+            env.put("MESA_NO_ERROR", "0");
+            env.put("LIBGL_NOERROR", "0");
+            env.put("ZINK_DESCRIPTORS", "lazy");
+            env.put("ZINK_DEBUG", "compact,noreorder");
+            env.put("mesa_glthread", "false");
+            // Kopper is desktop OpenGL-over-Vulkan.  Do not let the generic
+            // opengles* renderer prefix select an EGL/GLES2 context.
+            env.put("DROIDBRIDGE_EGL_FORCE_DESKTOP_GL", "1");
+            env.put("DROIDBRIDGE_MESA_DESKTOP_GL", "1");
+            env.put("DROIDBRIDGE_EGL_FORCE_RGBX8888", "1");
+            // Preserve the Kopper-specific surface owner across the process bootstrap.
+            env.put("DROIDBRIDGE_KOPPER_FORCE_TEXTUREVIEW", "1");
+            env.put("DROIDBRIDGE_KOPPER_FORCE_NAMESPACE_VULKAN", "1");
+            env.put("POJAV_ZINK_PREFER_SYSTEM_DRIVER", "");
+            env.put("LIB_MESA_NAME", "");
+            env.put("OSMESA_LIB", "");
+            env.put("DROIDBRIDGE_OSMESA_LIBRARY", "");
+            env.put("OSMESA_LIBRARY", "");
+            env.put("LIBGL_OSMESA", "");
             return;
         }
 
@@ -1462,6 +2012,10 @@ public final class JavaRuntimeBootstrap {
     private static void seedRendererEnvironmentReset(@NonNull LinkedHashMap<String, String> env) {
         String[] keys = new String[]{
                 "DROIDBRIDGE_RENDERER",
+                "POJAV_RENDERER",
+                "POJAV_RENDERER_LIBRARY",
+                "POJAVEXEC_EGL",
+                "POJAVEXEC_EGL_LIBRARY",
                 "DROIDBRIDGE_LEGACY_LWJGL2",
                 "DROIDBRIDGE_MOBILEGLUES_RENDERER",
                 "DROIDBRIDGE_MOBILEGLUES_SHADER_IDENTIFIER_FIX",
@@ -1487,6 +2041,7 @@ public final class JavaRuntimeBootstrap {
                 "DROIDBRIDGE_MESA_DRIVER",
                 "DROIDBRIDGE_MESA_NATIVE_DIR",
                 "DROIDBRIDGE_MESA_ALIAS_DIR",
+                "DROIDBRIDGE_KOPPER_VULKAN_ALIAS_DIR",
                 "DROIDBRIDGE_MESA_NAMESPACE",
                 "DROIDBRIDGE_MESA_NAMESPACE_PATH",
                 "DROIDBRIDGE_MESA_EGL",
@@ -1499,7 +2054,9 @@ public final class JavaRuntimeBootstrap {
                 "DROIDBRIDGE_ZINK_V59_CLEAN_ALIAS",
                 "DROIDBRIDGE_LEGACY_FREEDRENO_ALIAS_V59",
                 "DROIDBRIDGE_EGL_FORCE_DESKTOP_GL",
+                "DROIDBRIDGE_EGL_FORCE_RGBX8888",
                 "DROIDBRIDGE_GL_LEGACY_COMPAT_PROFILE",
+                "DROIDBRIDGE_LEGACY_OPTIFINE_SHADER_COMPAT",
                 "DROIDBRIDGE_MESA_LEGACY_COMPAT_PROFILE",
                 "DROIDBRIDGE_EGL_FORCE_COMPAT_PROFILE",
                 "DROIDBRIDGE_EGL_FORCE_CORE_PROFILE",
@@ -1613,6 +2170,10 @@ public final class JavaRuntimeBootstrap {
             return "libltw.so";
         }
 
+        if (KopperZinkRenderer.isRenderer(renderer)) {
+            return KopperZinkRenderer.EGL_LIBRARY;
+        }
+
         if (isLiteGlesRenderer(renderer)) {
             return "libEGL.so";
         }
@@ -1682,6 +2243,7 @@ public final class JavaRuntimeBootstrap {
         env.put("DROIDBRIDGE_MESA_DRIVER", "");
         env.put("DROIDBRIDGE_MESA_NATIVE_DIR", "");
         env.put("DROIDBRIDGE_MESA_ALIAS_DIR", "");
+        env.put("DROIDBRIDGE_KOPPER_VULKAN_ALIAS_DIR", "");
         env.put("DROIDBRIDGE_MESA_NAMESPACE", "");
         env.put("DROIDBRIDGE_MESA_NAMESPACE_PATH", "");
         env.put("DROIDBRIDGE_MESA_EGL", "");
@@ -1691,6 +2253,7 @@ public final class JavaRuntimeBootstrap {
         env.put("DROIDBRIDGE_MESA_SAFE_SWAPS", "");
         env.put("DROIDBRIDGE_EGL_FORCE_DESKTOP_GL", "");
         env.put("DROIDBRIDGE_GL_LEGACY_COMPAT_PROFILE", "");
+        env.put("DROIDBRIDGE_LEGACY_OPTIFINE_SHADER_COMPAT", "");
         env.put("DROIDBRIDGE_MESA_LEGACY_COMPAT_PROFILE", "");
         env.put("DROIDBRIDGE_EGL_FORCE_COMPAT_PROFILE", "");
         env.put("DROIDBRIDGE_EGL_FORCE_CORE_PROFILE", "");
@@ -1794,12 +2357,21 @@ public final class JavaRuntimeBootstrap {
         File componentVma = new File(componentNatives, "liblwjgl_vma.so");
 
         if (modernLwjgl341Component) {
-            // Do not preload the legacy global 0.65 SPIRV-Cross first. Loading the
-            // component-scoped 0.68.0 library before HotSpot ensures RTLD_DEFAULT
-            // and LWJGL resolve the same C API implementation.
-            dlopenOptional(componentSpvc);
-            dlopenOptional(componentShaderc);
-            dlopenOptional(componentVma);
+            if (Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q) {
+                // Never preload the private component copies on Android 10. They
+                // live outside the anonymous linker namespace permitted paths and
+                // can poison the later LWJGL load even when libname is redirected.
+                File compatibilitySpvc = new File(PathManager.DIR_NATIVE_LIB, "libspirv-cross.so");
+                File compatibilityShaderc = new File(PathManager.DIR_NATIVE_LIB, "libshaderc.so");
+                File compatibilityVma = new File(PathManager.DIR_NATIVE_LIB, "liblwjgl_vma.so");
+                dlopenOptional(compatibilitySpvc);
+                dlopenOptional(compatibilityShaderc);
+                dlopenOptional(compatibilityVma);
+            } else {
+                dlopenOptional(componentSpvc);
+                dlopenOptional(componentShaderc);
+                dlopenOptional(componentVma);
+            }
         } else {
             dlopenOptional(new File(PathManager.DIR_NATIVE_LIB, "libspirv-cross.so"));
             dlopenOptional(new File(PathManager.DIR_NATIVE_LIB, "libshaderc.so"));
@@ -1852,9 +2424,18 @@ public final class JavaRuntimeBootstrap {
             dlopenOptional(soFile);
         }
 
-        // Graphics and audio layer.
-        dlopenOptional(new File(PathManager.DIR_NATIVE_LIB, "libopenal.so"));
-        dlopenOptional(new File(plan.getLwjglNativeDirectory(), "libopenal.so"));
+        // Graphics and audio layer. Keep older Android devices on the
+        // app-bundled Android-21 OpenAL provider. Loading the LWJGL 3.4.1 Oboe
+        // build as well can make LG's Android 10 linker fail before SDL starts.
+        boolean android10OpenAlCompat = modernLwjgl341Component
+                && Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q;
+        File compatibilityOpenAl = new File(PathManager.DIR_NATIVE_LIB, "libopenal.so");
+        if (android10OpenAlCompat) {
+            dlopenOptional(compatibilityOpenAl);
+        } else {
+            dlopenOptional(compatibilityOpenAl);
+            dlopenOptional(new File(plan.getLwjglNativeDirectory(), "libopenal.so"));
+        }
 
         if (isOpenGlesWrapperRenderer(renderer)) {
             dlopenOptional("libEGL.so");
@@ -1888,8 +2469,13 @@ public final class JavaRuntimeBootstrap {
             Logging.i(TAG, "Skipping renderer preload because renderer library is empty: " + renderer.getRendererName());
         }
 
-        // LWJGL native entry points from the selected component.
+        // LWJGL native entry points from the selected component. On Android 10
+        // and older, skip the component OpenAL because LWJGL is explicitly
+        // redirected to DroidBridge's Android-21 compatibility provider above.
         for (File soFile : listSharedLibraries(plan.getLwjglNativeDirectory())) {
+            if (android10OpenAlCompat && "libopenal.so".equals(soFile.getName())) {
+                continue;
+            }
             dlopenOptional(soFile);
         }
     }

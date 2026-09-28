@@ -28,6 +28,7 @@ import ca.dnamobile.droidbridgelauncher.instance.LauncherInstance;
 import ca.dnamobile.droidbridgelauncher.instance.LauncherInstanceManager;
 import ca.dnamobile.droidbridgelauncher.shortcuts.InstanceShortcutHelper;
 import ca.dnamobile.droidbridgelauncher.utils.path.PathManager;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 /**
  * Exported picker used by trusted front ends such as Kid Emu.
@@ -56,7 +57,7 @@ public final class InstancePickerActivity extends AppCompatActivity {
 
         loadInstances();
         if (instances.isEmpty()) {
-            new AlertDialog.Builder(this)
+            new MaterialAlertDialogBuilder(this)
                     .setTitle("No DroidBridge instances")
                     .setMessage("Create a Minecraft instance in DroidBridge first, then import it into Kid Emu.")
                     .setPositiveButton(android.R.string.ok, (dialog, which) -> finishCanceled())
@@ -86,7 +87,7 @@ public final class InstancePickerActivity extends AppCompatActivity {
             names[i] = instance.getName() + "\n" + detail + " · " + instance.getMinecraftVersionId();
         }
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Choose DroidBridge instance")
                 .setItems(names, (dialog, which) -> {
                     if (which < 0 || which >= instances.size()) {

@@ -118,6 +118,17 @@ static bool should_force_rgba8888_visual(void) {
 }
 
 static bool should_force_desktop_gl(void) {
+    /*
+     * Kopper's renderer id intentionally starts with "opengles3_" for
+     * Pojav/FCL compatibility, but the API it exposes to Minecraft is desktop
+     * OpenGL through Zink.  Detect the renderer id directly so an env reset or
+     * launch-order change cannot accidentally request EGL_OPENGL_ES2_BIT.
+     */
+    if (env_is("DROIDBRIDGE_RENDERER", "opengles3_desktopgl_zink_kopper")
+        || env_is("POJAV_RENDERER", "opengles3_desktopgl_zink_kopper")) {
+        return true;
+    }
+
     return env_enabled("DROIDBRIDGE_EGL_FORCE_DESKTOP_GL")
            || env_enabled("DROIDBRIDGE_MESA_DESKTOP_GL")
            || (env_enabled("DROIDBRIDGE_MESA")
@@ -183,14 +194,17 @@ static bool should_use_safe_android_swaps(void) {
      * Leave it opt-in for diagnostics only.
      */
     if (env_enabled("DROIDBRIDGE_MESA")
-            && (env_is("DROIDBRIDGE_RENDERER", "freedreno_kgsl")
-                || env_is("DROIDBRIDGE_MESA_DRIVER", "kgsl")
-                || env_is("MESA_LOADER_DRIVER_OVERRIDE", "kgsl"))
             && !env_enabled("DROIDBRIDGE_MESA_FORCE_DESTROYED_SWAP")) {
         return false;
     }
 
     return should_force_desktop_gl() || env_enabled("DROIDBRIDGE_MESA_SAFE_SWAPS");
+}
+
+static bool should_preserve_android_swaps(void) {
+    return env_enabled("DROIDBRIDGE_MESA")
+           && !env_enabled("DROIDBRIDGE_MESA_FORCE_DESTROYED_SWAP")
+           && !env_enabled("DROIDBRIDGE_MESA_DISABLE_PRESERVED_SWAP");
 }
 
 static void force_destroyed_swap_behavior(EGLSurface surface) {
@@ -212,6 +226,29 @@ static void force_destroyed_swap_behavior(EGLSurface surface) {
         if (eglQuerySurface_p(g_EglDisplay, surface, EGL_SWAP_BEHAVIOR, &swapBehavior)) {
             gl_log(ANDROID_LOG_INFO, "Mesa surface: actual EGL_SWAP_BEHAVIOR=0x%x", swapBehavior);
         }
+    }
+}
+
+static void force_preserved_swap_behavior(EGLSurface surface) {
+    if (surface == EGL_NO_SURFACE || surface == NULL || eglSurfaceAttrib_p == NULL) return;
+
+    EGLBoolean ok = eglSurfaceAttrib_p(
+            g_EglDisplay, surface, EGL_SWAP_BEHAVIOR, EGL_BUFFER_PRESERVED);
+    if (!ok) {
+        gl_log(ANDROID_LOG_WARN,
+               "Mesa surface: eglSurfaceAttrib(EGL_BUFFER_PRESERVED) failed: %04x",
+               eglGetError_p());
+        return;
+    }
+
+    EGLint swapBehavior = -1;
+    if (eglQuerySurface_p != NULL
+            && eglQuerySurface_p(g_EglDisplay, surface, EGL_SWAP_BEHAVIOR, &swapBehavior)) {
+        gl_log(ANDROID_LOG_INFO,
+               "Mesa surface: preserved back buffer enabled actual EGL_SWAP_BEHAVIOR=0x%x",
+               swapBehavior);
+    } else {
+        gl_log(ANDROID_LOG_INFO, "Mesa surface: preserved back buffer enabled");
     }
 }
 
@@ -549,8 +586,8 @@ gl_render_window_t* gl_init_context(gl_render_window_t *share) {
            chosen_attributes_name);
 
     if (desktop_gl && (actual_surface_type & EGL_SWAP_BEHAVIOR_PRESERVED_BIT) != 0) {
-        gl_log(ANDROID_LOG_WARN,
-               "desktop GL config advertises EGL_SWAP_BEHAVIOR_PRESERVED_BIT; forcing destroyed swap behavior on created surfaces");
+        gl_log(ANDROID_LOG_INFO,
+               "desktop GL config supports preserved swap behavior for stable Android presentation");
     }
 
     if (desktop_gl && actual_alpha_size > 0 && !force_rgba8888) {
@@ -772,7 +809,11 @@ void gl_swap_surface(gl_render_window_t* bundle) {
         } else {
             gl_log(ANDROID_LOG_INFO, "eglCreateWindowSurface_p() success surface=%p", bundle->surface);
             gl_apply_swap_interval(bundle, gl_requested_swap_interval(), "windowSurface");
-            if (should_use_safe_android_swaps()) force_destroyed_swap_behavior(bundle->surface);
+            if (should_use_safe_android_swaps()) {
+                force_destroyed_swap_behavior(bundle->surface);
+            } else if (should_preserve_android_swaps()) {
+                force_preserved_swap_behavior(bundle->surface);
+            }
         }
     } else {
         gl_log(ANDROID_LOG_INFO, "No new native surface, switching to 1x1 pbuffer");
@@ -862,6 +903,82 @@ void gl_make_current(gl_render_window_t* bundle) {
         gl_log(ANDROID_LOG_ERROR, "eglMakeCurrent returned with error: %04x", eglGetError_p());
     }
 
+}
+
+void gl_destroy_context(gl_render_window_t* bundle) {
+    if (bundle == NULL) return;
+
+    /*
+     * GLFW window destruction must release the EGLWindowSurface that owns the
+     * Android ANativeWindow. Vulkan cannot create a VkSurfaceKHR for a native
+     * window while EGL still has a window surface attached to it
+     * (VK_ERROR_NATIVE_WINDOW_IN_USE_KHR).
+     *
+     * Keep DroidBridge's process-level droidbridgeWindow reference alive. The
+     * GL bundle owns its own ANativeWindow reference, acquired in
+     * gl_swap_surface(), and only that reference is released here. A later
+     * GLFW_NO_API window can therefore reuse the same Android window for Vulkan.
+     */
+    EGLContext currentContext = eglGetCurrentContext_p != NULL
+            ? eglGetCurrentContext_p()
+            : EGL_NO_CONTEXT;
+    if (currentBundle == bundle || currentContext == bundle->context) {
+        if (!eglMakeCurrent_p(
+                g_EglDisplay,
+                EGL_NO_SURFACE,
+                EGL_NO_SURFACE,
+                EGL_NO_CONTEXT)) {
+            gl_log(ANDROID_LOG_WARN,
+                   "eglMakeCurrent(EGL_NO_CONTEXT) during window destroy failed: %04x",
+                   eglGetError_p());
+        }
+        if (currentBundle == bundle) currentBundle = NULL;
+    }
+
+    if (bundle->surface != EGL_NO_SURFACE) {
+        EGLSurface oldSurface = bundle->surface;
+        if (!eglDestroySurface_p(g_EglDisplay, oldSurface)) {
+            gl_log(ANDROID_LOG_WARN,
+                   "eglDestroySurface during window destroy failed surface=%p error=%04x",
+                   oldSurface,
+                   eglGetError_p());
+        } else {
+            gl_log(ANDROID_LOG_INFO,
+                   "destroyed EGL window surface for GLFW/Vulkan handoff surface=%p",
+                   oldSurface);
+        }
+        bundle->surface = EGL_NO_SURFACE;
+        gl_reset_swap_interval_cache();
+    }
+
+    if (bundle->context != EGL_NO_CONTEXT) {
+        EGLContext oldContext = bundle->context;
+        if (!eglDestroyContext_p(g_EglDisplay, oldContext)) {
+            gl_log(ANDROID_LOG_WARN,
+                   "eglDestroyContext during window destroy failed context=%p error=%04x",
+                   oldContext,
+                   eglGetError_p());
+        } else {
+            gl_log(ANDROID_LOG_INFO,
+                   "destroyed EGL context for GLFW/Vulkan handoff context=%p",
+                   oldContext);
+        }
+        bundle->context = EGL_NO_CONTEXT;
+    }
+
+    if (bundle->nativeSurface != NULL) {
+        ANativeWindow_release(bundle->nativeSurface);
+        bundle->nativeSurface = NULL;
+    }
+    /* newNativeSurface is borrowed until gl_swap_surface() acquires it. */
+    bundle->newNativeSurface = NULL;
+
+    if (droidbridge_environ != NULL
+            && droidbridge_environ->mainWindowBundle == (basic_render_window_t*) bundle) {
+        droidbridge_environ->mainWindowBundle = NULL;
+    }
+
+    free(bundle);
 }
 
 void gl_swap_buffers() {
@@ -1001,4 +1118,3 @@ Java_org_lwjgl_opengl_PojavRendererInit_nativeInitGl4esInternals(JNIEnv *env, jc
                                                             jobject function_provider) {
     Java_org_lwjgl_opengl_DroidRendererInit_nativeInitGl4esInternals(env, clazz, function_provider);
 }
-

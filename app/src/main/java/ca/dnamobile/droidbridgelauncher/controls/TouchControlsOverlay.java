@@ -12,9 +12,13 @@
 
 package ca.dnamobile.droidbridgelauncher.controls;
 
-import android.app.AlertDialog;
+import androidx.appcompat.app.AlertDialog;
+import android.app.Activity;
 import android.content.Context;
+import android.content.ContextWrapper;
+import android.content.Intent;
 import android.content.SharedPreferences;
+import android.net.Uri;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -44,6 +48,7 @@ import android.view.ViewConfiguration;
 import android.view.ViewGroup;
 import android.view.ViewParent;
 import android.view.Window;
+import android.view.WindowInsets;
 import android.view.WindowManager;
 import android.util.SparseArray;
 import android.util.SparseBooleanArray;
@@ -71,11 +76,13 @@ import java.util.UUID;
 import java.util.Locale;
 import java.util.List;
 import java.util.Objects;
+import java.lang.ref.WeakReference;
 
 import org.json.JSONObject;
 import org.lwjgl.glfw.CallbackBridge;
 
 import ca.dnamobile.droidbridgelauncher.settings.GameResolutionSettings;
+import ca.dnamobile.droidbridgelauncher.settings.LauncherPreferences;
 import ca.dnamobile.droidbridgelauncher.runtime.DroidBridgeSDL3Bootstrap;
 import ca.dnamobile.droidbridgelauncher.feature.log.Logging;
 import ca.dnamobile.droidbridgelauncher.dualscreen.DualScreenSwapActionBus;
@@ -89,6 +96,7 @@ import ca.dnamobile.droidbridgelauncher.ui.LauncherDialogStyle;
 import ca.dnamobile.droidbridgelauncher.utils.path.PathManager;
 import ca.dnamobile.droidbridgelauncher.runtime.MinecraftGLSurface;
 import ca.dnamobile.droidbridgelauncher.runtime.LwjglGlfwKeycode;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 /**
  * Runtime/editor overlay. It deliberately avoids XML so it can be injected over the
@@ -112,6 +120,14 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     }
 
     private static final String TAG = "TouchControlsOverlay";
+
+    /**
+     * The dual-screen recorder renders DroidBridge's view directly into an encoder surface.
+     * Use a UI-thread-local suppression flag so that recording can omit only this overlay's
+     * artwork without changing the live view or disabling any touch hit targets.
+     */
+    @NonNull
+    private static final ThreadLocal<Boolean> RECORDING_ARTWORK_SUPPRESSED = new ThreadLocal<>();
     private static final int MAX_EDIT_HISTORY = 4;
     private static final int MAX_PANEL_EDIT_HISTORY = 32;
     private static final String MOUSE_PASS_THROUGH_PREFS = "touch_control_mouse_pass_through";
@@ -120,6 +136,8 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     private static final String PROFILE_SETTINGS_MIGRATION_V1 = "legacy_global_settings_imported_v1";
     private static final float MIN_RESPONSIVE_CANVAS_SCALE = 0.55f;
     private static final float MAX_RESPONSIVE_CANVAS_SCALE = 2.25f;
+    private static final int REQUEST_TOUCH_CONTROL_IMAGE = 0x44D1;
+    @Nullable private static WeakReference<TouchControlsOverlay> pendingImagePickerOwner;
 
     @NonNull private final ArrayDeque<String> undoHistory = new ArrayDeque<>();
     @NonNull private final ArrayDeque<String> redoHistory = new ArrayDeque<>();
@@ -155,6 +173,9 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     @Nullable private Runnable editorPanelHideRequest;
     @Nullable private EditorPreviewListener editorPreviewListener;
     @NonNull private final HashSet<String> editorPreviewSuppressedControlIds = new HashSet<>();
+    /** Drawer expansion is runtime state; profiles store only membership/default-open. */
+    @NonNull private final HashSet<String> expandedDrawerIds = new HashSet<>();
+    @NonNull private final HashSet<String> initializedDrawerIds = new HashSet<>();
     @Nullable private String activeGeometryPreviewControlId;
     @Nullable private String bulkAppearanceUndoSnapshot;
     @Nullable private String editorSessionStartSnapshot;
@@ -163,6 +184,8 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     @Nullable private ActiveEditGeometryUi activeEditGeometryUi;
     @Nullable private ActivePanelEditHistory activePanelEditHistory;
     @Nullable private EditPanelSwitchController activeEditPanelSwitchController;
+    @Nullable private TouchControlData pendingImageControl;
+    @Nullable private Runnable pendingImagePickedCallback;
     private boolean syncingActiveEditGeometryUi;
 
     private interface EditPanelSwitchController {
@@ -171,6 +194,16 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     }
 
     @Nullable private View passthroughTarget;
+    /**
+     * Optional same-display Minecraft viewport used only for input/cursor/hotbar mapping.
+     *
+     * Portrait (Centered Game View) intentionally keeps the touch-control canvas on the
+     * full portrait screen so controls can live above and below the centered game image
+     * and can be edited naturally in portrait. Raw Minecraft touches still need to be
+     * translated into the smaller centered surface, which is why input and layout are
+     * tracked separately.
+     */
+    @Nullable private View inputViewportTarget;
     private boolean dualScreenBottomHudHotbarMode;
 
     /**
@@ -285,6 +318,8 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     private long lastHotbarTapTimeMs;
 
     @NonNull private final SparseArray<TouchControlButtonView> controlPointerTargets = new SparseArray<>();
+    @Nullable private TouchControlButtonView capturedPhysicalMouseControlTarget;
+    private long capturedPhysicalMouseControlDownTime;
     /**
      * Pointer IDs owned by the TouchController mod proxy. Launcher buttons and
      * TouchController contacts can coexist because ownership is decided once on
@@ -422,10 +457,37 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         applyAndroidPointerIconPolicy(shouldHidePointer, true);
     }
 
+    /**
+     * Sets the Minecraft viewport used for raw touch/cursor/hotbar coordinate mapping.
+     * This never changes the visual touch-control canvas. In centered portrait mode the
+     * buttons remain laid out against the full portrait overlay while empty touches are
+     * translated only when they land inside the centered Minecraft rectangle.
+     */
+    public void setInputViewportTarget(@Nullable View target) {
+        if (inputViewportTarget == target) {
+            invalidate();
+            return;
+        }
+        inputViewportTarget = target;
+        clearLastHotbarTap();
+        invalidate();
+    }
+
+    /**
+     * Compatibility alias for source trees that still call the old centered-viewport
+     * method. It now affects input mapping only; visual control layout stays fullscreen.
+     */
+    public void setLayoutViewportTarget(@Nullable View target) {
+        setInputViewportTarget(target);
+    }
+
     public void setDualScreenBottomHudHotbarMode(boolean enabled) {
         if (dualScreenBottomHudHotbarMode == enabled) return;
         dualScreenBottomHudHotbarMode = enabled;
         clearLastHotbarTap();
+        // The bottom display is the user's dedicated touch deck. A connected controller
+        // must not auto-hide it; only the explicit touch-controls Off setting may do that.
+        refreshControllerAutoHideState();
         rebuildWhenSized();
         postInvalidateOnAnimation();
     }
@@ -559,6 +621,18 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         return editMode;
     }
 
+    public static void setRecordingArtworkSuppressed(boolean suppressed) {
+        if (suppressed) {
+            RECORDING_ARTWORK_SUPPRESSED.set(Boolean.TRUE);
+        } else {
+            RECORDING_ARTWORK_SUPPRESSED.remove();
+        }
+    }
+
+    private static boolean isRecordingArtworkSuppressed() {
+        return Boolean.TRUE.equals(RECORDING_ARTWORK_SUPPRESSED.get());
+    }
+
     /**
      * True from the moment a per-button editor starts opening until its window has
      * fully closed. The in-game editor uses this to ignore transient dialog-window
@@ -616,9 +690,11 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     }
 
     private void refreshControllerAutoHideState() {
-        boolean nextAutoHidden =
-                ControlsPreferences.isAutoHideTouchControlsWithControllerEnabled(getContext())
-                        && hasConnectedGameController();
+        // Match single-screen semantics in dual-screen mode too: when the user enables
+        // “Hide touch controls while controller attached”, a connected controller wins
+        // over the normal bottom-screen touch-control visibility setting.
+        boolean nextAutoHidden = ControlsPreferences.isAutoHideTouchControlsWithControllerEnabled(getContext())
+                && hasConnectedGameController();
         boolean changed = controllerAutoHidden != nextAutoHidden;
         controllerAutoHidden = nextAutoHidden;
 
@@ -900,6 +976,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     public void loadSelectedLayout() {
         layoutFile = TouchControlsStore.getSelectedLayoutFile(getContext());
         layoutData = TouchControlsStore.loadLayout(layoutFile);
+        resetDrawerRuntimeState();
         boolean migrated = migrateAndApplyProfileSettings();
         clearEditHistory();
         markEditorSessionSaved();
@@ -910,6 +987,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     public void loadLayout(@NonNull File file) {
         layoutFile = file;
         layoutData = TouchControlsStore.loadLayout(file);
+        resetDrawerRuntimeState();
         ControlsPreferences.setSelectedLayoutPath(getContext(), file.getAbsolutePath());
         boolean migrated = migrateAndApplyProfileSettings();
         clearEditHistory();
@@ -920,6 +998,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
 
     public void saveLayout() {
         try {
+            normalizeDrawerMembership();
             normalizeUnstablePixelLayoutBeforeSave();
             File target = layoutFile != null ? layoutFile : TouchControlsStore.getSelectedLayoutFile(getContext());
             TouchControlsStore.saveLayout(target, layoutData);
@@ -1126,6 +1205,11 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         target.strokeWidth = source.strokeWidth;
         target.strokeColor = source.strokeColor;
         target.backgroundColor = source.backgroundColor;
+        target.imageUri = source.imageUri;
+        target.imageMode = source.imageMode;
+        target.imageScalePercent = source.imageScalePercent;
+        target.imageOffsetXPercent = source.imageOffsetXPercent;
+        target.imageOffsetYPercent = source.imageOffsetYPercent;
         target.toggle = source.toggle;
         target.visibleInGame = source.visibleInGame;
         target.visibleInMenu = source.visibleInMenu;
@@ -1138,6 +1222,9 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         target.joystickAbsolute = source.joystickAbsolute;
         target.joystickForwardLock = source.joystickForwardLock;
         target.joystickDeadzonePercent = source.joystickDeadzonePercent;
+        target.drawerParentId = source.drawerParentId;
+        target.drawerOrientation = source.drawerOrientation;
+        target.drawerOpenByDefault = source.drawerOpenByDefault;
         target.rawX = source.rawX;
         target.rawY = source.rawY;
         target.positionAnchorX = source.positionAnchorX;
@@ -1424,11 +1511,16 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             return;
         }
 
+        syncDrawerRuntimeStateWithLayout();
         removeAllViews();
         int parentWidth = Math.max(1, getWidth());
         int parentHeight = Math.max(1, getHeight());
-        boolean migratedResponsiveCanvas = migrateNativeLayoutToResponsiveCanvas(parentWidth, parentHeight);
-        LayoutMetrics metrics = layoutMetrics(parentWidth, parentHeight);
+        // The control profile always uses the full overlay canvas. Centered portrait
+        // affects only Minecraft input mapping, never button placement/sizing.
+        int canvasWidth = parentWidth;
+        int canvasHeight = parentHeight;
+        boolean migratedResponsiveCanvas = migrateNativeLayoutToResponsiveCanvas(canvasWidth, canvasHeight);
+        LayoutMetrics metrics = layoutMetrics(canvasWidth, canvasHeight);
         float density = getResources().getDisplayMetrics().density;
         float scale = renderGlobalButtonScaleMultiplier();
         ArrayList<ScaledControlItem> scaledItems = new ArrayList<>();
@@ -1442,13 +1534,13 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                     ? metrics.sizeScale * renderGlobalButtonScaleMultiplier()
                     : 0f);
 
-            int baseWidth = baseControlScreenWidth(metrics, control, parentWidth);
-            int baseHeight = baseControlScreenHeight(metrics, control, parentHeight);
-            int width = scaledControlScreenWidth(metrics, control, parentWidth);
-            int height = scaledControlScreenHeight(metrics, control, parentHeight);
+            int baseWidth = baseControlScreenWidth(metrics, control, canvasWidth);
+            int baseHeight = baseControlScreenHeight(metrics, control, canvasHeight);
+            int width = scaledControlScreenWidth(metrics, control, canvasWidth);
+            int height = scaledControlScreenHeight(metrics, control, canvasHeight);
             if (TouchControlActions.JOYSTICK.equals(control.action)) {
-                int baseSquare = Math.max(1, Math.min(Math.min(parentWidth, parentHeight), Math.max(baseWidth, baseHeight)));
-                int scaledSquare = Math.max(1, Math.min(Math.min(parentWidth, parentHeight), Math.max(width, height)));
+                int baseSquare = Math.max(1, Math.min(Math.min(canvasWidth, canvasHeight), Math.max(baseWidth, baseHeight)));
+                int scaledSquare = Math.max(1, Math.min(Math.min(canvasWidth, canvasHeight), Math.max(width, height)));
                 baseWidth = baseSquare;
                 baseHeight = baseSquare;
                 width = scaledSquare;
@@ -1462,13 +1554,15 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             float fallbackY = metrics.toScreenY(control, baseHeight);
             float baseX = control.rawX == null
                     ? fallbackX
-                    : ExpressionResolver.resolve(control.rawX, fallbackX, parentWidth, parentHeight, baseWidth, baseHeight, density, expressionPreferredScale(), metrics.formulaPixelScale, metrics.formulaDpScale);
+                    : ExpressionResolver.resolve(control.rawX, fallbackX, canvasWidth, canvasHeight, baseWidth, baseHeight, density, expressionPreferredScale(), metrics.formulaPixelScale, metrics.formulaDpScale);
             float baseY = control.rawY == null
                     ? fallbackY
-                    : ExpressionResolver.resolve(control.rawY, fallbackY, parentWidth, parentHeight, baseWidth, baseHeight, density, expressionPreferredScale(), metrics.formulaPixelScale, metrics.formulaDpScale);
+                    : ExpressionResolver.resolve(control.rawY, fallbackY, canvasWidth, canvasHeight, baseWidth, baseHeight, density, expressionPreferredScale(), metrics.formulaPixelScale, metrics.formulaDpScale);
 
-            float resolvedX = scaledControlScreenX(baseX, baseWidth, width, parentWidth, scale);
-            float resolvedY = scaledControlScreenY(baseY, baseHeight, height, parentHeight, scale);
+            float resolvedX = scaledControlScreenX(
+                    baseX, baseWidth, width, canvasWidth, scale, control.positionAnchorX);
+            float resolvedY = scaledControlScreenY(
+                    baseY, baseHeight, height, canvasHeight, scale, control.positionAnchorY);
             scaledItems.add(new ScaledControlItem(
                     button,
                     baseX,
@@ -1484,11 +1578,14 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
 
         // Pojav-family formulas already encode the intended edge anchoring. Do not
         // run DroidBridge's cluster nudge on imported profiles or the whole layout can
-        // shift away from the Zalith/Amethyst/Mojo/Pojav position.
+        // shift away from the compatible third-party launcher position.
         if (!layoutData.usesOtherLauncherProfile()) {
-            keepAttachedScaledControlsInsideScreen(scaledItems, parentWidth, parentHeight);
+            keepAttachedScaledControlsInsideScreen(scaledItems, canvasWidth, canvasHeight);
         }
         for (ScaledControlItem item : scaledItems) {
+            // Controls are intentionally laid out against the full overlay canvas,
+            // including centered-portrait mode. Only raw Minecraft touches are
+            // translated through the centered game viewport.
             item.button.setX(item.x);
             item.button.setY(item.y);
         }
@@ -1522,7 +1619,14 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     }
 
     @Override
+    protected void dispatchDraw(@NonNull Canvas canvas) {
+        if (isRecordingArtworkSuppressed()) return;
+        super.dispatchDraw(canvas);
+    }
+
+    @Override
     protected void onDraw(@NonNull Canvas canvas) {
+        if (isRecordingArtworkSuppressed()) return;
         super.onDraw(canvas);
         if (TouchControllerModCompat.isActive() && !editMode) return;
         drawVirtualMouseCursor(canvas);
@@ -1881,7 +1985,8 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             return true;
         }
 
-        if (isHardwarePointerEvent(event)) {
+        if (isHardwarePointerEvent(event)
+                && !LauncherPreferences.isAndroidVirtualPhysicalMouse(getContext())) {
             return dispatchWholeTouchEventToPassthrough(event) || super.dispatchTouchEvent(event);
         }
 
@@ -1946,6 +2051,13 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     @Override
     public boolean dispatchGenericMotionEvent(@NonNull MotionEvent event) {
         if (!editMode && isHardwarePointerEvent(event)) {
+            if (LauncherPreferences.isAndroidVirtualPhysicalMouse(getContext())) {
+                // Android Virtual Mouse deliberately keeps normal Android View routing first,
+                // so the OS pointer can hover/click DroidBridge controls. If no Android-side
+                // view consumes the event, pass it through to Minecraft as usual.
+                if (super.dispatchGenericMotionEvent(event)) return true;
+                return dispatchWholeGenericEventToPassthrough(event);
+            }
             return dispatchWholeGenericEventToPassthrough(event) || super.dispatchGenericMotionEvent(event);
         }
         return super.dispatchGenericMotionEvent(event);
@@ -2163,8 +2275,8 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         float scaledHeight = Math.max(1f, view.getHeight());
         float baseWidth = Math.max(1f, scaledWidth / Math.max(0.001f, globalScale));
         float baseHeight = Math.max(1f, scaledHeight / Math.max(0.001f, globalScale));
-        float baseX = unscaledControlScreenX(snapped[0], baseWidth, scaledWidth, getWidth(), globalScale);
-        float baseY = unscaledControlScreenY(snapped[1], baseHeight, scaledHeight, getHeight(), globalScale);
+        float baseX = unscaledControlScreenX(snapped[0], baseWidth, scaledWidth, getWidth(), globalScale, data.positionAnchorX);
+        float baseY = unscaledControlScreenY(snapped[1], baseHeight, scaledHeight, getHeight(), globalScale, data.positionAnchorY);
 
         // Persist the anchor chosen by the control's new visible location before
         // converting back to source-canvas units. Re-inferring the anchor from old
@@ -2245,14 +2357,16 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 baseScreenWidth,
                 newWidth,
                 getWidth(),
-                globalScale
+                globalScale,
+                data.positionAnchorX
         );
         float baseScreenY = unscaledControlScreenY(
                 top,
                 baseScreenHeight,
                 newHeight,
                 getHeight(),
-                globalScale
+                globalScale,
+                data.positionAnchorY
         );
         data.positionAnchorX = metrics.horizontalAnchorForScreenPosition(
                 baseScreenX,
@@ -2355,6 +2469,30 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     @Override
     public void onToggleControlsRequested() {
         toggleControlVisible();
+    }
+
+    @Override
+    public void onDrawerToggleRequested(
+            @NonNull TouchControlButtonView view,
+            @NonNull TouchControlData data
+    ) {
+        if (!TouchControlActions.DRAWER.equals(data.action)) return;
+
+        String drawerId = data.id == null ? "" : data.id.trim();
+        if (drawerId.isEmpty()) return;
+
+        boolean expanded;
+        if (expandedDrawerIds.contains(drawerId)) {
+            expandedDrawerIds.remove(drawerId);
+            expanded = false;
+            releaseDrawerChildInput(drawerId);
+        } else {
+            expandedDrawerIds.add(drawerId);
+            expanded = true;
+        }
+        initializedDrawerIds.add(drawerId);
+        view.setActivated(expanded);
+        applyControlsVisualState();
     }
 
     @Override
@@ -2542,6 +2680,11 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         float originalStrokeWidth = data.strokeWidth;
         int originalStrokeColor = data.strokeColor;
         int originalBackgroundColor = data.backgroundColor;
+        String originalImageUri = data.imageUri;
+        String originalImageMode = data.imageMode;
+        float originalImageScalePercent = data.imageScalePercent;
+        float originalImageOffsetXPercent = data.imageOffsetXPercent;
+        float originalImageOffsetYPercent = data.imageOffsetYPercent;
         boolean originalToggle = data.toggle;
         boolean originalVisibleInGame = data.visibleInGame;
         boolean originalVisibleInMenu = data.visibleInMenu;
@@ -2556,6 +2699,10 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         String originalRawY = data.rawY;
         String originalPositionAnchorX = data.positionAnchorX;
         String originalPositionAnchorY = data.positionAnchorY;
+        String originalDrawerParentId = data.drawerParentId;
+        String originalDrawerOrientation = data.drawerOrientation;
+        boolean originalDrawerOpenByDefault = data.drawerOpenByDefault;
+        HashSet<String> selectedDrawerMemberIds = drawerMemberIdsFor(data.id);
 
         LayoutMetrics metrics = layoutMetrics(getWidth(), getHeight());
         int parentWidthUnits = Math.max(1, Math.round(metrics.maxLayoutXUnits()));
@@ -2571,14 +2718,16 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 liveBaseWidth,
                 liveScaledWidth,
                 getWidth(),
-                liveScale
+                liveScale,
+                data.positionAnchorX
         );
         float liveBaseY = unscaledControlScreenY(
                 editingView.getY(),
                 liveBaseHeight,
                 liveScaledHeight,
                 getHeight(),
-                liveScale
+                liveScale,
+                data.positionAnchorY
         );
         float initialLayoutX = data.rawX == null
                 ? data.x
@@ -2612,6 +2761,9 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         quickActionGroup.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
         quickActionGroup.setWeightSum(3f);
         quickActionGroup.setPadding(dp(8f), dp(2f), dp(8f), dp(3f));
+        // This row is laid out inside a child dialog when editing in game. Reserve
+        // its intended height so a transient first-frame measure cannot squeeze it.
+        quickActionGroup.setMinimumHeight(dp(35f));
 
         Button undoButton = compactEditActionButton(context, "UNDO");
         Button redoButton = compactEditActionButton(context, "REDO");
@@ -2665,13 +2817,16 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         footerActionRow.setGravity(Gravity.CENTER_VERTICAL);
         footerActionRow.setWeightSum(3f);
         footerActionRow.setPadding(dp(6f), dp(2f), dp(6f), dp(5f));
+        // DELETE / CANCEL / OK are fixed-height controls. Keep their container tall
+        // enough even if Android reports a short child-window measure for one frame.
+        footerActionRow.setMinimumHeight(dp(45f));
 
         Button deleteButton = compactEditActionButton(context, "DELETE");
         Button cancelButton = compactEditActionButton(context, "CANCEL");
         Button okButton = compactEditActionButton(context, "OK");
-        deleteButton.setTextColor(0xFFFF6D00);
-        cancelButton.setTextColor(0xFFFF6D00);
-        okButton.setTextColor(0xFFFF6D00);
+        deleteButton.setTextColor(LauncherDialogStyle.COLOR_ERROR);
+        cancelButton.setTextColor(LauncherDialogStyle.COLOR_ACCENT);
+        okButton.setTextColor(LauncherDialogStyle.COLOR_ACCENT);
 
         footerActionRow.addView(deleteButton, new LinearLayout.LayoutParams(
                 0, dp(38f), 1f
@@ -2701,7 +2856,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
 
         CheckBox emptyLabel = new CheckBox(context);
         emptyLabel.setText("Leave button text empty");
-        emptyLabel.setTextColor(0xFFE0E0E0);
+        emptyLabel.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         emptyLabel.setChecked(data.label == null || data.label.isEmpty());
         emptyLabel.setOnCheckedChangeListener((buttonView, checked) -> {
             if (checked && label.getText() != null && label.getText().length() > 0) {
@@ -2828,6 +2983,36 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         }
         updateKeySlotSummary(keyCodes, boundKeys, keySlotSpinners, keyOptions);
 
+        LinearLayout drawerOptions = new LinearLayout(context);
+        drawerOptions.setOrientation(LinearLayout.VERTICAL);
+        addSectionHeader(
+                drawerOptions,
+                "Drawer",
+                "Choose which existing buttons this drawer expands and collapses. Child buttons keep their normal positions."
+        );
+        Button drawerMembersButton = new Button(context);
+        drawerMembersButton.setAllCaps(false);
+        updateDrawerMembersButtonText(drawerMembersButton, selectedDrawerMemberIds.size());
+        drawerOptions.addView(drawerMembersButton, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        CheckBox drawerOpenByDefault = new CheckBox(context);
+        drawerOpenByDefault.setText("Expanded by default");
+        drawerOpenByDefault.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
+        drawerOpenByDefault.setChecked(data.drawerOpenByDefault);
+        drawerOptions.addView(drawerOpenByDefault);
+        layout.addView(drawerOptions, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        drawerMembersButton.setOnClickListener(v -> showDrawerMembersDialog(
+                context,
+                data,
+                selectedDrawerMemberIds,
+                drawerMembersButton
+        ));
+
         final View[] joystickOptionViews = new View[5];
 
         AdapterView.OnItemSelectedListener actionListener = new AdapterView.OnItemSelectedListener() {
@@ -2864,6 +3049,8 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                     for (LinearLayout slotRow : keySlotRows) {
                         if (slotRow != null) slotRow.setVisibility(keyAction ? VISIBLE : GONE);
                     }
+                    boolean drawerSelected = TouchControlActions.DRAWER.equals(action);
+                    drawerOptions.setVisibility(drawerSelected ? VISIBLE : GONE);
                     boolean joystickSelected = TouchControlActions.JOYSTICK.equals(action);
                     for (View joystickOptionView : joystickOptionViews) {
                         if (joystickOptionView != null) joystickOptionView.setVisibility(joystickSelected ? VISIBLE : GONE);
@@ -2943,43 +3130,113 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         addFieldRow(layout, "Stroke", strokeWidth);
         SeekBar strokeSlider = addSlider(layout, 20, Math.round(data.strokeWidth));
 
-        EditText strokeColor = textField(context, "#AARRGGBB or #RRGGBB", formatColor(data.strokeColor), false);
-        addFieldRow(layout, "Border colour", strokeColor);
+        final int[] selectedBackgroundColor = new int[]{data.backgroundColor};
+        final int[] selectedStrokeColor = new int[]{data.strokeColor};
+        Button backgroundColorButton = slotEditActionButton(context, "Button colour", true);
+        Button strokeColorButton = slotEditActionButton(context, "Border / joystick", true);
+        backgroundColorButton.setSingleLine(false);
+        strokeColorButton.setSingleLine(false);
+        backgroundColorButton.setGravity(Gravity.CENTER);
+        strokeColorButton.setGravity(Gravity.CENTER);
+        updateColorPickerButton(backgroundColorButton, selectedBackgroundColor[0], "Button colour");
+        updateColorPickerButton(strokeColorButton, selectedStrokeColor[0], "Border / joystick");
+
+        // Colour pickers should read like the other primary editor actions rather
+        // than two small field widgets. Keep them large, equal-width, and side by side.
+        LinearLayout colorActions = new LinearLayout(context);
+        colorActions.setOrientation(LinearLayout.HORIZONTAL);
+        colorActions.setWeightSum(2f);
+        colorActions.setPadding(0, dp(3f), 0, dp(5f));
+        LinearLayout.LayoutParams backgroundColorParams = new LinearLayout.LayoutParams(
+                0, dp(52f), 1f
+        );
+        backgroundColorParams.setMarginEnd(dp(4f));
+        LinearLayout.LayoutParams strokeColorParams = new LinearLayout.LayoutParams(
+                0, dp(52f), 1f
+        );
+        strokeColorParams.setMarginStart(dp(4f));
+        colorActions.addView(backgroundColorButton, backgroundColorParams);
+        colorActions.addView(strokeColorButton, strokeColorParams);
+        layout.addView(colorActions, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        addSectionHeader(layout, "Button image", "Pick an image to use behind the label or replace the normal button artwork entirely.");
+        TextView imageStatus = valueLabel(context, hasControlImage(data)
+                ? "Image selected"
+                : "No image selected");
+        layout.addView(imageStatus);
+
+        LinearLayout imageActions = new LinearLayout(context);
+        imageActions.setOrientation(LinearLayout.HORIZONTAL);
+        imageActions.setWeightSum(2f);
+        Button chooseImageButton = slotEditActionButton(context, "Choose image", true);
+        Button clearImageButton = slotEditActionButton(context, "Clear image", false);
+        LinearLayout.LayoutParams imageActionParams = new LinearLayout.LayoutParams(0, dp(38f), 1f);
+        imageActionParams.setMargins(dp(2f), dp(2f), dp(2f), dp(2f));
+        imageActions.addView(chooseImageButton, new LinearLayout.LayoutParams(imageActionParams));
+        imageActions.addView(clearImageButton, new LinearLayout.LayoutParams(imageActionParams));
+        layout.addView(imageActions);
+
+        Spinner imageModeSpinner = new Spinner(context);
+        String[] imageModeLabels = new String[]{
+                "Background — keep text and stroke",
+                "Replace button — image only"
+        };
+        imageModeSpinner.setAdapter(dialogSpinnerAdapter(context, imageModeLabels));
+        imageModeSpinner.setSelection(TouchControlData.IMAGE_MODE_REPLACE.equals(
+                TouchControlData.normalizeImageMode(data.imageMode)) ? 1 : 0);
+        addViewFieldRow(layout, "Image mode", imageModeSpinner);
+
+        int initialImageScale = Math.round(TouchControlData.clampImageScalePercent(data.imageScalePercent));
+        TextView imageScaleLabel = valueLabel(context, "Image size: " + initialImageScale + "%");
+        layout.addView(imageScaleLabel);
+        SeekBar imageScaleSlider = addSlider(layout, 300, initialImageScale);
+        if (imageScaleSlider.getProgress() < 25) imageScaleSlider.setProgress(25);
+
+        TextView imageOffsetXLabel = valueLabel(context, "Image horizontal offset: " + Math.round(data.imageOffsetXPercent) + "%");
+        layout.addView(imageOffsetXLabel);
+        SeekBar imageOffsetXSlider = addSlider(layout, 200, Math.round(TouchControlData.clampImageOffsetPercent(data.imageOffsetXPercent)) + 100);
+
+        TextView imageOffsetYLabel = valueLabel(context, "Image vertical offset: " + Math.round(data.imageOffsetYPercent) + "%");
+        layout.addView(imageOffsetYLabel);
+        SeekBar imageOffsetYSlider = addSlider(layout, 200, Math.round(TouchControlData.clampImageOffsetPercent(data.imageOffsetYPercent)) + 100);
 
         CheckBox toggle = new CheckBox(context);
         toggle.setText("Toggle button");
-        toggle.setTextColor(0xFFE0E0E0);
+        toggle.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         toggle.setChecked(data.toggle);
         layout.addView(toggle);
 
         CheckBox visibleInGame = new CheckBox(context);
         visibleInGame.setText("Visible in game");
-        visibleInGame.setTextColor(0xFFE0E0E0);
+        visibleInGame.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         visibleInGame.setChecked(data.visibleInGame);
         layout.addView(visibleInGame);
 
         CheckBox visibleInMenu = new CheckBox(context);
         visibleInMenu.setText("Visible in menu");
-        visibleInMenu.setTextColor(0xFFE0E0E0);
+        visibleInMenu.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         visibleInMenu.setChecked(data.visibleInMenu);
         layout.addView(visibleInMenu);
 
         CheckBox visibleWhenControlsHidden = new CheckBox(context);
         visibleWhenControlsHidden.setText("Stay visible when touch controls are hidden");
-        visibleWhenControlsHidden.setTextColor(0xFFE0E0E0);
+        visibleWhenControlsHidden.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         visibleWhenControlsHidden.setChecked(data.visibleWhenControlsHidden
                 || TouchControlData.shouldStayVisibleWhenControlsHiddenByDefault(data.action));
         layout.addView(visibleWhenControlsHidden);
 
         CheckBox joystickAbsolute = new CheckBox(context);
         joystickAbsolute.setText("Joystick center follows finger");
-        joystickAbsolute.setTextColor(0xFFE0E0E0);
+        joystickAbsolute.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         joystickAbsolute.setChecked(data.joystickAbsolute);
         layout.addView(joystickAbsolute);
 
         CheckBox joystickForwardLock = new CheckBox(context);
-        joystickForwardLock.setText("Joystick forward lock / sprint edge");
-        joystickForwardLock.setTextColor(0xFFE0E0E0);
+        joystickForwardLock.setText("Joystick forward lock (double-tap forward; press forward again to release)");
+        joystickForwardLock.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         joystickForwardLock.setChecked(data.joystickForwardLock);
         layout.addView(joystickForwardLock);
 
@@ -3003,7 +3260,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
 
         CheckBox mousePassThrough = new CheckBox(context);
         mousePassThrough.setText("Mouse pass through");
-        mousePassThrough.setTextColor(0xFFE0E0E0);
+        mousePassThrough.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         mousePassThrough.setChecked(isMousePassThroughEnabled(data));
         layout.addView(mousePassThrough);
 
@@ -3013,7 +3270,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
 
         CheckBox swipeGesture = new CheckBox(context);
         swipeGesture.setText("Swipeable gesture");
-        swipeGesture.setTextColor(0xFFE0E0E0);
+        swipeGesture.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         swipeGesture.setChecked(isSwipeGestureEnabled(data));
         layout.addView(swipeGesture);
 
@@ -3023,7 +3280,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
 
         CheckBox virtualMouse = new CheckBox(context);
         virtualMouse.setText("Show virtual cursor");
-        virtualMouse.setTextColor(0xFFE0E0E0);
+        virtualMouse.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         virtualMouse.setChecked(isProfileVirtualMouseEnabled());
         virtualMouse.setOnCheckedChangeListener((buttonView, isChecked) -> {
             setProfileVirtualMouseEnabled(isChecked);
@@ -3122,11 +3379,17 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             data.opacity = clamp(parseFloat(opacity, data.opacity), 0f, 1f);
             data.cornerRadius = Math.max(0f, parseFloat(cornerRadius, data.cornerRadius));
             data.strokeWidth = Math.max(0f, parseFloat(strokeWidth, data.strokeWidth));
-            data.strokeColor = parseColorValue(
-                    strokeColor.getText() == null ? "" : strokeColor.getText().toString(),
-                    data.strokeColor
-            );
-            data.toggle = toggle.isChecked();
+            data.backgroundColor = selectedBackgroundColor[0];
+            data.strokeColor = selectedStrokeColor[0];
+            data.imageMode = imageModeSpinner.getSelectedItemPosition() == 1
+                    ? TouchControlData.IMAGE_MODE_REPLACE
+                    : TouchControlData.IMAGE_MODE_BACKGROUND;
+            data.imageScalePercent = TouchControlData.clampImageScalePercent(imageScaleSlider.getProgress());
+            data.imageOffsetXPercent = TouchControlData.clampImageOffsetPercent(imageOffsetXSlider.getProgress() - 100f);
+            data.imageOffsetYPercent = TouchControlData.clampImageOffsetPercent(imageOffsetYSlider.getProgress() - 100f);
+            data.toggle = TouchControlActions.DRAWER.equals(data.action) ? false : toggle.isChecked();
+            data.drawerOpenByDefault = TouchControlActions.DRAWER.equals(data.action)
+                    && drawerOpenByDefault.isChecked();
             data.visibleInGame = visibleInGame.isChecked();
             data.visibleInMenu = visibleInMenu.isChecked();
             data.visibleWhenControlsHidden = visibleWhenControlsHidden.isChecked()
@@ -3197,6 +3460,135 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         };
         applyPreviewRef[0] = applyPreview;
 
+        backgroundColorButton.setOnClickListener(v -> TouchColorPickerDialog.show(
+                context,
+                "Button colour",
+                selectedBackgroundColor[0],
+                false,
+                true,
+                color -> {
+                    if (panelHistory.restoring) return;
+                    panelHistory.beginDiscreteChange();
+                    // Clear fill is represented by fully transparent black. Otherwise
+                    // the dedicated control Opacity slider owns transparency, so a
+                    // colour chosen from the wheel is stored fully opaque.
+                    int chosenColor = Color.alpha(color) == 0
+                            ? Color.TRANSPARENT
+                            : Color.rgb(
+                                    Color.red(color),
+                                    Color.green(color),
+                                    Color.blue(color)
+                            );
+                    selectedBackgroundColor[0] = chosenColor;
+                    data.backgroundColor = chosenColor;
+                    updateColorPickerButton(backgroundColorButton, chosenColor, "Button colour");
+                    applyControlAppearancePreview(editingView, data);
+                    panelHistory.updateButtons();
+                }
+        ));
+        strokeColorButton.setOnClickListener(v -> TouchColorPickerDialog.show(
+                context,
+                "Border / joystick colour",
+                selectedStrokeColor[0],
+                color -> {
+                    if (panelHistory.restoring) return;
+                    panelHistory.beginDiscreteChange();
+                    selectedStrokeColor[0] = color;
+                    data.strokeColor = color;
+                    updateColorPickerButton(strokeColorButton, color, "Border / joystick");
+                    applyControlAppearancePreview(editingView, data);
+                    panelHistory.updateButtons();
+                }
+        ));
+
+        chooseImageButton.setOnClickListener(v -> {
+            if (panelHistory.restoring) return;
+            panelHistory.beginDiscreteChange();
+            requestControlImage(data, () -> {
+                imageStatus.setText(hasControlImage(data) ? "Image selected" : "No image selected");
+                applyPreview.run();
+            });
+        });
+        clearImageButton.setOnClickListener(v -> {
+            if (!hasControlImage(data) || panelHistory.restoring) return;
+            panelHistory.beginDiscreteChange();
+            data.imageUri = null;
+            imageStatus.setText("No image selected");
+            applyPreview.run();
+        });
+
+        imageModeSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (!panelControlsReady[0] || syncingPanelUi[0] || panelHistory.restoring) return;
+                panelHistory.beginDiscreteChange();
+                applyPreview.run();
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+
+        imageScaleSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                if (!fromUser || !panelControlsReady[0] || syncingPanelUi[0] || panelHistory.restoring) return;
+                int clamped = Math.round(TouchControlData.clampImageScalePercent(progress));
+                imageScaleLabel.setText("Image size: " + clamped + "%");
+                applyPreview.run();
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+                if (panelControlsReady[0] && !panelHistory.restoring) panelHistory.beginDiscreteChange();
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                if (seekBar.getProgress() < 25) seekBar.setProgress(25);
+                if (panelControlsReady[0] && !panelHistory.restoring) applyPreview.run();
+            }
+        });
+
+        imageOffsetXSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                if (!fromUser || !panelControlsReady[0] || syncingPanelUi[0] || panelHistory.restoring) return;
+                imageOffsetXLabel.setText("Image horizontal offset: " + (progress - 100) + "%");
+                applyPreview.run();
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+                if (panelControlsReady[0] && !panelHistory.restoring) panelHistory.beginDiscreteChange();
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                if (panelControlsReady[0] && !panelHistory.restoring) applyPreview.run();
+            }
+        });
+
+        imageOffsetYSlider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override
+            public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                if (!fromUser || !panelControlsReady[0] || syncingPanelUi[0] || panelHistory.restoring) return;
+                imageOffsetYLabel.setText("Image vertical offset: " + (progress - 100) + "%");
+                applyPreview.run();
+            }
+
+            @Override
+            public void onStartTrackingTouch(SeekBar seekBar) {
+                if (panelControlsReady[0] && !panelHistory.restoring) panelHistory.beginDiscreteChange();
+            }
+
+            @Override
+            public void onStopTrackingTouch(SeekBar seekBar) {
+                if (panelControlsReady[0] && !panelHistory.restoring) applyPreview.run();
+            }
+        });
+
         emptyLabel.setOnCheckedChangeListener((buttonView, checked) -> {
             if (!panelControlsReady[0] || syncingPanelUi[0] || panelHistory.restoring) return;
             panelHistory.beginDiscreteChange();
@@ -3223,6 +3615,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         visibleWhenControlsHidden.setOnCheckedChangeListener(liveOptionListener);
         joystickAbsolute.setOnCheckedChangeListener(liveOptionListener);
         joystickForwardLock.setOnCheckedChangeListener(liveOptionListener);
+        drawerOpenByDefault.setOnCheckedChangeListener(liveOptionListener);
         mousePassThrough.setOnCheckedChangeListener(liveOptionListener);
         swipeGesture.setOnCheckedChangeListener(liveOptionListener);
         virtualMouse.setOnCheckedChangeListener((buttonView, isChecked) -> {
@@ -3235,7 +3628,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
 
         EditText[] liveTextFields = new EditText[]{
                 label, idField, x, y, width, height, opacity,
-                cornerRadius, strokeWidth, strokeColor, joystickDeadzone
+                cornerRadius, strokeWidth, joystickDeadzone
         };
         for (EditText field : liveTextFields) {
             final boolean geometryField = field == x
@@ -3385,14 +3778,16 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                         baseScreenWidth,
                         scaledWidth,
                         getWidth(),
-                        refreshScale
+                        refreshScale,
+                        data.positionAnchorX
                 );
                 float baseScreenY = unscaledControlScreenY(
                         editingView.getY(),
                         baseScreenHeight,
                         scaledHeight,
                         getHeight(),
-                        refreshScale
+                        refreshScale,
+                        data.positionAnchorY
                 );
                 float layoutX = data.rawX == null
                         ? data.x
@@ -3427,7 +3822,19 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 setSliderProgress(cornerSlider, Math.round(data.cornerRadius));
                 strokeWidth.setText(String.valueOf(Math.round(data.strokeWidth)));
                 setSliderProgress(strokeSlider, Math.round(data.strokeWidth));
-                strokeColor.setText(formatColor(data.strokeColor));
+                selectedBackgroundColor[0] = data.backgroundColor;
+                selectedStrokeColor[0] = data.strokeColor;
+                updateColorPickerButton(backgroundColorButton, selectedBackgroundColor[0], "Button colour");
+                updateColorPickerButton(strokeColorButton, selectedStrokeColor[0], "Border / joystick");
+                imageStatus.setText(hasControlImage(data) ? "Image selected" : "No image selected");
+                imageModeSpinner.setSelection(TouchControlData.IMAGE_MODE_REPLACE.equals(
+                        TouchControlData.normalizeImageMode(data.imageMode)) ? 1 : 0);
+                setSliderProgress(imageScaleSlider, Math.round(TouchControlData.clampImageScalePercent(data.imageScalePercent)));
+                setSliderProgress(imageOffsetXSlider, Math.round(TouchControlData.clampImageOffsetPercent(data.imageOffsetXPercent)) + 100);
+                setSliderProgress(imageOffsetYSlider, Math.round(TouchControlData.clampImageOffsetPercent(data.imageOffsetYPercent)) + 100);
+                imageScaleLabel.setText("Image size: " + Math.round(TouchControlData.clampImageScalePercent(data.imageScalePercent)) + "%");
+                imageOffsetXLabel.setText("Image horizontal offset: " + Math.round(TouchControlData.clampImageOffsetPercent(data.imageOffsetXPercent)) + "%");
+                imageOffsetYLabel.setText("Image vertical offset: " + Math.round(TouchControlData.clampImageOffsetPercent(data.imageOffsetYPercent)) + "%");
 
                 toggle.setChecked(data.toggle);
                 visibleInGame.setChecked(data.visibleInGame);
@@ -3449,6 +3856,13 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 mousePassThrough.setChecked(isMousePassThroughEnabled(data));
                 swipeGesture.setChecked(isSwipeGestureEnabled(data));
                 virtualMouse.setChecked(isProfileVirtualMouseEnabled());
+                drawerOpenByDefault.setChecked(data.drawerOpenByDefault);
+                selectedDrawerMemberIds.clear();
+                selectedDrawerMemberIds.addAll(drawerMemberIdsFor(data.id));
+                updateDrawerMembersButtonText(drawerMembersButton, selectedDrawerMemberIds.size());
+                drawerOptions.setVisibility(
+                        TouchControlActions.DRAWER.equals(data.action) ? VISIBLE : GONE
+                );
 
                 boolean joystickSelected = TouchControlActions.JOYSTICK.equals(data.action);
                 for (View joystickOptionView : joystickOptionViews) {
@@ -3471,7 +3885,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         panelControlsReady[0] = false;
         panelHistory.updateButtons();
 
-        AlertDialog dialog = new AlertDialog.Builder(context)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(context)
                 .setView(panelRoot)
                 .create();
         dialog.setCanceledOnTouchOutside(false);
@@ -3577,6 +3991,10 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             // Preserve exactly what the user typed in the Label field.
             // Changing the binding should never rename an existing/custom button.
             data.id = safeControlId(idField.getText() == null ? "" : idField.getText().toString());
+            data.drawerOpenByDefault = TouchControlActions.DRAWER.equals(data.action)
+                    && drawerOpenByDefault.isChecked();
+            data.drawerOrientation = TouchControlData.normalizeDrawerOrientation(data.drawerOrientation);
+            applyDrawerMembershipAfterEdit(originalId, data, selectedDrawerMemberIds);
             setMousePassThroughEnabled(data, mousePassThrough.isChecked());
             setSwipeGestureEnabled(data, swipeGesture.isChecked());
             data.label = emptyLabel.isChecked() ? "" : newLabel;
@@ -3608,16 +4026,20 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             data.opacity = clamp(parseFloat(opacity, data.opacity), 0f, 1f);
             data.cornerRadius = Math.max(0f, parseFloat(cornerRadius, data.cornerRadius));
             data.strokeWidth = Math.max(0f, parseFloat(strokeWidth, data.strokeWidth));
-            data.strokeColor = parseColorValue(
-                    strokeColor.getText() == null ? "" : strokeColor.getText().toString(),
-                    data.strokeColor
-            );
+            data.backgroundColor = selectedBackgroundColor[0];
+            data.strokeColor = selectedStrokeColor[0];
+            data.imageMode = imageModeSpinner.getSelectedItemPosition() == 1
+                    ? TouchControlData.IMAGE_MODE_REPLACE
+                    : TouchControlData.IMAGE_MODE_BACKGROUND;
+            data.imageScalePercent = TouchControlData.clampImageScalePercent(imageScaleSlider.getProgress());
+            data.imageOffsetXPercent = TouchControlData.clampImageOffsetPercent(imageOffsetXSlider.getProgress() - 100f);
+            data.imageOffsetYPercent = TouchControlData.clampImageOffsetPercent(imageOffsetYSlider.getProgress() - 100f);
             data.joystickAbsolute = joystickAbsolute.isChecked();
             data.joystickForwardLock = joystickForwardLock.isChecked();
             data.joystickDeadzonePercent = TouchControlData.clampJoystickDeadzonePercent(
                     parseFloat(joystickDeadzone, data.joystickDeadzonePercent)
             );
-            data.toggle = toggle.isChecked();
+            data.toggle = TouchControlActions.DRAWER.equals(data.action) ? false : toggle.isChecked();
             data.visibleInGame = visibleInGame.isChecked();
             data.visibleInMenu = visibleInMenu.isChecked();
             data.visibleWhenControlsHidden = visibleWhenControlsHidden.isChecked()
@@ -3643,11 +4065,59 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             prepareControlEditSidePanel(dialog, editingView);
             refreshOpenEditorPanel.run();
             animatePreparedControlEditSidePanel(dialog);
+
+            // Do not recalculate or replace the dialog's window geometry here. The
+            // in-game editor is already a dialog, so this control editor is a nested
+            // child window. Re-running side-panel positioning while that child is
+            // taking focus can produce a zero/invalid viewport on some devices.
+            // A lightweight content-only remeasure is enough to correct the
+            // first-frame compressed action rows observed in game.
+            Runnable remeasurePanelContent = () -> {
+                if (activeEditDialog != dialog || !dialog.isShowing()) return;
+
+                /*
+                 * Keep the side-panel window geometry untouched. The in-game editor
+                 * is a nested Dialog and changing that child window's bounds while it
+                 * is taking focus caused the disappearing-panel regression. Instead,
+                 * reserve the hidden navigation/gesture bar inside the panel content.
+                 * This moves DELETE / CANCEL / OK above the system-bar-sized strip
+                 * while the panel background, gravity, x/y and animation stay exactly
+                 * as they were. Re-read the inset on each delayed measure pass because
+                 * some Android vendors deliver the stable inset one frame late.
+                 */
+                int bottomSystemInset = controlEditBottomSystemInset(getRootView());
+                if (panelRoot.getPaddingBottom() != bottomSystemInset) {
+                    panelRoot.setPadding(
+                            panelRoot.getPaddingLeft(),
+                            panelRoot.getPaddingTop(),
+                            panelRoot.getPaddingRight(),
+                            bottomSystemInset
+                    );
+                }
+
+                quickActionGroup.requestLayout();
+                footerActionRow.requestLayout();
+                panelRoot.requestLayout();
+                View content = dialog.findViewById(android.R.id.content);
+                if (content != null) content.requestLayout();
+                Window panelWindow = dialog.getWindow();
+                if (panelWindow != null) {
+                    View decor = panelWindow.getDecorView();
+                    if (decor != null) decor.requestLayout();
+                }
+            };
+
             panelRoot.post(() -> {
+                remeasurePanelContent.run();
                 if (activeEditDialog == dialog && dialog.isShowing()) {
                     panelControlsReady[0] = true;
                 }
             });
+            // A second content-only pass catches the vendor/inset pass that used to
+            // be triggered incidentally by taking a screenshot. Window size, gravity,
+            // x/y and entrance translation are deliberately left untouched.
+            panelRoot.postDelayed(remeasurePanelContent, 96L);
+            panelRoot.postDelayed(remeasurePanelContent, 220L);
         });
 
         dialog.setOnDismissListener(dismissed -> {
@@ -3682,6 +4152,11 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 data.strokeWidth = originalStrokeWidth;
                 data.strokeColor = originalStrokeColor;
                 data.backgroundColor = originalBackgroundColor;
+                data.imageUri = originalImageUri;
+                data.imageMode = originalImageMode;
+                data.imageScalePercent = originalImageScalePercent;
+                data.imageOffsetXPercent = originalImageOffsetXPercent;
+                data.imageOffsetYPercent = originalImageOffsetYPercent;
                 data.toggle = originalToggle;
                 data.visibleInGame = originalVisibleInGame;
                 data.visibleInMenu = originalVisibleInMenu;
@@ -3700,6 +4175,9 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 data.rawY = originalRawY;
                 data.positionAnchorX = originalPositionAnchorX;
                 data.positionAnchorY = originalPositionAnchorY;
+                data.drawerParentId = originalDrawerParentId;
+                data.drawerOrientation = originalDrawerOrientation;
+                data.drawerOpenByDefault = originalDrawerOpenByDefault;
                 // The side panel is non-modal, so the resize handle can update the
                 // layout while it is open. Persist the restored values on Cancel.
                 saveLayout();
@@ -3896,7 +4374,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         float safeParentHeight = Math.max(1f, parentHeight);
 
         if (layoutData.usesOtherLauncherRuntimeRules()) {
-            // Pojav/Zalith/Amethyst/Mojo store dimensions in dp and authored them at
+            // compatible third-party launchers store dimensions in dp and authored them at
             // scaledAt/preferredScale. Their runtime first normalizes dimensions back
             // to 100%, then applies the user's current button-size setting. DroidBridge's
             // per-profile globalButtonScalePercent is that current setting.
@@ -4049,10 +4527,14 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
 
     private float renderGlobalButtonScaleMultiplier() {
         // Pojav-family profiles already include their current per-profile size in
-        // LayoutMetrics. Applying DroidBridge's center-scaling pass again would
-        // double-scale them and move edge-anchored formulas away from their source
-        // launcher positions.
-        return layoutData.usesOtherLauncherRuntimeRules() ? 1f : globalButtonScaleMultiplier();
+        // LayoutMetrics. Applying DroidBridge's profile scale a second time would
+        // double-scale them, but the dedicated bottom-screen multiplier still needs
+        // to work so dual-screen controls are not tiny on a phone/TV setup.
+        float scale = layoutData.usesOtherLauncherRuntimeRules() ? 1f : globalButtonScaleMultiplier();
+        if (dualScreenBottomHudHotbarMode) {
+            scale *= ControlsPreferences.getDualScreenButtonScalePercent(getContext()) / 100f;
+        }
+        return Math.max(0.50f, Math.min(4.00f, scale));
     }
 
     private float expressionPreferredScale() {
@@ -4106,7 +4588,11 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         if (count == 0) return;
 
         boolean[] visited = new boolean[count];
-        float attachTolerance = Math.max(3f, 6f * getResources().getDisplayMetrics().density);
+        // Controls that are visually arranged as a row/cluster must move together
+        // while the global scaler is active.  The old 6dp tolerance was too small
+        // for normal 12-24px button gaps on 1080p layouts, so edge clamping could
+        // move neighbouring buttons independently and make them overlap.
+        float attachTolerance = Math.max(24f, 12f * getResources().getDisplayMetrics().density);
         int[] stack = new int[count];
 
         for (int start = 0; start < count; start++) {
@@ -4131,7 +4617,14 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 }
             }
 
-            nudgeScaledClusterInsideScreen(items, cluster, clusterSize, parentWidth, parentHeight);
+            nudgeScaledClusterInsideScreen(
+                    items,
+                    cluster,
+                    clusterSize,
+                    parentWidth,
+                    parentHeight,
+                    attachTolerance
+            );
         }
     }
 
@@ -4161,7 +4654,8 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             @NonNull int[] cluster,
             int clusterSize,
             int parentWidth,
-            int parentHeight
+            int parentHeight,
+            float attachTolerance
     ) {
         if (clusterSize <= 0) return;
 
@@ -4178,18 +4672,29 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             bottom = Math.max(bottom, item.y + item.scaledHeight);
         }
 
+        // If scaling makes a connected horizontal control group wider than the
+        // display, simply clamping the group cannot work: the buttons physically
+        // no longer fit on one line.  Reflow the group onto another line while
+        // preserving the original order and scaled gaps.  This is what makes a
+        // dense toolbar behave like "buttons get bigger and the neighbours shift"
+        // instead of growing on top of each other.
+        if (right - left > parentWidth && clusterSize > 1) {
+            reflowOversizedScaledCluster(
+                    items,
+                    cluster,
+                    clusterSize,
+                    parentWidth,
+                    parentHeight,
+                    attachTolerance
+            );
+            return;
+        }
+
         float dx = 0f;
         float dy = 0f;
 
-        if (right - left <= parentWidth) {
-            if (left < 0f) dx = -left;
-            else if (right > parentWidth) dx = parentWidth - right;
-        } else {
-            // The cluster is larger than the screen. Keep the left edge visible
-            // but do not clamp every button independently, because that breaks
-            // attached D-pads/hotbars into separated pieces.
-            dx = left < 0f ? -left : 0f;
-        }
+        if (left < 0f) dx = -left;
+        else if (right > parentWidth) dx = parentWidth - right;
 
         if (bottom - top <= parentHeight) {
             if (top < 0f) dy = -top;
@@ -4206,12 +4711,226 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         }
     }
 
+    private void reflowOversizedScaledCluster(
+            @NonNull ArrayList<ScaledControlItem> items,
+            @NonNull int[] cluster,
+            int clusterSize,
+            int parentWidth,
+            int parentHeight,
+            float attachTolerance
+    ) {
+        if (clusterSize <= 1 || parentWidth <= 1) return;
+
+        ArrayList<Integer> ordered = new ArrayList<>(clusterSize);
+        for (int i = 0; i < clusterSize; i++) ordered.add(cluster[i]);
+        ordered.sort((a, b) -> {
+            ScaledControlItem ia = items.get(a);
+            ScaledControlItem ib = items.get(b);
+            int yCompare = Float.compare(ia.baseY, ib.baseY);
+            return yCompare != 0 ? yCompare : Float.compare(ia.baseX, ib.baseX);
+        });
+
+        // Build logical rows from the 100% geometry.  We deliberately use the
+        // unscaled positions here so changing the global scale never changes which
+        // controls are considered neighbours.
+        ArrayList<ArrayList<Integer>> rows = new ArrayList<>();
+        ArrayList<Float> rowCenters = new ArrayList<>();
+        ArrayList<Float> rowMaxHeights = new ArrayList<>();
+
+        for (Integer index : ordered) {
+            ScaledControlItem item = items.get(index);
+            float centerY = item.baseY + (item.baseHeight / 2f);
+            int rowIndex = -1;
+            for (int r = 0; r < rows.size(); r++) {
+                float threshold = Math.max(item.baseHeight, rowMaxHeights.get(r)) * 0.40f;
+                if (Math.abs(centerY - rowCenters.get(r)) <= threshold) {
+                    rowIndex = r;
+                    break;
+                }
+            }
+
+            if (rowIndex < 0) {
+                ArrayList<Integer> row = new ArrayList<>();
+                row.add(index);
+                rows.add(row);
+                rowCenters.add(centerY);
+                rowMaxHeights.add(item.baseHeight);
+            } else {
+                ArrayList<Integer> row = rows.get(rowIndex);
+                row.add(index);
+                float sum = 0f;
+                float maxHeight = 0f;
+                for (Integer rowItemIndex : row) {
+                    ScaledControlItem rowItem = items.get(rowItemIndex);
+                    sum += rowItem.baseY + (rowItem.baseHeight / 2f);
+                    maxHeight = Math.max(maxHeight, rowItem.baseHeight);
+                }
+                rowCenters.set(rowIndex, sum / row.size());
+                rowMaxHeights.set(rowIndex, maxHeight);
+            }
+        }
+
+        float scale = renderGlobalButtonScaleMultiplier();
+        float density = getResources().getDisplayMetrics().density;
+        float wrapGapY = Math.max(6f, 6f * density) * Math.max(1f, scale);
+        float cursorBottom = Float.NEGATIVE_INFINITY;
+        float previousBaseBottom = Float.NaN;
+
+        for (int rowIndex = 0; rowIndex < rows.size(); rowIndex++) {
+            ArrayList<Integer> row = rows.get(rowIndex);
+            row.sort((a, b) -> Float.compare(items.get(a).baseX, items.get(b).baseX));
+
+            float baseTop = Float.MAX_VALUE;
+            float baseBottom = -Float.MAX_VALUE;
+            float desiredTop = Float.MAX_VALUE;
+            for (Integer index : row) {
+                ScaledControlItem item = items.get(index);
+                baseTop = Math.min(baseTop, item.baseY);
+                baseBottom = Math.max(baseBottom, item.baseY + item.baseHeight);
+                desiredTop = Math.min(desiredTop, item.y);
+            }
+
+            float rowTop;
+            if (rowIndex == 0 || cursorBottom == Float.NEGATIVE_INFINITY) {
+                rowTop = Math.max(0f, desiredTop);
+            } else {
+                float baseGap = Float.isNaN(previousBaseBottom)
+                        ? wrapGapY
+                        : Math.max(wrapGapY, Math.max(0f, baseTop - previousBaseBottom) * scale);
+                rowTop = Math.max(desiredTop, cursorBottom + baseGap);
+            }
+
+            // Split a row into horizontal sub-groups.  This keeps intentionally
+            // separated left/right groups separated while still treating a dense
+            // toolbar as one ordered strip that can wrap.
+            ArrayList<ArrayList<Integer>> segments = new ArrayList<>();
+            ArrayList<Integer> segment = new ArrayList<>();
+            for (Integer index : row) {
+                if (segment.isEmpty()) {
+                    segment.add(index);
+                    continue;
+                }
+                ScaledControlItem previous = items.get(segment.get(segment.size() - 1));
+                ScaledControlItem current = items.get(index);
+                float baseGap = current.baseX - (previous.baseX + previous.baseWidth);
+                if (baseGap <= attachTolerance) {
+                    segment.add(index);
+                } else {
+                    segments.add(segment);
+                    segment = new ArrayList<>();
+                    segment.add(index);
+                }
+            }
+            if (!segment.isEmpty()) segments.add(segment);
+
+            float rowBottom = rowTop;
+            for (ArrayList<Integer> currentSegment : segments) {
+                if (currentSegment.isEmpty()) continue;
+
+                float totalWidth = items.get(currentSegment.get(0)).scaledWidth;
+                for (int i = 1; i < currentSegment.size(); i++) {
+                    ScaledControlItem previous = items.get(currentSegment.get(i - 1));
+                    ScaledControlItem current = items.get(currentSegment.get(i));
+                    float gap = Math.max(0f,
+                            current.baseX - (previous.baseX + previous.baseWidth)) * scale;
+                    totalWidth += gap + current.scaledWidth;
+                }
+
+                if (totalWidth <= parentWidth) {
+                    float desiredLeft = Float.MAX_VALUE;
+                    for (Integer index : currentSegment) {
+                        desiredLeft = Math.min(desiredLeft, items.get(index).x);
+                    }
+                    float x = Math.max(0f, Math.min(parentWidth - totalWidth, desiredLeft));
+                    float maxHeight = 0f;
+                    for (int i = 0; i < currentSegment.size(); i++) {
+                        ScaledControlItem item = items.get(currentSegment.get(i));
+                        if (i > 0) {
+                            ScaledControlItem previous = items.get(currentSegment.get(i - 1));
+                            float gap = Math.max(0f,
+                                    item.baseX - (previous.baseX + previous.baseWidth)) * scale;
+                            x += gap;
+                        }
+                        item.x = x;
+                        item.y = rowTop;
+                        x += item.scaledWidth;
+                        maxHeight = Math.max(maxHeight, item.scaledHeight);
+                    }
+                    rowBottom = Math.max(rowBottom, rowTop + maxHeight);
+                    continue;
+                }
+
+                // The segment cannot fit on one line at this scale.  Wrap it in
+                // source order.  No button size is reduced and no overlap is
+                // introduced; only the positions move.
+                float x = 0f;
+                float y = rowTop;
+                float lineHeight = 0f;
+                ScaledControlItem previous = null;
+                boolean lineHasItem = false;
+                for (Integer index : currentSegment) {
+                    ScaledControlItem item = items.get(index);
+                    float gap = 0f;
+                    if (previous != null && lineHasItem) {
+                        gap = Math.max(0f,
+                                item.baseX - (previous.baseX + previous.baseWidth)) * scale;
+                    }
+
+                    if (lineHasItem && x + gap + item.scaledWidth > parentWidth) {
+                        y += lineHeight + wrapGapY;
+                        x = 0f;
+                        lineHeight = 0f;
+                        gap = 0f;
+                        lineHasItem = false;
+                    }
+
+                    item.x = x + gap;
+                    item.y = y;
+                    x = item.x + item.scaledWidth;
+                    lineHeight = Math.max(lineHeight, item.scaledHeight);
+                    lineHasItem = true;
+                    previous = item;
+                }
+                rowBottom = Math.max(rowBottom, y + lineHeight);
+            }
+
+            cursorBottom = rowBottom;
+            previousBaseBottom = baseBottom;
+        }
+
+        float clusterTop = Float.MAX_VALUE;
+        float clusterBottom = -Float.MAX_VALUE;
+        for (int i = 0; i < clusterSize; i++) {
+            ScaledControlItem item = items.get(cluster[i]);
+            clusterTop = Math.min(clusterTop, item.y);
+            clusterBottom = Math.max(clusterBottom, item.y + item.scaledHeight);
+        }
+        if (clusterBottom > parentHeight) {
+            float dy = parentHeight - clusterBottom;
+            if (clusterTop + dy < 0f) dy = -clusterTop;
+            for (int i = 0; i < clusterSize; i++) items.get(cluster[i]).y += dy;
+        }
+    }
+
     private float scaledControlScreenX(float baseX, float baseWidth, float scaledWidth, float parentWidth, float scale) {
         if (scale <= 0.001f) scale = 1f;
         float parentCenter = parentWidth / 2f;
         float baseCenter = baseX + (baseWidth / 2f);
         float scaledCenter = parentCenter + ((baseCenter - parentCenter) * scale);
         return scaledCenter - (scaledWidth / 2f);
+    }
+
+    private float scaledControlScreenX(
+            float baseX,
+            float baseWidth,
+            float scaledWidth,
+            float parentWidth,
+            float scale,
+            @Nullable String anchorValue
+    ) {
+        // Global scaling is deliberately centre-relative.  Left/right anchoring here
+        // makes the two halves of a dense row grow toward each other and overlap.
+        return scaledControlScreenX(baseX, baseWidth, scaledWidth, parentWidth, scale);
     }
 
     private float scaledControlScreenY(float baseY, float baseHeight, float scaledHeight, float parentHeight, float scale) {
@@ -4222,12 +4941,34 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         return scaledCenter - (scaledHeight / 2f);
     }
 
+    private float scaledControlScreenY(
+            float baseY,
+            float baseHeight,
+            float scaledHeight,
+            float parentHeight,
+            float scale,
+            @Nullable String anchorValue
+    ) {
+        return scaledControlScreenY(baseY, baseHeight, scaledHeight, parentHeight, scale);
+    }
+
     private float unscaledControlScreenX(float scaledX, float baseWidth, float scaledWidth, float parentWidth, float scale) {
         if (scale <= 0.001f) scale = 1f;
         float parentCenter = parentWidth / 2f;
         float scaledCenter = scaledX + (scaledWidth / 2f);
         float baseCenter = parentCenter + ((scaledCenter - parentCenter) / scale);
         return baseCenter - (baseWidth / 2f);
+    }
+
+    private float unscaledControlScreenX(
+            float scaledX,
+            float baseWidth,
+            float scaledWidth,
+            float parentWidth,
+            float scale,
+            @Nullable String anchorValue
+    ) {
+        return unscaledControlScreenX(scaledX, baseWidth, scaledWidth, parentWidth, scale);
     }
 
     private float unscaledControlScreenY(float scaledY, float baseHeight, float scaledHeight, float parentHeight, float scale) {
@@ -4238,13 +4979,57 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         return baseCenter - (baseHeight / 2f);
     }
 
+    private float unscaledControlScreenY(
+            float scaledY,
+            float baseHeight,
+            float scaledHeight,
+            float parentHeight,
+            float scale,
+            @Nullable String anchorValue
+    ) {
+        return unscaledControlScreenY(scaledY, baseHeight, scaledHeight, parentHeight, scale);
+    }
+
+    @NonNull
+    private String resolveScaleHorizontalAnchor(
+            @Nullable String anchorValue,
+            float screenX,
+            float screenControlWidth,
+            float parentWidth
+    ) {
+        String explicit = TouchControlData.normalizeHorizontalPositionAnchor(anchorValue);
+        if (explicit != null) return explicit;
+
+        float center = screenX + (screenControlWidth / 2f);
+        if (center <= parentWidth * 0.42f) return TouchControlData.POSITION_ANCHOR_LEFT;
+        if (center >= parentWidth * 0.58f) return TouchControlData.POSITION_ANCHOR_RIGHT;
+        return TouchControlData.POSITION_ANCHOR_CENTER;
+    }
+
+    @NonNull
+    private String resolveScaleVerticalAnchor(
+            @Nullable String anchorValue,
+            float screenY,
+            float screenControlHeight,
+            float parentHeight
+    ) {
+        String explicit = TouchControlData.normalizeVerticalPositionAnchor(anchorValue);
+        if (explicit != null) return explicit;
+
+        float center = screenY + (screenControlHeight / 2f);
+        if (center <= parentHeight * 0.42f) return TouchControlData.POSITION_ANCHOR_TOP;
+        if (center >= parentHeight * 0.58f) return TouchControlData.POSITION_ANCHOR_BOTTOM;
+        return TouchControlData.POSITION_ANCHOR_CENTER;
+    }
+
     @NonNull
     private float[] realDisplaySize(float parentWidth, float parentHeight) {
         float realWidth = Math.max(1f, parentWidth);
         float realHeight = Math.max(1f, parentHeight);
 
-        // A dual-screen controls deck must scale to the panel it is actually drawn on.
-        // Android maximum-window metrics may describe the other Thor panel.
+        // A dual-screen controls deck must scale to the canvas it is actually drawn on.
+        // Centered portrait keeps using the full portrait control canvas; only raw game
+        // input is mapped into the centered Minecraft rectangle.
         if (dualScreenBottomHudHotbarMode) {
             return new float[]{realWidth, realHeight};
         }
@@ -4637,14 +5422,14 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     private void addSectionHeader(@NonNull LinearLayout parent, @NonNull String title, @Nullable String subtitle) {
         TextView header = new TextView(getContext());
         header.setText(title);
-        header.setTextColor(Color.WHITE);
+        header.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         header.setTextSize(16f);
         header.setPadding(0, dp(11f), 0, dp(2f));
         parent.addView(header);
         if (subtitle != null && !subtitle.trim().isEmpty()) {
             TextView sub = new TextView(getContext());
             sub.setText(subtitle);
-            sub.setTextColor(0xFFBDBDBD);
+            sub.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
             sub.setTextSize(12f);
             sub.setPadding(0, 0, 0, dp(6f));
             parent.addView(sub);
@@ -4671,6 +5456,59 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
         parent.addView(row);
+    }
+
+    private void addViewFieldRow(@NonNull LinearLayout parent, @NonNull String title, @NonNull View field) {
+        LinearLayout row = new LinearLayout(getContext());
+        row.setOrientation(LinearLayout.VERTICAL);
+        row.setPadding(0, dp(3f), 0, dp(4f));
+
+        TextView label = new TextView(getContext());
+        label.setText(title);
+        label.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
+        label.setTextSize(11f);
+        row.addView(label, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        row.addView(field, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        parent.addView(row);
+    }
+
+    private void updateColorPickerButton(
+            @NonNull Button button,
+            int color,
+            @NonNull String prefix
+    ) {
+        boolean transparent = Color.alpha(color) == 0;
+        if (transparent) {
+            button.setText(prefix + ": None");
+            button.setTextColor(Color.WHITE);
+        } else {
+            button.setText(prefix + ": " + formatColor(color));
+            double luminance = (0.2126 * Color.red(color))
+                    + (0.7152 * Color.green(color))
+                    + (0.0722 * Color.blue(color));
+            button.setTextColor(luminance > 150d ? Color.BLACK : Color.WHITE);
+        }
+
+        GradientDrawable background = new GradientDrawable();
+        // A cleared fill should read as "none" instead of showing opaque black.
+        // Real colours are previewed at full RGB strength because control opacity is
+        // edited independently by the Opacity slider.
+        background.setColor(transparent
+                ? LauncherDialogStyle.COLOR_CARD_BG
+                : Color.rgb(Color.red(color), Color.green(color), Color.blue(color)));
+        background.setCornerRadius(dp(8f));
+        background.setStroke(Math.max(1, dp(1f)), LauncherDialogStyle.COLOR_CARD_STROKE);
+        button.setBackground(background);
+    }
+
+    private static boolean hasControlImage(@NonNull TouchControlData data) {
+        return data.imageUri != null && !data.imageUri.trim().isEmpty();
     }
 
     private void addPairedFieldRow(
@@ -4788,7 +5626,7 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     private TextView valueLabel(@NonNull Context context, @NonNull String text) {
         TextView label = new TextView(context);
         label.setText(text);
-        label.setTextColor(0xFFE0E0E0);
+        label.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         label.setTextSize(13f);
         label.setPadding(0, dp(4f), 0, dp(2f));
         return label;
@@ -4905,14 +5743,16 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 baseWidth,
                 newScreenWidth,
                 parentWidth,
-                scale
+                scale,
+                data.positionAnchorX
         );
         float baseScreenY = unscaledControlScreenY(
                 targetScreenY,
                 baseHeight,
                 newScreenHeight,
                 parentHeight,
-                scale
+                scale,
+                data.positionAnchorY
         );
         data.positionAnchorX = metrics.horizontalAnchorForScreenPosition(
                 baseScreenX,
@@ -4989,8 +5829,10 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                         metrics.formulaPixelScale,
                         metrics.formulaDpScale
                 );
-        float scaledX = scaledControlScreenX(baseX, baseWidth, width, parentWidth, scale);
-        float scaledY = scaledControlScreenY(baseY, baseHeight, height, parentHeight, scale);
+        float scaledX = scaledControlScreenX(
+                baseX, baseWidth, width, parentWidth, scale, data.positionAnchorX);
+        float scaledY = scaledControlScreenY(
+                baseY, baseHeight, height, parentHeight, scale, data.positionAnchorY);
         view.setX(clamp(scaledX, 0f, Math.max(0f, parentWidth - width)));
         view.setY(clamp(scaledY, 0f, Math.max(0f, parentHeight - height)));
         view.setText(data.label);
@@ -5090,14 +5932,16 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 baseScreenWidth,
                 scaledWidth,
                 getWidth(),
-                scale
+                scale,
+                data.positionAnchorX
         );
         float baseScreenY = unscaledControlScreenY(
                 clampedScreenY,
                 baseScreenHeight,
                 scaledHeight,
                 getHeight(),
-                scale
+                scale,
+                data.positionAnchorY
         );
 
         // Save the anchor from the actual visible destination before resolving
@@ -5257,7 +6101,8 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 LauncherDialogStyle.COLOR_CARD_STROKE
         );
         button.setBackground(background);
-        button.setElevation(dp(primary ? 1.5f : 0.5f));
+        button.setElevation(0f);
+        button.setStateListAnimator(null);
         return button;
     }
 
@@ -5287,7 +6132,8 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
                 LauncherDialogStyle.COLOR_CARD_STROKE
         );
         button.setBackground(background);
-        button.setElevation(dp(1f));
+        button.setElevation(0f);
+        button.setStateListAnimator(null);
         updateCompactEditActionState(button, true);
         return button;
     }
@@ -5390,6 +6236,49 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             content.setMinimumWidth(0);
             content.setPadding(0, 0, 0, 0);
         }
+    }
+
+    private int controlEditBottomSystemInset(@Nullable View root) {
+        Activity hostActivity = findActivity(getContext());
+        if (hostActivity instanceof ControlsEditorActivity) return 0;
+
+        View hostDecor = null;
+        try {
+            Window hostWindow = hostActivity == null ? null : hostActivity.getWindow();
+            if (hostWindow != null) hostDecor = hostWindow.getDecorView();
+        } catch (Throwable ignored) {
+        }
+
+        int bottomInset = 0;
+        View[] insetSources = new View[]{root, hostDecor};
+        for (View insetSource : insetSources) {
+            if (insetSource == null) continue;
+            try {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                    WindowInsets insets = insetSource.getRootWindowInsets();
+                    if (insets != null) {
+                        android.graphics.Insets navigation = insets.getInsetsIgnoringVisibility(
+                                WindowInsets.Type.navigationBars()
+                        );
+                        bottomInset = Math.max(bottomInset, Math.max(0, navigation.bottom));
+                    }
+                } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                    WindowInsets insets = insetSource.getRootWindowInsets();
+                    if (insets != null) {
+                        // In immersive mode the visible system-window inset may be zero,
+                        // while the stable inset still contains the navigation-bar size.
+                        bottomInset = Math.max(bottomInset, Math.max(
+                                Math.max(0, insets.getStableInsetBottom()),
+                                Math.max(0, insets.getSystemWindowInsetBottom())
+                        ));
+                    }
+                }
+            } catch (Throwable ignored) {
+                // Try the other inset source. Some vendor child-window implementations
+                // return incomplete insets even though the host activity has them.
+            }
+        }
+        return bottomInset;
     }
 
     private void animatePreparedControlEditSidePanel(@NonNull AlertDialog dialog) {
@@ -5517,6 +6406,86 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     private String safeControlId(@NonNull String value) {
         String trimmed = value.trim();
         return trimmed.isEmpty() || "null".equalsIgnoreCase(trimmed) ? UUID.randomUUID().toString() : trimmed;
+    }
+
+    private void requestControlImage(
+            @NonNull TouchControlData control,
+            @NonNull Runnable onPicked
+    ) {
+        Activity activity = findActivity(getContext());
+        if (activity == null) {
+            Toast.makeText(getContext(), "Image picker is unavailable on this display.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("image/*");
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        intent.addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        pendingImageControl = control;
+        pendingImagePickedCallback = onPicked;
+        pendingImagePickerOwner = new WeakReference<>(this);
+        try {
+            activity.startActivityForResult(intent, REQUEST_TOUCH_CONTROL_IMAGE);
+        } catch (Throwable throwable) {
+            pendingImageControl = null;
+            pendingImagePickedCallback = null;
+            pendingImagePickerOwner = null;
+            Logging.e(TAG, "Unable to open touch-control image picker", throwable);
+            Toast.makeText(getContext(), "Unable to open image picker.", Toast.LENGTH_SHORT).show();
+        }
+    }
+
+    /** Called by activities that can host a touch-control editor. */
+    public static boolean dispatchActivityResult(
+            int requestCode,
+            int resultCode,
+            @Nullable Intent resultData
+    ) {
+        if (requestCode != REQUEST_TOUCH_CONTROL_IMAGE) return false;
+        TouchControlsOverlay owner = pendingImagePickerOwner == null
+                ? null
+                : pendingImagePickerOwner.get();
+        pendingImagePickerOwner = null;
+        if (owner != null) owner.finishControlImagePick(resultCode, resultData);
+        return true;
+    }
+
+    private void finishControlImagePick(int resultCode, @Nullable Intent resultData) {
+        TouchControlData target = pendingImageControl;
+        Runnable callback = pendingImagePickedCallback;
+        pendingImageControl = null;
+        pendingImagePickedCallback = null;
+        if (resultCode != Activity.RESULT_OK || resultData == null || target == null) return;
+        Uri uri = resultData.getData();
+        if (uri == null) return;
+
+        try {
+            int takeFlags = resultData.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
+            if (takeFlags != 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+                getContext().getContentResolver().takePersistableUriPermission(uri, takeFlags);
+            }
+        } catch (Throwable throwable) {
+            // Some document providers grant long-lived access without supporting
+            // takePersistableUriPermission. Keep the URI and let normal read access work.
+            Logging.i(TAG, "Image provider did not expose a persistable URI permission: " + throwable);
+        }
+
+        target.imageUri = uri.toString();
+        if (callback != null) callback.run();
+    }
+
+    @Nullable
+    private static Activity findActivity(@Nullable Context context) {
+        Context current = context;
+        while (current instanceof ContextWrapper) {
+            if (current instanceof Activity) return (Activity) current;
+            Context base = ((ContextWrapper) current).getBaseContext();
+            if (base == current) break;
+            current = base;
+        }
+        return current instanceof Activity ? (Activity) current : null;
     }
 
     @NonNull
@@ -6289,24 +7258,13 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             }
         }
 
-        // Controllable and Controlify own their menu cursor/input mode on a single display.
-        // Cross-display dual-screen input is handled below as a trackpad so it cannot warp
-        // the remote cursor on ACTION_DOWN.
-        if (!grabbed
-                && isControllerModTouchCoexistenceActive()
-                && !isCrossDisplayPassthroughTarget()) {
-            if (passthroughPointerId == NO_POINTER_ID && passthroughTarget != null) {
-                passthroughPointerId = pointerId;
-                passthroughDownTime = event.getEventTime();
-                passthroughDownX = x;
-                passthroughDownY = y;
-                passthroughMovedPastSlop = false;
-                dispatchSinglePointerToPassthrough(event, pointerIndex, MotionEvent.ACTION_DOWN);
-                return true;
-            }
-            return false;
-        }
-
+        /*
+         * DroidBridge's own visible touch controls always get first refusal, even
+         * while Controllable/Controlify owns the physical gamepad. Controller-mod
+         * ownership must not make launcher touch buttons non-interactive. Only a
+         * touch that did not land on a launcher control may be handed through to
+         * the controller mod's menu cursor/input path below.
+         */
         TouchControlButtonView control = findControlUnder(x, y);
         if (control != null) {
             dispatchSinglePointerToControl(event, pointerIndex, MotionEvent.ACTION_DOWN, control);
@@ -6325,6 +7283,31 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             return true;
         }
 
+        // In centered portrait mode the black bars are outside Minecraft. Do not turn
+        // touches there into invisible GUI clicks or camera movement. Visible controls
+        // above still get first refusal because their hit-test ran before this guard.
+        if (inputViewportTarget != null && !isPointInsideInputViewport(x, y)) {
+            return false;
+        }
+
+        // Controllable and Controlify own empty menu space on a single display.
+        // Cross-display dual-screen input is handled below as a trackpad so it cannot warp
+        // the remote cursor on ACTION_DOWN.
+        if (!grabbed
+                && isControllerModTouchCoexistenceActive()
+                && !isCrossDisplayPassthroughTarget()) {
+            if (passthroughPointerId == NO_POINTER_ID && passthroughTarget != null) {
+                passthroughPointerId = pointerId;
+                passthroughDownTime = event.getEventTime();
+                passthroughDownX = x;
+                passthroughDownY = y;
+                passthroughMovedPastSlop = false;
+                dispatchSinglePointerToPassthrough(event, pointerIndex, MotionEvent.ACTION_DOWN);
+                return true;
+            }
+            return false;
+        }
+
         // In-game look/attack: track one empty-space pointer by ID and send
         // relative deltas. Do not switch this into absolute mouse mode just
         // because the virtual cursor is visible.
@@ -6340,7 +7323,12 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         // GUIs. Touch-control buttons above already had first refusal; empty-space drags
         // now move the existing cursor relatively, while a quick tap clicks exactly where
         // that cursor is currently hovering instead of warping it to the finger position.
-        if (isCrossDisplayPassthroughTarget()) {
+        if (isCrossDisplayPassthroughTarget()
+                && ControlsPreferences.isVirtualMouseEnabled(getContext())) {
+            // Cross-display behaves like a relative trackpad only when the user
+            // explicitly enabled Virtual Mouse. With Virtual Mouse OFF, fall through
+            // to the absolute passthrough path below so the cursor lands under the
+            // finger immediately on the very first touch.
             if (virtualMousePointerId == NO_POINTER_ID) {
                 startVirtualMousePointer(event, pointerIndex, pointerId, true);
                 return true;
@@ -6983,15 +7971,25 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         if (dualScreenBottomHudHotbarMode) {
             return dualScreenBottomHudSlotForTouch(x, y);
         }
+
+        int overlayWidth = Math.max(1, getWidth());
+        int overlayHeight = Math.max(1, getHeight());
+        RectF viewport = resolveInputViewportBounds(overlayWidth, overlayHeight);
+        if (inputViewportTarget != null && !viewport.contains(x, y)) {
+            return -1;
+        }
+
+        float localX = x - viewport.left;
+        float localY = y - viewport.top;
         return TouchHotbarHitbox.slotForTouch(
                 getContext(),
                 resolveMinecraftOptionsFile(),
-                getWidth(),
-                getHeight(),
+                Math.max(1, Math.round(viewport.width())),
+                Math.max(1, Math.round(viewport.height())),
                 resolveGameBufferWidth(),
                 resolveGameBufferHeight(),
-                x,
-                y
+                localX,
+                localY
         );
     }
 
@@ -7278,6 +8276,15 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     private GameResolutionSettings.DisplayBounds currentGameDisplayBounds() {
         int width = Math.max(1, getWidth());
         int height = Math.max(1, getHeight());
+        if (inputViewportTarget != null) {
+            RectF viewport = resolveInputViewportBounds(width, height);
+            return new GameResolutionSettings.DisplayBounds(
+                    Math.round(viewport.left),
+                    Math.round(viewport.top),
+                    Math.max(1, Math.round(viewport.width())),
+                    Math.max(1, Math.round(viewport.height()))
+            );
+        }
         if (DroidBridgeSDL3Bootstrap.isRequested()) {
             // SDL3 Android window/mouse coordinates are physical game-root pixels.
             // Do not reuse a launcher resolution-profile box for virtual cursor
@@ -7448,14 +8455,204 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
     private boolean shouldShowControlButton(@NonNull TouchControlData data, boolean grabbed) {
         if (editMode) return true;
         if (editorPreviewSuppressedControlIds.contains(data.id)) return false;
+        // Use the same hidden-state rules on the bottom screen as single-screen mode.
+        // In particular, the GUI/show-hide control may stay visible when its touch-layout
+        // setting says so. Controller auto-hide is the stronger override and hides all
+        // touch controls while a controller is attached.
         if (controllerAutoHidden) return false;
 
+        if (!isControlAllowedByMinecraftState(data, grabbed)) return false;
+
+        String parentId = normalizedDrawerParentId(data.drawerParentId);
+        if (parentId != null) {
+            TouchControlData parent = findDrawerById(parentId);
+            // Orphaned references degrade safely to a normal control. A real drawer owns
+            // visibility: its children cannot leak into a state where the toggle itself
+            // is unavailable, and they remain hidden until that drawer is expanded.
+            if (parent != null) {
+                if (!expandedDrawerIds.contains(parentId)) return false;
+                if (!isControlAllowedByMinecraftState(parent, grabbed)) return false;
+            }
+        }
+
+        return true;
+    }
+
+    private boolean isControlAllowedByMinecraftState(@NonNull TouchControlData data, boolean grabbed) {
         boolean allowedInCurrentMinecraftState = grabbed ? data.visibleInGame : data.visibleInMenu;
         if (!allowedInCurrentMinecraftState) return false;
-
         if (controlsVisible) return true;
         return data.visibleWhenControlsHidden
                 || TouchControlData.shouldStayVisibleWhenControlsHiddenByDefault(data.action);
+    }
+
+    private void resetDrawerRuntimeState() {
+        expandedDrawerIds.clear();
+        initializedDrawerIds.clear();
+    }
+
+    private void syncDrawerRuntimeStateWithLayout() {
+        HashSet<String> validDrawerIds = new HashSet<>();
+        for (TouchControlData control : layoutData.controls) {
+            if (!TouchControlActions.DRAWER.equals(control.action)) continue;
+            String drawerId = control.id == null ? "" : control.id.trim();
+            if (drawerId.isEmpty()) continue;
+            validDrawerIds.add(drawerId);
+            if (initializedDrawerIds.add(drawerId) && control.drawerOpenByDefault) {
+                expandedDrawerIds.add(drawerId);
+            }
+        }
+        expandedDrawerIds.retainAll(validDrawerIds);
+        initializedDrawerIds.retainAll(validDrawerIds);
+    }
+
+    private void normalizeDrawerMembership() {
+        HashSet<String> validDrawerIds = new HashSet<>();
+        for (TouchControlData control : layoutData.controls) {
+            if (TouchControlActions.DRAWER.equals(control.action)
+                    && control.id != null
+                    && !control.id.trim().isEmpty()) {
+                validDrawerIds.add(control.id.trim());
+                control.drawerParentId = null;
+                control.drawerOrientation = TouchControlData.normalizeDrawerOrientation(control.drawerOrientation);
+            }
+        }
+        for (TouchControlData control : layoutData.controls) {
+            if (TouchControlActions.DRAWER.equals(control.action)) continue;
+            String parentId = normalizedDrawerParentId(control.drawerParentId);
+            control.drawerParentId = parentId != null && validDrawerIds.contains(parentId)
+                    ? parentId
+                    : null;
+        }
+    }
+
+    @Nullable
+    private static String normalizedDrawerParentId(@Nullable String drawerParentId) {
+        if (drawerParentId == null) return null;
+        String value = drawerParentId.trim();
+        return value.isEmpty() ? null : value;
+    }
+
+    @Nullable
+    private TouchControlData findDrawerById(@NonNull String drawerId) {
+        for (TouchControlData control : layoutData.controls) {
+            if (TouchControlActions.DRAWER.equals(control.action) && drawerId.equals(control.id)) {
+                return control;
+            }
+        }
+        return null;
+    }
+
+    private void releaseDrawerChildInput(@NonNull String drawerId) {
+        for (int i = 0; i < getChildCount(); i++) {
+            View child = getChildAt(i);
+            if (!(child instanceof TouchControlButtonView)) continue;
+            TouchControlButtonView button = (TouchControlButtonView) child;
+            if (drawerId.equals(normalizedDrawerParentId(button.getData().drawerParentId))) {
+                button.releaseInputState();
+            }
+        }
+    }
+
+    @NonNull
+    private HashSet<String> drawerMemberIdsFor(@Nullable String drawerId) {
+        HashSet<String> ids = new HashSet<>();
+        String normalizedId = normalizedDrawerParentId(drawerId);
+        if (normalizedId == null) return ids;
+        for (TouchControlData control : layoutData.controls) {
+            if (normalizedId.equals(normalizedDrawerParentId(control.drawerParentId))
+                    && control.id != null
+                    && !control.id.trim().isEmpty()) {
+                ids.add(control.id.trim());
+            }
+        }
+        return ids;
+    }
+
+    private static void updateDrawerMembersButtonText(
+            @NonNull Button button,
+            int selectedCount
+    ) {
+        button.setText(selectedCount == 1
+                ? "Select drawer buttons (1 selected)"
+                : "Select drawer buttons (" + selectedCount + " selected)");
+    }
+
+    private void showDrawerMembersDialog(
+            @NonNull Context context,
+            @NonNull TouchControlData drawer,
+            @NonNull HashSet<String> selectedIds,
+            @NonNull Button summaryButton
+    ) {
+        ArrayList<TouchControlData> candidates = new ArrayList<>();
+        ArrayList<String> labels = new ArrayList<>();
+        for (TouchControlData control : layoutData.controls) {
+            if (control == drawer || TouchControlActions.DRAWER.equals(control.action)) continue;
+            String controlId = control.id == null ? "" : control.id.trim();
+            if (controlId.isEmpty()) continue;
+            candidates.add(control);
+            labels.add(displayLabelForDialog(control.label) + "  •  " + controlId);
+        }
+
+        if (candidates.isEmpty()) {
+            Toast.makeText(context, "Add some buttons before assigning drawer members.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        HashSet<String> working = new HashSet<>(selectedIds);
+        boolean[] checked = new boolean[candidates.size()];
+        for (int i = 0; i < candidates.size(); i++) {
+            checked[i] = working.contains(candidates.get(i).id);
+        }
+
+        new MaterialAlertDialogBuilder(context)
+                .setTitle("Drawer buttons")
+                .setMultiChoiceItems(
+                        labels.toArray(new String[0]),
+                        checked,
+                        (dialog, which, isChecked) -> {
+                            String controlId = candidates.get(which).id;
+                            if (isChecked) working.add(controlId);
+                            else working.remove(controlId);
+                        }
+                )
+                .setNegativeButton("Cancel", null)
+                .setPositiveButton("Done", (dialog, which) -> {
+                    selectedIds.clear();
+                    selectedIds.addAll(working);
+                    updateDrawerMembersButtonText(summaryButton, selectedIds.size());
+                })
+                .show();
+    }
+
+    private void applyDrawerMembershipAfterEdit(
+            @Nullable String previousDrawerId,
+            @NonNull TouchControlData editedControl,
+            @NonNull HashSet<String> selectedIds
+    ) {
+        String oldId = normalizedDrawerParentId(previousDrawerId);
+        String newId = normalizedDrawerParentId(editedControl.id);
+        boolean remainsDrawer = TouchControlActions.DRAWER.equals(editedControl.action)
+                && newId != null;
+
+        for (TouchControlData control : layoutData.controls) {
+            if (control == editedControl) continue;
+            String parentId = normalizedDrawerParentId(control.drawerParentId);
+            if ((oldId != null && oldId.equals(parentId))
+                    || (newId != null && newId.equals(parentId))) {
+                control.drawerParentId = null;
+            }
+        }
+
+        if (!remainsDrawer) return;
+        editedControl.drawerParentId = null;
+        for (TouchControlData control : layoutData.controls) {
+            if (control == editedControl || TouchControlActions.DRAWER.equals(control.action)) continue;
+            String controlId = control.id == null ? "" : control.id.trim();
+            if (!controlId.isEmpty() && selectedIds.contains(controlId)) {
+                control.drawerParentId = newId;
+            }
+        }
     }
 
     private boolean hasGameCursorOverlayInViewTree() {
@@ -7656,6 +8853,38 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         } catch (Throwable ignored) {
         }
 
+        // Portrait (Centered Game View) is a same-window child input viewport, not a
+        // second display. Convert the fullscreen overlay coordinate into the centered
+        // surface's *layout* coordinate before Minecraft maps it to GLFW/SDL space.
+        // Use getLeft()/getTop() for sibling views so IME translation is not counted
+        // twice; MinecraftGLSurface already compensates imeViewportBottomInset.
+        // All normal fullscreen and cross-display paths keep their established scaling.
+        if (inputViewportTarget != null
+                && target == inputViewportTarget
+                && !isCrossDisplayTarget(target)) {
+            try {
+                float offsetX;
+                float offsetY;
+                if (target.getParent() == getParent()) {
+                    offsetX = getLeft() - target.getLeft();
+                    offsetY = getTop() - target.getTop();
+                } else {
+                    int[] sourceLocation = new int[2];
+                    int[] targetLocation = new int[2];
+                    getLocationOnScreen(sourceLocation);
+                    target.getLocationOnScreen(targetLocation);
+                    offsetX = sourceLocation[0] - targetLocation[0];
+                    offsetY = sourceLocation[1] - targetLocation[1];
+                }
+                Matrix translate = new Matrix();
+                translate.setTranslate(offsetX, offsetY);
+                event.transform(translate);
+                return;
+            } catch (Throwable ignored) {
+                // Fall through to the legacy normalized path if a view is not yet laid out.
+            }
+        }
+
         int sourceWidth = getWidth();
         int sourceHeight = getHeight();
         int targetWidth = target.getWidth();
@@ -7707,8 +8936,58 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         event.transform(matrix);
     }
 
-    private boolean isCrossDisplayPassthroughTarget() {
-        MinecraftGLSurface target = findMinecraftSurfaceTarget();
+    @NonNull
+    private RectF resolveInputViewportBounds(int parentWidth, int parentHeight) {
+        RectF full = new RectF(0f, 0f, Math.max(1, parentWidth), Math.max(1, parentHeight));
+        View target = inputViewportTarget;
+        if (target == null || target.getWidth() <= 1 || target.getHeight() <= 1) {
+            return full;
+        }
+        if (isCrossDisplayTarget(target)) {
+            return full;
+        }
+
+        try {
+            float left;
+            float top;
+            if (target.getParent() == getParent()) {
+                // Layout coordinates intentionally ignore transient translationY from
+                // the IME viewport controller. Input mapping compensates that shift
+                // inside MinecraftGLSurface, so the touch-control canvas stays stable.
+                left = target.getLeft() - getLeft();
+                top = target.getTop() - getTop();
+            } else {
+                int[] sourceLocation = new int[2];
+                int[] targetLocation = new int[2];
+                getLocationOnScreen(sourceLocation);
+                target.getLocationOnScreen(targetLocation);
+                left = targetLocation[0] - sourceLocation[0];
+                top = targetLocation[1] - sourceLocation[1];
+            }
+            float right = left + target.getWidth();
+            float bottom = top + target.getHeight();
+
+            left = clamp(left, 0f, full.right);
+            top = clamp(top, 0f, full.bottom);
+            right = clamp(right, left, full.right);
+            bottom = clamp(bottom, top, full.bottom);
+            if (right - left > 1f && bottom - top > 1f) {
+                return new RectF(left, top, right, bottom);
+            }
+        } catch (Throwable ignored) {
+        }
+        return full;
+    }
+
+    private boolean isPointInsideInputViewport(float x, float y) {
+        RectF viewport = resolveInputViewportBounds(
+                Math.max(1, getWidth()),
+                Math.max(1, getHeight())
+        );
+        return viewport.contains(x, y);
+    }
+
+    private boolean isCrossDisplayTarget(@Nullable View target) {
         if (target == null) return false;
         try {
             Display sourceDisplay = getDisplay();
@@ -7719,6 +8998,10 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
         } catch (Throwable ignored) {
             return false;
         }
+    }
+
+    private boolean isCrossDisplayPassthroughTarget() {
+        return isCrossDisplayTarget(findMinecraftSurfaceTarget());
     }
 
     private boolean shouldAllowAndroidFocusForPassthrough(@NonNull View target) {
@@ -7747,6 +9030,100 @@ public final class TouchControlsOverlay extends FrameLayout implements TouchCont
             if (event.getToolType(i) == MotionEvent.TOOL_TYPE_MOUSE) return true;
         }
         return false;
+    }
+
+    /**
+     * Routes the centered Android Virtual Mouse software cursor into DroidBridge touch
+     * controls while Minecraft keeps the physical mouse captured for correct menu
+     * centering. This path intentionally never falls through to Minecraft; callers
+     * use the return value to decide whether the same physical click should continue
+     * to the game.
+     */
+    public boolean dispatchCapturedPhysicalMouseToControl(
+            int action,
+            float screenX,
+            float screenY,
+            long eventTime
+    ) {
+        if (editMode || getVisibility() != VISIBLE || getAlpha() <= 0f) return false;
+
+        int[] location = new int[2];
+        try {
+            getLocationOnScreen(location);
+        } catch (Throwable ignored) {
+            location[0] = 0;
+            location[1] = 0;
+        }
+        float localX = screenX - location[0];
+        float localY = screenY - location[1];
+
+        switch (action) {
+            case MotionEvent.ACTION_DOWN: {
+                if (capturedPhysicalMouseControlTarget != null) return true;
+                TouchControlButtonView target = findControlUnder(localX, localY);
+                if (target == null) {
+                    capturedPhysicalMouseControlTarget = null;
+                    capturedPhysicalMouseControlDownTime = 0L;
+                    return false;
+                }
+                capturedPhysicalMouseControlTarget = target;
+                capturedPhysicalMouseControlDownTime = eventTime > 0L
+                        ? eventTime : SystemClock.uptimeMillis();
+                dispatchCapturedPhysicalMouseToTarget(
+                        target, MotionEvent.ACTION_DOWN, localX, localY, eventTime);
+                return true;
+            }
+
+            case MotionEvent.ACTION_MOVE: {
+                TouchControlButtonView target = capturedPhysicalMouseControlTarget;
+                if (target == null) return false;
+                dispatchCapturedPhysicalMouseToTarget(
+                        target, MotionEvent.ACTION_MOVE, localX, localY, eventTime);
+                return true;
+            }
+
+            case MotionEvent.ACTION_UP:
+            case MotionEvent.ACTION_CANCEL: {
+                TouchControlButtonView target = capturedPhysicalMouseControlTarget;
+                if (target == null) return false;
+                dispatchCapturedPhysicalMouseToTarget(
+                        target, action, localX, localY, eventTime);
+                capturedPhysicalMouseControlTarget = null;
+                capturedPhysicalMouseControlDownTime = 0L;
+                return true;
+            }
+
+            default:
+                return false;
+        }
+    }
+
+    private void dispatchCapturedPhysicalMouseToTarget(
+            @NonNull TouchControlButtonView target,
+            int action,
+            float overlayX,
+            float overlayY,
+            long eventTime
+    ) {
+        long now = eventTime > 0L ? eventTime : SystemClock.uptimeMillis();
+        long downTime = capturedPhysicalMouseControlDownTime > 0L
+                ? capturedPhysicalMouseControlDownTime : now;
+        float localX = overlayX - target.getX();
+        float localY = overlayY - target.getY();
+        MotionEvent synthetic = MotionEvent.obtain(
+                downTime,
+                now,
+                action,
+                localX,
+                localY,
+                0
+        );
+        synthetic.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        try {
+            target.dispatchTouchEvent(synthetic);
+        } finally {
+            synthetic.recycle();
+        }
     }
 
     private void dispatchSinglePointerToControl(

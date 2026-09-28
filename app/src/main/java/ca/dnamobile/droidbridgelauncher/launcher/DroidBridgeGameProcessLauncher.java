@@ -42,6 +42,7 @@ import ca.dnamobile.droidbridgelauncher.feature.log.Logging;
 import ca.dnamobile.droidbridgelauncher.instance.DefaultMinecraftOptionsInstaller;
 import ca.dnamobile.droidbridgelauncher.modcompat.SableRapierSupport;
 import ca.dnamobile.droidbridgelauncher.modcompat.SystemVulkanShieldModelFallback;
+import ca.dnamobile.droidbridgelauncher.renderer.BtaRendererPolicy;
 import ca.dnamobile.droidbridgelauncher.renderer.RendererInterface;
 import ca.dnamobile.droidbridgelauncher.utils.path.PathManager;
 import ca.dnamobile.droidbridgelauncher.runtime.Architecture;
@@ -1426,7 +1427,9 @@ public final class DroidBridgeGameProcessLauncher {
             @NonNull LaunchPlan plan,
             @NonNull RendererInterface renderer
     ) {
-        if (isBetterThanAdventureLaunch(plan) && isBtaSafeVisualRenderer(renderer)) {
+        if (isBetterThanAdventureLaunch(plan)
+                && !BtaRendererPolicy.isBta8OrNewer(plan.getVersionId(), null)
+                && isBtaSafeVisualRenderer(renderer)) {
             plan = appendJvmArgIfMissing(plan, "-Ddroidbridge.bta.disableGlShaders=true");
             safeAppendLog("BTA Android visual profile: LWJGL shader-only capability override enabled for "
                     + renderer.getRendererName());
@@ -1455,6 +1458,34 @@ public final class DroidBridgeGameProcessLauncher {
                 safeAppendLog("Failed to apply BTA Android visual profile: " + throwable);
             }
             return plan;
+        }
+
+        if (isBetterThanAdventureLaunch(plan)
+                && BtaRendererPolicy.isBta8OrNewer(plan.getVersionId(), null)) {
+            /*
+             * Older DroidBridge BTA compatibility forced enableShaders=false for
+             * wrapper renderers and that value persists in the instance options.
+             * BTA 8's first-person/player pipeline depends on its modern shader
+             * path, so repair the stale launcher-forced value for every BTA 8+
+             * renderer instead of carrying the old BTA 7 workaround forward.
+             */
+            File options = new File(plan.getGameDirectory(), "options.txt");
+            try {
+                java.util.LinkedHashMap<String, String> values = readOptionsFile(options);
+                boolean changed = false;
+                changed |= setOption(values, "fboEnable", "true");
+                changed |= setOption(values, "enableShaders", "true");
+                if (changed) {
+                    writeOptionsFile(options, values);
+                    safeAppendLog("BTA 8+ visual profile repaired: fboEnable=true, enableShaders=true");
+                } else {
+                    safeAppendLog("BTA 8+ visual profile already native: shaders/FBO enabled for "
+                            + renderer.getRendererName());
+                }
+            } catch (Throwable throwable) {
+                Logging.e(TAG, "Failed to repair BTA 8+ visual profile", throwable);
+                safeAppendLog("Failed to repair BTA 8+ visual profile: " + throwable);
+            }
         }
 
         if (isLtwRenderer(renderer)) {

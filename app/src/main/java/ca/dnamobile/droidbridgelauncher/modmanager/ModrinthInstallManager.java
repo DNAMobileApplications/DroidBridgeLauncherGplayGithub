@@ -15,6 +15,8 @@ package ca.dnamobile.droidbridgelauncher.modmanager;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
+import org.json.JSONObject;
+
 import java.io.File;
 import java.util.ArrayList;
 import java.util.HashSet;
@@ -40,11 +42,23 @@ public final class ModrinthInstallManager {
             @NonNull ModrinthProject project,
             @NonNull Listener listener
     ) {
+        installLatestCompatible(gameDirectory, minecraftVersion, loader, contentType, project, null, listener);
+    }
+
+    public static void installLatestCompatible(
+            @NonNull File gameDirectory,
+            @NonNull String minecraftVersion,
+            @Nullable String loader,
+            @NonNull ModManagerContentType contentType,
+            @NonNull ModrinthProject project,
+            @Nullable File targetDirectoryOverride,
+            @NonNull Listener listener
+    ) {
         try {
             ModrinthApiClient api = new ModrinthApiClient();
             HashSet<String> installingProjects = new HashSet<>();
             HashSet<String> installingVersions = new HashSet<>();
-            installProject(api, gameDirectory, minecraftVersion, loader, contentType, project, false, installingProjects, installingVersions, listener);
+            installProject(api, gameDirectory, minecraftVersion, loader, contentType, project, false, targetDirectoryOverride, installingProjects, installingVersions, listener);
             listener.onComplete("Installed " + project.title + ".");
         } catch (Throwable throwable) {
             listener.onError(throwable);
@@ -60,11 +74,24 @@ public final class ModrinthInstallManager {
             @NonNull ModrinthVersion version,
             @NonNull Listener listener
     ) {
+        installSpecificVersion(gameDirectory, minecraftVersion, loader, contentType, project, version, null, listener);
+    }
+
+    public static void installSpecificVersion(
+            @NonNull File gameDirectory,
+            @NonNull String minecraftVersion,
+            @Nullable String loader,
+            @NonNull ModManagerContentType contentType,
+            @NonNull ModrinthProject project,
+            @NonNull ModrinthVersion version,
+            @Nullable File targetDirectoryOverride,
+            @NonNull Listener listener
+    ) {
         try {
             ModrinthApiClient api = new ModrinthApiClient();
             HashSet<String> installingProjects = new HashSet<>();
             HashSet<String> installingVersions = new HashSet<>();
-            installVersion(api, gameDirectory, minecraftVersion, loader, contentType, project, version, false, installingProjects, installingVersions, listener);
+            installVersion(api, gameDirectory, minecraftVersion, loader, contentType, project, version, false, targetDirectoryOverride, installingProjects, installingVersions, listener);
             listener.onComplete("Installed " + project.title + " " + version.versionNumber + ".");
         } catch (Throwable throwable) {
             listener.onError(throwable);
@@ -79,32 +106,43 @@ public final class ModrinthInstallManager {
             @NonNull ModManagerContentType contentType,
             @NonNull ModrinthProject project,
             boolean dependency,
+            @Nullable File targetDirectoryOverride,
             @NonNull HashSet<String> installingProjects,
             @NonNull HashSet<String> installingVersions,
             @NonNull Listener listener
     ) throws Exception {
-        if (!installingProjects.add(project.projectId)) return;
-
-        if (dependency && isProjectAlreadyInstalled(gameDirectory, contentType, project.projectId)) {
-            listener.onStatus("Dependency already installed: " + project.title);
+        String projectKey = project.projectId == null ? "" : project.projectId.trim();
+        if (projectKey.isEmpty()) projectKey = project.slug == null ? project.title : project.slug.trim();
+        if (!installingProjects.add(projectKey)) {
+            listener.onStatus("Dependency cycle already being resolved: " + project.title);
             return;
         }
 
-        listener.onStatus((dependency ? "Installing dependency " : "Finding version for ") + project.title + "...");
-        ArrayList<ModrinthVersion> versions = api.getProjectVersionsWithFallback(
-                project,
-                contentType,
-                minecraftVersion,
-                loader,
-                false
-        );
+        try {
+            if (dependency && isCompatibleProjectAlreadyInstalled(gameDirectory, contentType, project.projectId, minecraftVersion, loader)) {
+                listener.onStatus("Compatible dependency already installed: " + project.title);
+                return;
+            }
 
-        if (versions.isEmpty()) {
-            throw new IllegalStateException("No compatible Modrinth version found for " + project.title
-                    + " (Minecraft " + minecraftVersion + ", " + safeLoader(loader) + ").");
+            listener.onStatus((dependency ? "Installing dependency " : "Finding version for ") + project.title + "...");
+            ArrayList<ModrinthVersion> versions = api.getProjectVersionsWithFallback(
+                    project,
+                    contentType,
+                    minecraftVersion,
+                    loader,
+                    false
+            );
+
+            ModrinthVersion selected = firstCompatibleVersion(versions, minecraftVersion, loader, contentType);
+            if (selected == null) {
+                throw new IllegalStateException("No compatible Modrinth version found for " + project.title
+                        + " (Minecraft " + minecraftVersion + ", " + safeLoader(loader) + ").");
+            }
+
+            installVersion(api, gameDirectory, minecraftVersion, loader, contentType, project, selected, dependency, targetDirectoryOverride, installingProjects, installingVersions, listener);
+        } finally {
+            installingProjects.remove(projectKey);
         }
-
-        installVersion(api, gameDirectory, minecraftVersion, loader, contentType, project, versions.get(0), dependency, installingProjects, installingVersions, listener);
     }
 
     private static void installVersion(
@@ -116,55 +154,63 @@ public final class ModrinthInstallManager {
             @NonNull ModrinthProject project,
             @NonNull ModrinthVersion version,
             boolean dependency,
+            @Nullable File targetDirectoryOverride,
             @NonNull HashSet<String> installingProjects,
             @NonNull HashSet<String> installingVersions,
             @NonNull Listener listener
     ) throws Exception {
         if (!installingVersions.add(version.id)) return;
 
-        if (dependency && isProjectAlreadyInstalled(gameDirectory, contentType, project.projectId)) {
-            listener.onStatus("Dependency already installed: " + project.title);
-            return;
-        }
-
-        if (contentType.supportsDependencies()) {
-            for (ModrinthDependency dep : version.dependencies) {
-                if (!dep.isRequired()) continue;
-                installDependency(api, gameDirectory, minecraftVersion, loader, contentType, dep, installingProjects, installingVersions, listener);
+        try {
+            if (dependency && isCompatibleProjectAlreadyInstalled(gameDirectory, contentType, project.projectId, minecraftVersion, loader)) {
+                listener.onStatus("Compatible dependency already installed: " + project.title);
+                return;
             }
+
+            if (contentType.supportsDependencies()) {
+                for (ModrinthDependency dep : version.dependencies) {
+                    if (!dep.isRequired()) continue;
+                    installDependency(api, gameDirectory, minecraftVersion, loader, contentType, project, dep,
+                            targetDirectoryOverride, installingProjects, installingVersions, listener);
+                }
+            }
+
+            ModrinthFile file = version.getPrimaryFile();
+            if (file == null || file.url.trim().isEmpty()) {
+                throw new IllegalStateException("No downloadable file found for " + project.title + " " + version.versionNumber + ".");
+            }
+
+            File targetDirectory = targetDirectoryOverride != null
+                    ? targetDirectoryOverride
+                    : contentType.getTargetDirectory(gameDirectory, minecraftVersion);
+            if (!targetDirectory.exists() && !targetDirectory.mkdirs()) {
+                throw new IllegalStateException("Unable to create folder: " + targetDirectory.getAbsolutePath());
+            }
+
+            ModManagerManifest.removeKnownFilesForProject(gameDirectory, contentType, SOURCE, project.projectId);
+
+            File target = uniqueTargetFile(targetDirectory, sanitizeFileName(file.filename));
+            listener.onStatus("Downloading " + project.title + " " + version.versionNumber + "...");
+            api.downloadToFile(file.url, target);
+
+            File cachedIconFile = cacheProjectIcon(api, gameDirectory, project);
+            ModManagerManifest.recordInstalled(
+                    gameDirectory,
+                    contentType,
+                    SOURCE,
+                    project,
+                    version,
+                    file,
+                    target,
+                    dependency,
+                    minecraftVersion,
+                    loader,
+                    project.iconUrl,
+                    cachedIconFile
+            );
+        } finally {
+            installingVersions.remove(version.id);
         }
-
-        ModrinthFile file = version.getPrimaryFile();
-        if (file == null || file.url.trim().isEmpty()) {
-            throw new IllegalStateException("No downloadable file found for " + project.title + " " + version.versionNumber + ".");
-        }
-
-        File targetDirectory = contentType.getTargetDirectory(gameDirectory);
-        if (!targetDirectory.exists() && !targetDirectory.mkdirs()) {
-            throw new IllegalStateException("Unable to create folder: " + targetDirectory.getAbsolutePath());
-        }
-
-        ModManagerManifest.removeKnownFilesForProject(gameDirectory, contentType, SOURCE, project.projectId);
-
-        File target = uniqueTargetFile(targetDirectory, sanitizeFileName(file.filename));
-        listener.onStatus("Downloading " + project.title + " " + version.versionNumber + "...");
-        api.downloadToFile(file.url, target);
-
-        File cachedIconFile = cacheProjectIcon(api, gameDirectory, project);
-        ModManagerManifest.recordInstalled(
-                gameDirectory,
-                contentType,
-                SOURCE,
-                project,
-                version,
-                file,
-                target,
-                dependency,
-                minecraftVersion,
-                loader,
-                project.iconUrl,
-                cachedIconFile
-        );
     }
 
     private static void installDependency(
@@ -173,44 +219,138 @@ public final class ModrinthInstallManager {
             @NonNull String minecraftVersion,
             @Nullable String loader,
             @NonNull ModManagerContentType contentType,
+            @NonNull ModrinthProject parentProject,
             @NonNull ModrinthDependency dep,
+            @Nullable File targetDirectoryOverride,
             @NonNull HashSet<String> installingProjects,
             @NonNull HashSet<String> installingVersions,
             @NonNull Listener listener
     ) throws Exception {
-        // Prefer dependency project ids over exact dependency version ids.
-        // Some Modrinth projects publish dependency records with stale/removed version_id
-        // values, which can throw HTTP 404 for otherwise valid dependencies.
-        // Modly solved this by resolving required dependencies by project_id and then
-        // selecting the latest compatible version for the active Minecraft/loader pair.
+        Throwable exactFailure = null;
+
+        // Prefer the publisher-selected exact dependency version when it is still
+        // present and compatible.  If Modrinth has removed/staled that version,
+        // fall back to the dependency project and resolve the newest compatible file.
+        if (dep.versionId != null && !dep.versionId.trim().isEmpty()) {
+            try {
+                ModrinthVersion version = api.getVersion(dep.versionId.trim());
+                ModrinthProject project = api.getProject(version.projectId);
+                if (ModDependencyCompatibility.shouldSkipRequiredDependency(parentProject, project, minecraftVersion)) {
+                    listener.onStatus(ModDependencyCompatibility.skippedDependencyStatus(project, minecraftVersion));
+                    return;
+                }
+                if (!isVersionCompatible(version, minecraftVersion, loader, contentType)) {
+                    throw new IllegalStateException("Exact dependency version is not compatible with Minecraft "
+                            + minecraftVersion + " / " + safeLoader(loader));
+                }
+                if (isCompatibleProjectAlreadyInstalled(gameDirectory, contentType, project.projectId, minecraftVersion, loader)) {
+                    listener.onStatus("Compatible dependency already installed: " + project.title);
+                    return;
+                }
+                installVersion(api, gameDirectory, minecraftVersion, loader, contentType, project, version, true,
+                        targetDirectoryOverride, installingProjects, installingVersions, listener);
+                return;
+            } catch (Throwable throwable) {
+                exactFailure = throwable;
+                listener.onStatus("Exact dependency version unavailable; trying a compatible project release...");
+            }
+        }
+
         if (dep.projectId != null && !dep.projectId.trim().isEmpty()) {
             String dependencyProjectId = dep.projectId.trim();
-            if (isProjectAlreadyInstalled(gameDirectory, contentType, dependencyProjectId)) {
-                listener.onStatus("Dependency already installed: " + dependencyProjectId);
+
+            try {
+                ModrinthProject project = api.getProject(dependencyProjectId);
+                if (ModDependencyCompatibility.shouldSkipRequiredDependency(parentProject, project, minecraftVersion)) {
+                    listener.onStatus(ModDependencyCompatibility.skippedDependencyStatus(project, minecraftVersion));
+                    return;
+                }
+                if (isCompatibleProjectAlreadyInstalled(gameDirectory, contentType, dependencyProjectId, minecraftVersion, loader)) {
+                    listener.onStatus("Compatible dependency already installed: " + project.title);
+                    return;
+                }
+                installProject(api, gameDirectory, minecraftVersion, loader, contentType, project, true,
+                        targetDirectoryOverride, installingProjects, installingVersions, listener);
+                return;
+            } catch (Throwable projectFailure) {
+                if (exactFailure != null) projectFailure.addSuppressed(exactFailure);
+                if (projectFailure instanceof Exception) throw (Exception) projectFailure;
+                throw new IllegalStateException("Unable to resolve required Modrinth dependency " + dependencyProjectId, projectFailure);
+            }
+        }
+
+        if (dep.fileName != null && !dep.fileName.trim().isEmpty()) {
+            File targetDirectory = targetDirectoryOverride != null
+                    ? targetDirectoryOverride
+                    : contentType.getTargetDirectory(gameDirectory, minecraftVersion);
+            File local = new File(targetDirectory, sanitizeFileName(dep.fileName));
+            if (local.isFile() && local.length() > 0L) {
+                listener.onStatus("Filename-only dependency already present: " + dep.fileName);
                 return;
             }
-
-            ModrinthProject project = api.getProject(dependencyProjectId);
-            installProject(api, gameDirectory, minecraftVersion, loader, contentType, project, true, installingProjects, installingVersions, listener);
-            return;
+            throw new IllegalStateException("Required Modrinth dependency only supplied file_name='"
+                    + dep.fileName + "' with no project_id/version_id, and that file is not installed.");
         }
 
-        if (dep.versionId != null && !dep.versionId.trim().isEmpty()) {
-            ModrinthVersion version = api.getVersion(dep.versionId.trim());
-            ModrinthProject project = api.getProject(version.projectId);
-            installVersion(api, gameDirectory, minecraftVersion, loader, contentType, project, version, true, installingProjects, installingVersions, listener);
+        if (exactFailure != null) {
+            if (exactFailure instanceof Exception) throw (Exception) exactFailure;
+            throw new IllegalStateException("Unable to resolve required Modrinth dependency", exactFailure);
         }
+        throw new IllegalStateException("Required Modrinth dependency has no project_id, version_id, or file_name.");
     }
 
+    private static boolean isVersionCompatible(
+            @NonNull ModrinthVersion version,
+            @NonNull String minecraftVersion,
+            @Nullable String loader,
+            @NonNull ModManagerContentType contentType
+    ) {
+        if (!version.gameVersions.isEmpty() && !version.gameVersions.contains(minecraftVersion)) return false;
+        if (!contentType.isLoaderSpecific()) return true;
+        String wanted = ModrinthApiClient.normalizeLoader(loader);
+        if (wanted.isEmpty() || "vanilla".equals(wanted) || version.loaders.isEmpty()) return true;
+        for (String candidate : version.loaders) {
+            if (wanted.equals(ModrinthApiClient.normalizeLoader(candidate))) return true;
+        }
+        return false;
+    }
 
-    private static boolean isProjectAlreadyInstalled(
+    @Nullable
+    private static ModrinthVersion firstCompatibleVersion(
+            @NonNull ArrayList<ModrinthVersion> versions,
+            @NonNull String minecraftVersion,
+            @Nullable String loader,
+            @NonNull ModManagerContentType contentType
+    ) {
+        for (ModrinthVersion candidate : versions) {
+            if (isVersionCompatible(candidate, minecraftVersion, loader, contentType)) return candidate;
+        }
+        return null;
+    }
+
+    private static boolean isCompatibleProjectAlreadyInstalled(
             @NonNull File gameDirectory,
             @NonNull ModManagerContentType contentType,
-            @Nullable String projectId
+            @Nullable String projectId,
+            @NonNull String minecraftVersion,
+            @Nullable String loader
     ) {
-        return projectId != null
-                && !projectId.trim().isEmpty()
-                && ModManagerManifest.isProjectInstalled(gameDirectory, contentType, SOURCE.getId(), projectId.trim());
+        if (projectId == null || projectId.trim().isEmpty()) return false;
+        JSONObject entry = ModManagerManifest.getInstalledEntryForProject(
+                gameDirectory, contentType, SOURCE, projectId.trim());
+        if (entry == null) return false;
+
+        String installedMinecraft = entry.optString("minecraftVersion", "").trim();
+        String installedLoader = ModrinthApiClient.normalizeLoader(entry.optString("loader", ""));
+        String wantedMinecraft = minecraftVersion.trim();
+        String wantedLoader = ModrinthApiClient.normalizeLoader(loader);
+
+        // Old/partial manifest entries are not enough proof for a required dependency.
+        if (installedMinecraft.isEmpty() || !installedMinecraft.equals(wantedMinecraft)) return false;
+        if (contentType.isLoaderSpecific() && !wantedLoader.isEmpty() && !"vanilla".equals(wantedLoader)) {
+            if (installedLoader.isEmpty() || !wantedLoader.equals(installedLoader)) return false;
+        }
+        return true;
     }
 
     @Nullable

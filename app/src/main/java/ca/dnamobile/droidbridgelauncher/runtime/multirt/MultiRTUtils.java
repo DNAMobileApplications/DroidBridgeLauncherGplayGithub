@@ -101,7 +101,10 @@ public final class MultiRTUtils {
         File runtimeDir = getRuntimeDir(runtimeName);
         File tempDir = new File(runtimesHome, runtimeName + ".installing");
 
-        PathManager.deleteQuietly(tempDir);
+        // A killed/failed previous install may leave this directory behind.
+        // Deletion must be verified; silently continuing is what used to turn a
+        // recoverable stale stage into a permanent "no installed JRE" loop.
+        PathManager.deleteRecursivelyChecked(tempDir);
         if (!tempDir.mkdirs()) {
             throw new IOException("Unable to create temp runtime directory: " + tempDir.getAbsolutePath());
         }
@@ -122,7 +125,12 @@ public final class MultiRTUtils {
             reportProgress(progressCallback, "Runtime installation complete.");
         } catch (IOException | RuntimeException e) {
             reportProgress(progressCallback, "Installation failed; cleaning staged files...");
-            PathManager.deleteQuietly(tempDir);
+            try {
+                PathManager.deleteRecursivelyChecked(tempDir);
+            } catch (IOException cleanupFailure) {
+                e.addSuppressed(cleanupFailure);
+                Logging.e(TAG, "Unable to remove failed staged runtime " + tempDir.getAbsolutePath(), cleanupFailure);
+            }
             throw e;
         }
     }
@@ -142,7 +150,7 @@ public final class MultiRTUtils {
 
         File runtimeDir = getRuntimeDir(runtimeName);
         File tempDir = new File(runtimesHome, runtimeName + ".custom-installing");
-        PathManager.deleteQuietly(tempDir);
+        PathManager.deleteRecursivelyChecked(tempDir);
         if (!tempDir.mkdirs()) {
             throw new IOException("Unable to create temp runtime directory: " + tempDir.getAbsolutePath());
         }
@@ -161,7 +169,12 @@ public final class MultiRTUtils {
 
             activateRuntimeDirectory(tempDir, runtimeDir);
         } catch (IOException | RuntimeException e) {
-            PathManager.deleteQuietly(tempDir);
+            try {
+                PathManager.deleteRecursivelyChecked(tempDir);
+            } catch (IOException cleanupFailure) {
+                e.addSuppressed(cleanupFailure);
+                Logging.e(TAG, "Unable to remove failed custom staged runtime " + tempDir.getAbsolutePath(), cleanupFailure);
+            }
             throw e;
         }
     }
@@ -180,10 +193,18 @@ public final class MultiRTUtils {
         if (!runtimeDir.exists() && backupDir.exists() && !backupDir.renameTo(runtimeDir)) {
             throw new IOException("Unable to recover runtime backup: " + backupDir.getAbsolutePath());
         }
-        if (runtimeDir.exists()) PathManager.deleteQuietly(backupDir);
 
-        if (runtimeDir.exists() && !runtimeDir.renameTo(backupDir)) {
-            throw new IOException("Unable to move existing runtime aside: " + runtimeDir.getAbsolutePath());
+        if (runtimeDir.exists()) {
+            // Never assume deleteQuietly() removed a stale backup. renameTo() fails
+            // when the destination still exists, which was the root of the repeated
+            // Internal-17/21/25 activation failures seen in the field.
+            PathManager.deleteRecursivelyChecked(backupDir);
+            if (backupDir.exists()) {
+                throw new IOException("Stale runtime backup still exists: " + backupDir.getAbsolutePath());
+            }
+            if (!runtimeDir.renameTo(backupDir)) {
+                throw new IOException("Unable to move existing runtime aside: " + runtimeDir.getAbsolutePath());
+            }
         }
 
         try {
@@ -194,9 +215,27 @@ public final class MultiRTUtils {
             if (!runtimeDir.isDirectory()) {
                 throw new IOException("Activated runtime directory is missing: " + runtimeDir.getAbsolutePath());
             }
-            PathManager.deleteQuietly(backupDir);
+
+            try {
+                PathManager.deleteRecursivelyChecked(backupDir);
+            } catch (IOException cleanupFailure) {
+                // The new runtime is already active and verified by UnpackJreTask.
+                // Keep it usable and let the next transaction retry stale-backup
+                // cleanup instead of falsely marking this runtime as missing.
+                Logging.e(TAG, "Installed runtime but could not remove backup "
+                        + backupDir.getAbsolutePath(), cleanupFailure);
+            }
         } catch (Throwable throwable) {
-            PathManager.deleteQuietly(runtimeDir);
+            try {
+                PathManager.deleteRecursivelyChecked(runtimeDir);
+            } catch (IOException cleanupFailure) {
+                IOException restoreFailure = new IOException(
+                        "Unable to remove failed replacement runtime before restoring backup: "
+                                + runtimeDir.getAbsolutePath(), cleanupFailure);
+                restoreFailure.addSuppressed(throwable);
+                throw restoreFailure;
+            }
+
             if (backupDir.exists() && !backupDir.renameTo(runtimeDir)) {
                 IOException restoreFailure = new IOException(
                         "Unable to restore previous runtime after install failure: "

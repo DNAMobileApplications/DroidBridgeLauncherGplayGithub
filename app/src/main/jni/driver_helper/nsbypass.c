@@ -23,6 +23,7 @@
 #include <android/log.h>
 #include <sys/mman.h>
 #include <string.h>
+#include <strings.h>
 #include <stdio.h>
 #include <stdarg.h>
 #include <stdlib.h>
@@ -291,13 +292,61 @@ static void append_path_list(char* out, size_t out_size, const char* paths) {
     }
 }
 
+static bool ns_env_enabled(const char* name) {
+    const char* value = getenv(name);
+    return value != NULL
+            && value[0] != '\0'
+            && strcmp(value, "0") != 0
+            && strcasecmp(value, "false") != 0;
+}
+
 static void build_search_path(char* out, size_t out_size, const char* lib_search_path) {
     const char* native_dir = getenv("DROIDBRIDGE_MESA_NATIVE_DIR");
     const char* alias_dir = getenv("DROIDBRIDGE_MESA_ALIAS_DIR");
+    const char* kopper_vulkan_alias_dir = getenv("DROIDBRIDGE_KOPPER_VULKAN_ALIAS_DIR");
+    const bool kopper_turnip = ns_env_enabled("DROIDBRIDGE_KOPPER_FORCE_NAMESPACE_VULKAN");
 
     out[0] = '\0';
 
-    /* Keep app-local Mesa shims before /system and /vendor. */
+    /*
+     * v13: Kopper's private Turnip-loader namespace must resolve Android
+     * platform dependencies from /system before app-local compatibility shims.
+     * Current FCL does the same fundamental thing: /system/lib64 precedes the
+     * custom driver path.  With DroidBridge's old app-first order, the Kopper
+     * payload's lightweight libcutils.so could shadow Android's platform
+     * libcutils; vendor libhidlbase.so then failed to resolve
+     * native_handle_clone while loading the private libvulkan clone.
+     *
+     * Keep the existing app-first policy for every non-Kopper namespace so this
+     * fix cannot regress direct Freedreno/regular Mesa paths.
+     */
+    if (kopper_turnip) {
+        /*
+         * v14: Only the dedicated private Vulkan-loader directory precedes
+         * /system. Mesa 26.1.x can ignore VULKAN_PTR and open libvulkan.so
+         * itself, so expose the Turnip-hooked clone under that filename.
+         *
+         * Keep /system ahead of every general Mesa/app compatibility directory
+         * so Android platform dependencies (notably libcutils/native_handle)
+         * retain the v13 system-first fix.
+         */
+        append_search_path(out, out_size, kopper_vulkan_alias_dir);
+        append_search_path(out, out_size, SEARCH_PATH);
+        append_path_list(out, out_size, lib_search_path);
+        append_search_path(out, out_size, native_dir);
+        append_search_path(out, out_size, alias_dir);
+        append_search_path(out, out_size, "/system_ext/lib64");
+        append_search_path(out, out_size, "/vendor/lib64");
+        append_search_path(out, out_size, "/odm/lib64");
+        append_search_path(out, out_size, "/product/lib64");
+        append_search_path(out, out_size, "/apex/com.android.runtime/lib64");
+        append_search_path(out, out_size, "/apex/com.android.art/lib64");
+        append_search_path(out, out_size, "/data/local/tmp");
+        ns_log("namespace search policy=kopper-vulkan-alias-first-system-second alias=%s path=%s",
+               kopper_vulkan_alias_dir != NULL ? kopper_vulkan_alias_dir : "<unset>", out);
+        return;
+    }
+
     append_path_list(out, out_size, lib_search_path);
     append_search_path(out, out_size, native_dir);
     append_search_path(out, out_size, alias_dir);
@@ -310,7 +359,7 @@ static void build_search_path(char* out, size_t out_size, const char* lib_search
     append_search_path(out, out_size, "/apex/com.android.art/lib64");
     append_search_path(out, out_size, SEARCH_PATH);
 
-    ns_log("namespace app-first search path=%s", out);
+    ns_log("namespace search policy=app-first path=%s", out);
 }
 
 static struct android_namespace_t* try_create_namespace_path(const char* name, const char* path) {
@@ -347,13 +396,18 @@ bool linker_ns_load(const char* lib_search_path) {
     build_search_path(full_path, sizeof(full_path), lib_search_path);
 
     driver_namespace = try_create_namespace_path("droidbridge_mesa_namespace", full_path);
-    if (driver_namespace == NULL) {
+
+    const bool kopper_turnip = ns_env_enabled("DROIDBRIDGE_KOPPER_FORCE_NAMESPACE_VULKAN");
+    if (driver_namespace == NULL && !kopper_turnip) {
         driver_namespace = try_create_namespace_path("droidbridge_mesa_namespace_min", lib_search_path);
     }
 
     const char* native_dir = getenv("DROIDBRIDGE_MESA_NATIVE_DIR");
-    if (driver_namespace == NULL && native_dir != NULL && native_dir[0] != '\0') {
+    if (driver_namespace == NULL && !kopper_turnip && native_dir != NULL && native_dir[0] != '\0') {
         driver_namespace = try_create_namespace_path("droidbridge_mesa_namespace_native", native_dir);
+    }
+    if (driver_namespace == NULL && kopper_turnip) {
+        ns_log("Kopper system-first namespace creation failed; refusing app-only fallback");
     }
 
     if (driver_namespace == NULL) {
@@ -423,7 +477,12 @@ void* linker_ns_dlopen_unique(const char* tmpdir, const char* name, int flags) {
         .library_namespace = driver_namespace
     };
     snprintf(pathbuf, PATH_MAX, "/proc/self/fd/%d", patch_fd);
-    return android_dlopen_ext(pathbuf, flags, &extinfo);
+    dlerror();
+    void* handle = android_dlopen_ext(pathbuf, flags, &extinfo);
+    const char* load_error = handle == NULL ? dlerror() : NULL;
+    ns_log("linker_ns_dlopen_unique source=%s patchId=%03x fd=%d handle=%p error=%s",
+           name, patch_id, patch_fd, handle, load_error != NULL ? load_error : "<none>");
+    return handle;
 #else
     return NULL;
 #endif
@@ -572,3 +631,78 @@ void* linker_ns_dlopen_unique_named(const char* tmpdir, const char* name, const 
     return NULL;
 #endif
 }
+
+void* linker_ns_dlopen_alias_file(const char* alias_dir,
+                                  const char* name,
+                                  const char* output_name,
+                                  const char* unique_soname,
+                                  int flags) {
+#ifdef ADRENO_POSSIBLE
+    if (driver_namespace == NULL || alias_dir == NULL || alias_dir[0] == '\0'
+            || name == NULL || name[0] == '\0'
+            || output_name == NULL || output_name[0] == '\0'
+            || unique_soname == NULL || unique_soname[0] == '\0') {
+        ns_log("linker_ns_dlopen_alias_file invalid args ns=%p dir=%s name=%s output=%s soname=%s",
+               driver_namespace,
+               alias_dir ? alias_dir : "<null>",
+               name ? name : "<null>",
+               output_name ? output_name : "<null>",
+               unique_soname ? unique_soname : "<null>");
+        return NULL;
+    }
+
+    if (mkdir(alias_dir, S_IRWXU) != 0 && access(alias_dir, F_OK) != 0) {
+        ns_log("linker_ns_dlopen_alias_file failed creating dir=%s", alias_dir);
+        return NULL;
+    }
+
+    char output_path[PATH_MAX];
+    char source_path[PATH_MAX];
+    snprintf(output_path, sizeof(output_path), "%s/%s", alias_dir, output_name);
+    snprintf(source_path, sizeof(source_path), "%s/%s", SEARCH_PATH, name);
+
+    unlink(output_path);
+    int patch_fd = open(output_path, O_CREAT | O_TRUNC | O_RDWR, S_IRUSR | S_IWUSR);
+    if (patch_fd == -1) {
+        ns_log("linker_ns_dlopen_alias_file failed creating output=%s", output_path);
+        return NULL;
+    }
+
+    int real_fd = open(source_path, O_RDONLY);
+    if (real_fd == -1) {
+        ns_log("linker_ns_dlopen_alias_file failed opening source=%s", source_path);
+        close(patch_fd);
+        unlink(output_path);
+        return NULL;
+    }
+
+    if (!patch_elf_soname_to_name(patch_fd, real_fd, unique_soname)) {
+        ns_log("linker_ns_dlopen_alias_file failed patching source=%s output=%s soname=%s",
+               source_path, output_path, unique_soname);
+        close(patch_fd);
+        unlink(output_path);
+        return NULL;
+    }
+
+    fsync(patch_fd);
+    android_dlextinfo extinfo = {
+        .flags = ANDROID_DLEXT_USE_NAMESPACE | ANDROID_DLEXT_USE_LIBRARY_FD,
+        .library_fd = patch_fd,
+        .library_namespace = driver_namespace
+    };
+
+    char fd_path[64];
+    snprintf(fd_path, sizeof(fd_path), "/proc/self/fd/%d", patch_fd);
+    dlerror();
+    void* handle = android_dlopen_ext(fd_path, flags, &extinfo);
+    const char* load_error = handle == NULL ? dlerror() : NULL;
+    ns_log("linker_ns_dlopen_alias_file source=%s output=%s soname=%s fd=%d handle=%p error=%s",
+           source_path, output_path, unique_soname, patch_fd, handle,
+           load_error != NULL ? load_error : "<none>");
+    close(patch_fd);
+    return handle;
+#else
+    return NULL;
+#endif
+}
+

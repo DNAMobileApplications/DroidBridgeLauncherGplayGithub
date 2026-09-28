@@ -31,6 +31,7 @@ import ca.dnamobile.droidbridgelauncher.controls.ControlsPreferences;
 import ca.dnamobile.droidbridgelauncher.controls.TouchControlsOverlay;
 import ca.dnamobile.droidbridgelauncher.feature.log.Logging;
 import ca.dnamobile.droidbridgelauncher.settings.LauncherPreferences;
+import ca.dnamobile.droidbridgelauncher.runtime.DroidBridgeSDL3Bootstrap;
 import ca.dnamobile.droidbridgelauncher.runtime.MinecraftGLSurface;
 import org.lwjgl.glfw.CallbackBridge;
 
@@ -61,12 +62,13 @@ public final class DualScreenController implements DisplayManager.DisplayListene
     @NonNull private final ActiveSurfaceListener activeSurfaceListener;
     @NonNull private final Handler mainHandler = new Handler(Looper.getMainLooper());
     @Nullable private final DisplayManager displayManager;
-
     @Nullable private DualScreenGamePresentation gamePresentation;
     @Nullable private DualScreenPresentation controlsPresentation;
-    @Nullable private DualScreenControlsView localControlsView;
+    @Nullable private DualScreenBottomViewportLayout localControlsViewport;
+    @Nullable private DualScreenDeckView localControlsView;
     @Nullable private TouchControlsOverlay localTouchControlsOverlay;
     @Nullable private DualScreenBackgroundView localControlsBackgroundView;
+    @Nullable private DualScreenControlsView defaultTopLegacyHudOverlay;
     private boolean listenerRegistered;
     private boolean externalGameModeActive;
     private boolean controlsPresentationModeActive;
@@ -75,6 +77,16 @@ public final class DualScreenController implements DisplayManager.DisplayListene
     private boolean requestedScreensSwapped;
     private boolean recoveringDisplayLoss;
     private boolean suppressPresentationDismissRecovery;
+    @Nullable private MinecraftGLSurface lastNotifiedActiveSurface;
+    @Nullable private ViewGroup.LayoutParams savedDefaultSurfaceLayoutParams;
+    private int savedDefaultSurfaceIndex = -1;
+
+    // DisplayManager can emit onDisplayChanged repeatedly while Android negotiates refresh
+    // rate / frame-rate hints. Reapplying the dual-screen layout on every one of those
+    // callbacks re-attached the active Minecraft ANativeWindow over and over and could make
+    // gameplay crawl whenever the second panel was connected. This is initialized in the
+    // constructor after activity is assigned, because activity is a blank final field.
+    @NonNull private final Runnable displayRestoreRunnable;
 
     public DualScreenController(
             @NonNull Activity activity,
@@ -85,6 +97,11 @@ public final class DualScreenController implements DisplayManager.DisplayListene
             @NonNull ActiveSurfaceListener activeSurfaceListener
     ) {
         this.activity = activity;
+        this.displayRestoreRunnable = () -> {
+            if (!userRequestedExternalGameMode || recoveringDisplayLoss
+                    || this.activity.isFinishing() || this.activity.isDestroyed()) return;
+            restoreRequestedDisplayDirection(true);
+        };
         this.hudStateFile = hudStateFile;
         File parent = hudStateFile.getParentFile();
         this.controlStateFile = new File(parent == null ? activity.getFilesDir() : parent, "droidbridge_dual_screen_control.json");
@@ -105,6 +122,34 @@ public final class DualScreenController implements DisplayManager.DisplayListene
 
     public boolean isShowing() {
         return isExternalGameModeActive() || isControlsPresentationModeActive();
+    }
+
+    /**
+     * True from the moment a two-display layout is requested until it is explicitly
+     * disabled.  Unlike isShowing(), this does not briefly become false while the game and
+     * controls Presentations trade displays, so GameActivity cannot reinstall controls on
+     * top of Minecraft during that transition.
+     */
+    public boolean ownsTouchControls() {
+        return userRequestedExternalGameMode && hasSecondaryDisplay();
+    }
+
+    /**
+     * Mirrors a hotbar scroll only after GamepadInputController has resolved the
+     * active profile and is actually sending SCROLL_UP / SCROLL_DOWN to Minecraft.
+     * This prevents the lower HUD from predicting a slot for remapped shoulders or
+     * triggers and then snapping back to the real held item when no scroll occurred.
+     */
+    public void onMappedHotbarScroll(int delta) {
+        if (!ownsTouchControls() || delta == 0) return;
+
+        mainHandler.post(() -> {
+            DualScreenDeckView local = localControlsView;
+            if (local != null) local.previewControllerHotbarDelta(delta);
+
+            DualScreenPresentation presentation = controlsPresentation;
+            if (presentation != null) presentation.previewControllerHotbarDelta(delta);
+        });
     }
 
     public boolean isExternalGameModeActive() {
@@ -197,6 +242,7 @@ public final class DualScreenController implements DisplayManager.DisplayListene
         boolean savedSwapRequest = LauncherPreferences.isDualScreenLastSwapRequest(activity);
         userRequestedExternalGameMode = false;
         LauncherPreferences.setDualScreenLastExternalRequest(activity, false);
+        removeDefaultTopLegacyHudOverlay();
         restoreDefaultSurface();
         removeLocalControlsView();
         dismissGamePresentation();
@@ -208,7 +254,7 @@ public final class DualScreenController implements DisplayManager.DisplayListene
         requestedScreensSwapped = savedSwapRequest;
         recoveringDisplayLoss = false;
         writeControlState(false);
-        activeSurfaceListener.onActiveSurfaceChanged(defaultSurface, gameAlreadyRunning);
+        notifyBottomControlsOwnership(defaultSurface, gameAlreadyRunning);
         unregisterDisplayListener();
         Logging.i(TAG, "Dual-screen mode disabled; Minecraft returned to default display");
     }
@@ -231,6 +277,7 @@ public final class DualScreenController implements DisplayManager.DisplayListene
 
     public void release() {
         userRequestedExternalGameMode = false;
+        removeDefaultTopLegacyHudOverlay();
         removeLocalControlsView();
         restoreDefaultSurface();
         dismissGamePresentation();
@@ -238,14 +285,17 @@ public final class DualScreenController implements DisplayManager.DisplayListene
         screensSwapped = false;
         writeControlState(false);
         unregisterDisplayListener();
+        lastNotifiedActiveSurface = null;
         mainHandler.removeCallbacksAndMessages(null);
     }
 
     @Override
     public void onDisplayAdded(int displayId) {
         if (!userRequestedExternalGameMode) return;
-        // Portable displays can report added before their Presentation window is ready.
-        mainHandler.postDelayed(() -> restoreRequestedDisplayDirection(true), 350L);
+        // Portable displays can report several add/change callbacks while the mode settles.
+        // One delayed restore is enough.
+        mainHandler.removeCallbacks(displayRestoreRunnable);
+        mainHandler.postDelayed(displayRestoreRunnable, 350L);
     }
 
     @Override
@@ -266,7 +316,49 @@ public final class DualScreenController implements DisplayManager.DisplayListene
     @Override
     public void onDisplayChanged(int displayId) {
         if (!userRequestedExternalGameMode || recoveringDisplayLoss) return;
-        mainHandler.postDelayed(() -> restoreRequestedDisplayDirection(true), 150L);
+
+        // A healthy Presentation automatically receives its display's new dimensions/mode.
+        // Do NOT call applyRequestedDisplayDirection() here: Android may fire this callback
+        // for every frame-rate/mode negotiation and the old code repeatedly reattached the
+        // Minecraft surface, scheduled resize work and refreshed VSync. That was the main
+        // launcher-side dual-screen stutter path.
+        boolean healthyGame = gamePresentation != null
+                && gamePresentation.isShowing()
+                && gamePresentation.getDisplay() != null
+                && gamePresentation.getDisplay().isValid();
+        boolean healthyControls = controlsPresentation != null
+                && controlsPresentation.isShowing()
+                && controlsPresentation.getDisplay() != null
+                && controlsPresentation.getDisplay().isValid();
+        if (healthyGame || healthyControls) return;
+
+        // If a window really disappeared without onDisplayRemoved, recover once after the
+        // display manager finishes settling instead of piling up delayed callbacks.
+        mainHandler.removeCallbacks(displayRestoreRunnable);
+        mainHandler.postDelayed(displayRestoreRunnable, 250L);
+    }
+
+    private void notifyActiveSurfaceChanged(
+            @NonNull MinecraftGLSurface surface,
+            boolean gameAlreadyRunning
+    ) {
+        // Re-notifying the same Surface is not harmless: GameActivity.start(true) reattaches
+        // the bridge window, refreshes size/VSync and can provoke Android display-mode work.
+        // Only perform that handoff when the actual Minecraft surface object changes.
+        if (lastNotifiedActiveSurface == surface) return;
+        lastNotifiedActiveSurface = surface;
+        activeSurfaceListener.onActiveSurfaceChanged(surface, gameAlreadyRunning);
+    }
+
+    private void notifyBottomControlsOwnership(@NonNull MinecraftGLSurface surface, boolean gameAlreadyRunning) {
+        if (lastNotifiedActiveSurface == surface) {
+            // The surface itself did not change, but dual-screen ownership may have. Run the
+            // Activity-side cleanup without restarting/re-attaching Minecraft, so a stale normal
+            // TouchControlsOverlay cannot remain stacked with the dedicated bottom overlay.
+            activeSurfaceListener.onActiveSurfaceChanged(surface, false);
+            return;
+        }
+        notifyActiveSurfaceChanged(surface, gameAlreadyRunning);
     }
 
     private void restoreRequestedDisplayDirection(boolean gameAlreadyRunning) {
@@ -360,6 +452,10 @@ public final class DualScreenController implements DisplayManager.DisplayListene
             return;
         }
 
+        // Minecraft is about to live in the game Presentation. Any Legacy HUD overlay
+        // attached to the Activity belongs to swapped/default-display mode and must not
+        // remain over the lower controls deck.
+        removeDefaultTopLegacyHudOverlay();
         dismissControlsPresentation();
         controlsPresentationModeActive = false;
         screensSwapped = logicalSwap;
@@ -367,20 +463,35 @@ public final class DualScreenController implements DisplayManager.DisplayListene
         if (gamePresentation != null && gamePresentation.isShowing()
                 && gamePresentation.getDisplay() != null
                 && gamePresentation.getDisplay().getDisplayId() == display.getDisplayId()) {
+            // Remove/re-target the normal GameActivity overlay before creating the dedicated
+            // bottom-screen overlay. This cleanup must still run when the Minecraft surface is
+            // unchanged, otherwise resume/reapply paths can leave two TouchControlsOverlay views.
+            notifyBottomControlsOwnership(gamePresentation.getMinecraftSurface(), gameAlreadyRunning);
             ensureLocalControlsView();
-            hideDefaultSurface();
+            if (!gamePresentation.isUsingSharedMinecraftSurface()) {
+                hideDefaultSurface();
+            } else {
+                defaultSurface.setVisibility(View.VISIBLE);
+                defaultSurface.setAlpha(1f);
+            }
             externalGameModeActive = true;
             controlsPresentationModeActive = false;
             screensSwapped = logicalSwap;
             writeControlState(true);
-            activeSurfaceListener.onActiveSurfaceChanged(gamePresentation.getMinecraftSurface(), gameAlreadyRunning);
             return;
         }
 
         dismissGamePresentation();
 
+        final boolean sharedSdlSurface = DroidBridgeSDL3Bootstrap.isRequested();
+        if (sharedSdlSurface) {
+            detachDefaultSurfaceForSharedPresentation();
+        }
+
         try {
-            DualScreenGamePresentation next = new DualScreenGamePresentation(activity, display);
+            DualScreenGamePresentation next = sharedSdlSurface
+                    ? new DualScreenGamePresentation(activity, display, hudStateFile, defaultSurface)
+                    : new DualScreenGamePresentation(activity, display, hudStateFile);
             next.setDisplayLossListener(() -> recoverFromExternalDisplayLoss(true, true));
             next.setOnDismissListener(dialog -> {
                 boolean wasCurrent = gamePresentation == dialog;
@@ -399,9 +510,19 @@ public final class DualScreenController implements DisplayManager.DisplayListene
             // 1.0.144: switch Minecraft to the new live surface before hiding the old
             // default surface. Destroying/hiding the active surface first can make 26.x
             // Vulkan report VK_ERROR_SURFACE_LOST_KHR during the next acquire.
-            activeSurfaceListener.onActiveSurfaceChanged(next.getMinecraftSurface(), gameAlreadyRunning);
+            if (next.isUsingSharedMinecraftSurface()) {
+                // Same Java/TextureView surface, new Android window/display. The retained
+                // SurfaceTexture reattaches itself; do not call start(true) or hide it.
+                notifyBottomControlsOwnership(defaultSurface, gameAlreadyRunning);
+                defaultSurface.setVisibility(View.VISIBLE);
+                defaultSurface.setAlpha(1f);
+            } else {
+                notifyActiveSurfaceChanged(next.getMinecraftSurface(), gameAlreadyRunning);
+            }
             ensureLocalControlsView();
-            hideDefaultSurface();
+            if (!next.isUsingSharedMinecraftSurface()) {
+                hideDefaultSurface();
+            }
             externalGameModeActive = true;
             controlsPresentationModeActive = false;
             screensSwapped = logicalSwap;
@@ -458,7 +579,10 @@ public final class DualScreenController implements DisplayManager.DisplayListene
         restoreDefaultSurface();
         externalGameModeActive = false;
         controlsPresentationModeActive = false;
-        activeSurfaceListener.onActiveSurfaceChanged(defaultSurface, gameAlreadyRunning);
+        notifyBottomControlsOwnership(defaultSurface, gameAlreadyRunning);
+        // In swapped mode Minecraft is hosted by the Activity/default surface, so the
+        // optional Legacy HUD must live in that same root above Minecraft.
+        ensureDefaultTopLegacyHudOverlay();
         if (hadExternalGameSurface) {
             // Do not create the controls Presentation underneath the still-visible
             // Minecraft Presentation on the same display. That race made Swap=ON
@@ -498,7 +622,8 @@ public final class DualScreenController implements DisplayManager.DisplayListene
             screensSwapped = logicalSwap;
             externalGameModeActive = false;
             writeControlState(true);
-            activeSurfaceListener.onActiveSurfaceChanged(defaultSurface, gameAlreadyRunning);
+            notifyBottomControlsOwnership(defaultSurface, gameAlreadyRunning);
+            ensureDefaultTopLegacyHudOverlay();
             return;
         }
 
@@ -527,7 +652,8 @@ public final class DualScreenController implements DisplayManager.DisplayListene
             screensSwapped = logicalSwap;
             externalGameModeActive = false;
             writeControlState(true);
-            activeSurfaceListener.onActiveSurfaceChanged(defaultSurface, gameAlreadyRunning);
+            notifyBottomControlsOwnership(defaultSurface, gameAlreadyRunning);
+            ensureDefaultTopLegacyHudOverlay();
 
             Logging.i(TAG, "Dual-screen swap enabled: Minecraft on default display; controls displayId="
                     + display.getDisplayId() + " stateFile=" + hudStateFile.getAbsolutePath());
@@ -536,19 +662,51 @@ public final class DualScreenController implements DisplayManager.DisplayListene
             screensSwapped = false;
             controlsPresentation = null;
             writeControlState(false);
+            removeDefaultTopLegacyHudOverlay();
             Logging.e(TAG, "Unable to move DroidBridge HUD deck to external display", throwable);
             Toast.makeText(activity, "Unable to swap screens on this display.", Toast.LENGTH_LONG).show();
         }
     }
 
+    private void ensureDefaultTopLegacyHudOverlay() {
+        if (defaultTopLegacyHudOverlay == null || defaultTopLegacyHudOverlay.getParent() != defaultRoot) {
+            removeDefaultTopLegacyHudOverlay();
+            defaultTopLegacyHudOverlay = new DualScreenControlsView(
+                    activity, hudStateFile, launcherMenuCallback, true
+            );
+            defaultRoot.addView(defaultTopLegacyHudOverlay, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+            ));
+        }
+        // This view never accepts input, but it must remain above the Minecraft surface.
+        defaultTopLegacyHudOverlay.bringToFront();
+    }
+
+    private void removeDefaultTopLegacyHudOverlay() {
+        if (defaultTopLegacyHudOverlay == null) return;
+        ViewGroup parent = defaultTopLegacyHudOverlay.getParent() instanceof ViewGroup
+                ? (ViewGroup) defaultTopLegacyHudOverlay.getParent() : null;
+        if (parent != null) parent.removeView(defaultTopLegacyHudOverlay);
+        defaultTopLegacyHudOverlay = null;
+    }
+
     private void ensureLocalControlsView() {
         MinecraftGLSurface externalSurface = gamePresentation == null ? null : gamePresentation.getMinecraftSurface();
 
+        ensureLocalControlsViewport();
+        DualScreenBottomViewportLayout viewport = localControlsViewport;
+        if (viewport == null) return;
+
         ensureLocalControlsBackground();
-        if (localControlsView == null || localControlsView.getParent() != defaultRoot) {
-            removeLocalControlsView();
-            localControlsView = new DualScreenControlsView(activity, hudStateFile, launcherMenuCallback);
-            defaultRoot.addView(localControlsView, new FrameLayout.LayoutParams(
+        if (localControlsView == null || localControlsView.getParent() != viewport) {
+            if (localControlsView != null) {
+                ViewGroup oldParent = localControlsView.getParent() instanceof ViewGroup
+                        ? (ViewGroup) localControlsView.getParent() : null;
+                if (oldParent != null) oldParent.removeView(localControlsView);
+            }
+            localControlsView = new DualScreenDeckView(activity, hudStateFile, launcherMenuCallback);
+            viewport.addView(localControlsView, new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.MATCH_PARENT
             ));
@@ -556,25 +714,43 @@ public final class DualScreenController implements DisplayManager.DisplayListene
 
         ensureLocalTouchControlsOverlay(externalSurface);
         // Keep the HUD view above the touch overlay so hotbar slots can show touch/selection
-        // feedback. DualScreenControlsView 1.0.110 draws a transparent background, so the
-        // configurable TouchControlsOverlay remains visible underneath and still receives
-        // normal gameplay touches outside hotbar/button regions.
+        // feedback. DualScreenControlsView draws a transparent background, so the actual
+        // configured TouchControlsOverlay remains visible underneath and still receives
+        // gameplay touches outside hotbar/button regions.
         if (localControlsBackgroundView != null) localControlsBackgroundView.reload();
         if (localTouchControlsOverlay != null) localTouchControlsOverlay.bringToFront();
         localControlsView.bringToFront();
-        // 1.0.110: do not install root/decor gamepad forwarders here.
-        // L1/R1 and Scroll U/D are already handled by the normal touch/controller mapping
-        // as mouse-wheel hotbar changes. The HUD selector now follows hudState.selectedSlot
-        // instead of stealing/consuming those inputs.
+        viewport.refreshViewport();
         CallbackBridge.setInputReady(true);
         CallbackBridge.ensureInputFocus();
     }
 
+    private void ensureLocalControlsViewport() {
+        if (localControlsViewport == null || localControlsViewport.getParent() != defaultRoot) {
+            if (localControlsViewport != null) {
+                ViewGroup oldParent = localControlsViewport.getParent() instanceof ViewGroup
+                        ? (ViewGroup) localControlsViewport.getParent() : null;
+                if (oldParent != null) oldParent.removeView(localControlsViewport);
+            }
+            localControlsViewport = new DualScreenBottomViewportLayout(activity);
+            FrameLayout.LayoutParams params = new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    android.view.Gravity.CENTER
+            );
+            defaultRoot.addView(localControlsViewport, params);
+        }
+        localControlsViewport.refreshViewport();
+    }
+
     private void ensureLocalControlsBackground() {
-        if (localControlsBackgroundView == null || localControlsBackgroundView.getParent() != defaultRoot) {
+        ensureLocalControlsViewport();
+        DualScreenBottomViewportLayout viewport = localControlsViewport;
+        if (viewport == null) return;
+        if (localControlsBackgroundView == null || localControlsBackgroundView.getParent() != viewport) {
             removeLocalControlsBackground();
             localControlsBackgroundView = new DualScreenBackgroundView(activity);
-            defaultRoot.addView(localControlsBackgroundView, new FrameLayout.LayoutParams(
+            viewport.addView(localControlsBackgroundView, new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.MATCH_PARENT
             ));
@@ -583,13 +759,19 @@ public final class DualScreenController implements DisplayManager.DisplayListene
     }
 
     private void ensureLocalTouchControlsOverlay(@Nullable MinecraftGLSurface externalSurface) {
-        if (localTouchControlsOverlay == null || localTouchControlsOverlay.getParent() != defaultRoot) {
+        ensureLocalControlsViewport();
+        DualScreenBottomViewportLayout viewport = localControlsViewport;
+        if (viewport == null) return;
+        // The active-surface callback runs before this method, so GameActivity's normal
+        // overlay has already been removed before the dedicated bottom overlay is created.
+        if (localTouchControlsOverlay == null || localTouchControlsOverlay.getParent() != viewport) {
             removeLocalTouchControlsOverlay();
             localTouchControlsOverlay = new TouchControlsOverlay(activity);
             localTouchControlsOverlay.setAppMenuListener(() -> launcherMenuCallback.run());
+            localTouchControlsOverlay.setDualScreenBottomHudHotbarMode(true);
             localTouchControlsOverlay.loadSelectedLayout();
             localTouchControlsOverlay.applyVirtualMouseLaunchSessionState();
-            defaultRoot.addView(localTouchControlsOverlay, new FrameLayout.LayoutParams(
+            viewport.addView(localTouchControlsOverlay, new FrameLayout.LayoutParams(
                     FrameLayout.LayoutParams.MATCH_PARENT,
                     FrameLayout.LayoutParams.MATCH_PARENT
             ));
@@ -599,44 +781,150 @@ public final class DualScreenController implements DisplayManager.DisplayListene
         localTouchControlsOverlay.setMinecraftOptionsFile(gameDir == null ? null : new File(gameDir, "options.txt"));
         localTouchControlsOverlay.setDualScreenBottomHudHotbarMode(true);
         localTouchControlsOverlay.setControlsVisible(ControlsPreferences.isTouchControlsEnabled(activity));
+        viewport.refreshViewport();
+    }
+
+
+    public void setBottomTouchControlsVisible(boolean visible) {
+        if (localTouchControlsOverlay != null) {
+            localTouchControlsOverlay.setControlsVisible(visible);
+            localTouchControlsOverlay.requestLayout();
+            localTouchControlsOverlay.invalidate();
+        }
+        DualScreenPresentation presentation = controlsPresentation;
+        if (presentation != null) presentation.setTouchControlsVisible(visible);
+    }
+
+    /**
+     * Recording must never change what the player sees on the live bottom display.
+     * The view-backed second-screen recorder now suppresses TouchControlsOverlay only inside
+     * its encoder draw pass, so this compatibility hook simply guarantees live alpha=1.
+     */
+    public void setBottomTouchControlsRecordingHidden(boolean hidden) {
+        if (localTouchControlsOverlay != null) {
+            localTouchControlsOverlay.setAlpha(1f);
+            localTouchControlsOverlay.requestLayout();
+            localTouchControlsOverlay.invalidate();
+        }
+        DualScreenPresentation presentation = controlsPresentation;
+        if (presentation != null) presentation.setTouchControlsRecordingHidden(false);
+    }
+
+    /**
+     * Returns the app-owned HUD/touch view used for optional second-screen recording.
+     * In normal layout this is the local device viewport. In swapped layout the same
+     * content lives inside the controls Presentation on the secondary display.
+     */
+    @Nullable
+    public View getControlsRecordingView() {
+        if (!ownsTouchControls()) return null;
+        if (localControlsViewport != null && localControlsViewport.isShown()) {
+            return localControlsViewport;
+        }
+        DualScreenPresentation presentation = controlsPresentation;
+        if (presentation != null && presentation.isShowing()) {
+            return presentation.getRecordingView();
+        }
+        return null;
+    }
+
+    public void reloadBottomTouchControlsLayout() {
+        if (localTouchControlsOverlay != null) {
+            localTouchControlsOverlay.loadSelectedLayout();
+            localTouchControlsOverlay.applyVirtualMouseLaunchSessionState();
+            localTouchControlsOverlay.setControlsVisible(ControlsPreferences.isTouchControlsEnabled(activity));
+            localTouchControlsOverlay.requestLayout();
+            localTouchControlsOverlay.invalidate();
+        }
+        DualScreenPresentation presentation = controlsPresentation;
+        if (presentation != null) presentation.reloadTouchControlsLayout();
     }
 
     private void removeLocalControlsView() {
         removeLocalTouchControlsOverlay();
         if (localControlsView != null) {
-            ViewGroup parent = (ViewGroup) localControlsView.getParent();
-            if (parent != null) {
-                parent.removeView(localControlsView);
-            }
+            ViewGroup parent = localControlsView.getParent() instanceof ViewGroup
+                    ? (ViewGroup) localControlsView.getParent() : null;
+            if (parent != null) parent.removeView(localControlsView);
             localControlsView = null;
         }
         removeLocalControlsBackground();
+        removeLocalControlsViewport();
     }
 
     private void removeLocalControlsBackground() {
         if (localControlsBackgroundView == null) return;
-        ViewGroup parent = (ViewGroup) localControlsBackgroundView.getParent();
-        if (parent != null) {
-            parent.removeView(localControlsBackgroundView);
-        }
+        ViewGroup parent = localControlsBackgroundView.getParent() instanceof ViewGroup
+                ? (ViewGroup) localControlsBackgroundView.getParent() : null;
+        if (parent != null) parent.removeView(localControlsBackgroundView);
         localControlsBackgroundView = null;
     }
 
     private void removeLocalTouchControlsOverlay() {
         if (localTouchControlsOverlay == null) return;
-        ViewGroup parent = (ViewGroup) localTouchControlsOverlay.getParent();
-        if (parent != null) {
-            parent.removeView(localTouchControlsOverlay);
-        }
+        ViewGroup parent = localTouchControlsOverlay.getParent() instanceof ViewGroup
+                ? (ViewGroup) localTouchControlsOverlay.getParent() : null;
+        if (parent != null) parent.removeView(localTouchControlsOverlay);
         localTouchControlsOverlay = null;
     }
 
+    private void removeLocalControlsViewport() {
+        if (localControlsViewport == null) return;
+        ViewGroup parent = localControlsViewport.getParent() instanceof ViewGroup
+                ? (ViewGroup) localControlsViewport.getParent() : null;
+        if (parent != null) parent.removeView(localControlsViewport);
+        localControlsViewport = null;
+    }
+
+
     private void hideDefaultSurface() {
+        // A shared 26.3 SDL3 surface is the live game view inside the Presentation;
+        // hiding it here would blank the external game display. Older backends still
+        // use a separate Presentation surface and keep the original behavior.
+        if (gamePresentation != null && gamePresentation.isUsingSharedMinecraftSurface()) {
+            defaultSurface.setVisibility(View.VISIBLE);
+            defaultSurface.setAlpha(1f);
+            return;
+        }
         defaultSurface.setAlpha(0f);
         defaultSurface.setVisibility(View.GONE);
     }
 
+    private void detachDefaultSurfaceForSharedPresentation() {
+        ViewGroup parent = defaultSurface.getParent() instanceof ViewGroup
+                ? (ViewGroup) defaultSurface.getParent() : null;
+        if (parent == null) return;
+
+        if (parent == defaultRoot) {
+            savedDefaultSurfaceIndex = parent.indexOfChild(defaultSurface);
+            savedDefaultSurfaceLayoutParams = defaultSurface.getLayoutParams();
+        }
+        parent.removeView(defaultSurface);
+        defaultSurface.setVisibility(View.VISIBLE);
+        defaultSurface.setAlpha(1f);
+        Logging.i(TAG, "26.3 SDL3: detached shared Minecraft surface for Presentation transfer");
+    }
+
     private void restoreDefaultSurface() {
+        ViewGroup parent = defaultSurface.getParent() instanceof ViewGroup
+                ? (ViewGroup) defaultSurface.getParent() : null;
+        if (parent != defaultRoot) {
+            if (parent != null) parent.removeView(defaultSurface);
+
+            ViewGroup.LayoutParams params = savedDefaultSurfaceLayoutParams;
+            if (params == null) {
+                params = new FrameLayout.LayoutParams(
+                        FrameLayout.LayoutParams.MATCH_PARENT,
+                        FrameLayout.LayoutParams.MATCH_PARENT
+                );
+            }
+            int childCount = defaultRoot.getChildCount();
+            int index = savedDefaultSurfaceIndex < 0
+                    ? 0
+                    : Math.min(savedDefaultSurfaceIndex, childCount);
+            defaultRoot.addView(defaultSurface, index, params);
+            Logging.i(TAG, "26.3 SDL3: restored shared Minecraft surface to Activity root");
+        }
         defaultSurface.setVisibility(View.VISIBLE);
         defaultSurface.setAlpha(1f);
     }
@@ -697,10 +985,10 @@ public final class DualScreenController implements DisplayManager.DisplayListene
         screensSwapped = false;
         writeControlState(false);
 
-        // Rebind the GLFW/Android window before dismissing the dead Presentation. For
-        // Mojang's 26.x Vulkan backend this minimizes the window during the handoff so
-        // acquireNextTexture cannot keep rendering against the removed ANativeWindow.
-        activeSurfaceListener.onActiveSurfaceChanged(defaultSurface, gameAlreadyRunning);
+        // Rebind the active Android window before dismissing the dead Presentation.
+        // On 26.3 SDL3 this is the same retained TextureView/ANativeWindow object, so
+        // the ownership callback updates overlays without starting a second surface.
+        notifyBottomControlsOwnership(defaultSurface, gameAlreadyRunning);
         defaultSurface.post(() -> {
             defaultSurface.reattachBridgeWindow();
             defaultSurface.postDelayed(() -> {

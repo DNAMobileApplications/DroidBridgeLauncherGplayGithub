@@ -28,6 +28,8 @@ public final class DroidBridgeSDL3NativeWindowBridge {
     }
 
     private static native boolean nativeInstallSdl3NativeWindowHook();
+    private static native boolean nativePublishArtSdl3Handle();
+    private static native boolean nativeStartArtSdlDispatcher();
     private static native boolean nativePublishSurface(Surface surface);
     private static native void nativeClearSurface();
     private static native boolean nativeHasPublishedWindow();
@@ -65,6 +67,44 @@ public final class DroidBridgeSDL3NativeWindowBridge {
                 }
             }
             return libraryLoaded;
+        }
+    }
+
+    /**
+     * Publishes the ART/JNI-initialized SDL3 handle for reuse by embedded OpenJDK.
+     *
+     * Android 10 is stricter about loading the same JNI library into multiple
+     * linker namespaces. Reusing this handle keeps SDL's Android JavaVM/JNIEnv
+     * state attached to the same native image that Minecraft later calls.
+     */
+    public static boolean publishArtSdl3Handle() {
+        if (!ensureLibraryLoaded()) return false;
+        try {
+            boolean published = nativePublishArtSdl3Handle();
+            append("DroidBridgeSDL3NativeWindow: ART SDL3 handle published=" + published);
+            return published;
+        } catch (Throwable throwable) {
+            append("DroidBridgeSDL3NativeWindow: ART SDL3 handle publish failed: "
+                    + throwable);
+            return false;
+        }
+    }
+
+    /**
+     * Starts a native SDL dispatcher thread that is attached to Android's ART VM.
+     * Android 10 cannot attach Minecraft's embedded-OpenJDK render thread to ART,
+     * so JNI-sensitive SDL entry points are synchronously executed by this worker.
+     */
+    public static boolean startArtSdlDispatcher() {
+        if (!ensureLibraryLoaded()) return false;
+        try {
+            boolean started = nativeStartArtSdlDispatcher();
+            append("DroidBridgeSDL3NativeWindow: ART SDL dispatcher started=" + started);
+            return started;
+        } catch (Throwable throwable) {
+            append("DroidBridgeSDL3NativeWindow: ART SDL dispatcher start failed: "
+                    + throwable);
+            return false;
         }
     }
 

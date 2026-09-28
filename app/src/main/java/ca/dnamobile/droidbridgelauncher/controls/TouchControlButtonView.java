@@ -14,12 +14,18 @@ package ca.dnamobile.droidbridgelauncher.controls;
 
 import android.annotation.SuppressLint;
 import android.content.Context;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.RectF;
 import android.graphics.drawable.GradientDrawable;
+import android.net.Uri;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.MotionEvent;
@@ -28,6 +34,9 @@ import android.view.ViewParent;
 import android.widget.TextView;
 
 import androidx.annotation.NonNull;
+import androidx.annotation.Nullable;
+
+import java.io.InputStream;
 
 import org.lwjgl.glfw.CallbackBridge;
 
@@ -58,6 +67,7 @@ final class TouchControlButtonView extends TextView {
         void onToggleControlsRequested();
         void onVirtualMouseToggleRequested();
         void onKeySenderKeyboardRequested();
+        void onDrawerToggleRequested(@NonNull TouchControlButtonView view, @NonNull TouchControlData data);
     }
 
     private static final String TAG = "TouchButton";
@@ -66,7 +76,6 @@ final class TouchControlButtonView extends TextView {
     private static final int GLFW_KEY_A = 65;
     private static final int GLFW_KEY_S = 83;
     private static final int GLFW_KEY_D = 68;
-    private static final int GLFW_KEY_LEFT_CONTROL = 341;
     private static final int GLFW_KEY_T = 84;
     private static final int GLFW_KEY_SLASH = 47;
 
@@ -74,7 +83,7 @@ final class TouchControlButtonView extends TextView {
     private static final int GLFW_MOUSE_BUTTON_RIGHT = 1;
     private static final int GLFW_MOUSE_BUTTON_MIDDLE = 2;
 
-    private static final float GAME_PRESS_FEEDBACK_ALPHA = 0.50f;
+    private static final float GAME_PRESS_FEEDBACK_ALPHA = 0.60f;
 
     private final TouchControlData data;
     private final Listener listener;
@@ -88,6 +97,10 @@ final class TouchControlButtonView extends TextView {
     private final Paint joystickGuidePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint resizeHandlePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
     private final Paint resizeHandleStrokePaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+    private final Paint imagePaint = new Paint(Paint.ANTI_ALIAS_FLAG | Paint.FILTER_BITMAP_FLAG);
+    private final Path imageClipPath = new Path();
+    @Nullable private Bitmap controlImageBitmap;
+    @Nullable private String loadedImageUri;
 
     private boolean editMode;
     private boolean editSelected;
@@ -107,7 +120,11 @@ final class TouchControlButtonView extends TextView {
     private float resizeStartHeight;
     private Runnable editLongPressRunnable;
 
-    private boolean joystickForwardLockDown;
+    private static final long JOYSTICK_FORWARD_DOUBLE_TAP_MS = 350L;
+
+    private boolean joystickForwardLocked;
+    private boolean joystickForwardGestureHandled;
+    private long joystickLastForwardPressUptimeMs;
     private boolean joystickWDown;
     private boolean joystickADown;
     private boolean joystickSDown;
@@ -129,7 +146,7 @@ final class TouchControlButtonView extends TextView {
         setIncludeFontPadding(false);
         setSingleLine(false);
         setAllCaps(false);
-        setText(data.label == null ? "" : data.label);
+        updateDisplayedLabel();
         setBackground(makeBackground(false));
         setAlpha(resolvedDisplayAlpha());
         setLongClickable(true);
@@ -156,10 +173,20 @@ final class TouchControlButtonView extends TextView {
     }
 
     void refreshVisualState() {
-        setText(data.label == null ? "" : data.label);
+        updateDisplayedLabel();
+        if (!sameNullableString(loadedImageUri, data.imageUri)) {
+            releaseControlImage();
+        }
+        setupJoystickPaints();
         setBackground(makeBackground(editMode));
         updateInteractionAlpha();
         invalidate();
+    }
+
+    private void updateDisplayedLabel() {
+        boolean imageOnly = hasControlImageConfigured()
+                && TouchControlData.IMAGE_MODE_REPLACE.equals(TouchControlData.normalizeImageMode(data.imageMode));
+        setText(imageOnly ? "" : (data.label == null ? "" : data.label));
     }
 
     @NonNull
@@ -222,13 +249,14 @@ final class TouchControlButtonView extends TextView {
     private void updateInteractionAlpha() {
         float displayAlpha = resolvedDisplayAlpha();
         if (!editMode && touchFeedbackActive) {
-            // A hidden control must stay fully invisible even while pressed. The old
-            // fixed 50% press feedback made 0% opacity buttons flash on-screen.
-            if (displayAlpha <= 0.001f) {
-                setAlpha(0f);
-            } else {
-                setAlpha(Math.max(displayAlpha, GAME_PRESS_FEEDBACK_ALPHA));
-            }
+            // Press feedback must make the control visibly dimmer than its normal
+            // state. Using max(displayAlpha, feedbackAlpha) made an opaque control
+            // remain at 100%, so presses were invisible. Multiply the resolved
+            // local/global opacity instead so every visible control changes while
+            // held, while a deliberately hidden control remains hidden.
+            setAlpha(displayAlpha <= 0.001f
+                    ? 0f
+                    : displayAlpha * GAME_PRESS_FEEDBACK_ALPHA);
             return;
         }
         setAlpha(displayAlpha);
@@ -237,20 +265,25 @@ final class TouchControlButtonView extends TextView {
     private void setTouchFeedbackActive(boolean active) {
         if (touchFeedbackActive == active) return;
         touchFeedbackActive = active;
+        // Keep Android's drawable pressed state in sync as well. This matters for
+        // any imported/custom drawable that reacts to state_pressed in addition to
+        // DroidBridge's explicit alpha feedback.
+        if (!editMode) setPressed(active);
         updateInteractionAlpha();
+        invalidate();
     }
 
     private void setupJoystickPaints() {
-        joystickBasePaint.setColor(0x33000000);
+        joystickBasePaint.setColor(data.backgroundColor);
         joystickBasePaint.setStyle(Paint.Style.FILL);
-        joystickStrokePaint.setColor(0xAAFFFFFF);
+        joystickStrokePaint.setColor(data.strokeColor);
         joystickStrokePaint.setStyle(Paint.Style.STROKE);
-        joystickStrokePaint.setStrokeWidth(2f * visualUnitScale());
-        joystickKnobPaint.setColor(0x99FFFFFF);
+        joystickStrokePaint.setStrokeWidth(Math.max(1f, Math.max(0f, data.strokeWidth) * visualUnitScale()));
+        joystickKnobPaint.setColor(data.strokeColor);
         joystickKnobPaint.setStyle(Paint.Style.FILL);
-        joystickGuidePaint.setColor(0x66FFFFFF);
+        joystickGuidePaint.setColor(withAlphaFraction(data.strokeColor, 0.45f));
         joystickGuidePaint.setStyle(Paint.Style.STROKE);
-        joystickGuidePaint.setStrokeWidth(1.25f * visualUnitScale());
+        joystickGuidePaint.setStrokeWidth(Math.max(1f, 1.25f * visualUnitScale()));
     }
 
     private void setupResizeHandlePaints() {
@@ -271,16 +304,25 @@ final class TouchControlButtonView extends TextView {
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         super.onSizeChanged(w, h, oldw, oldh);
         if (TouchControlActions.JOYSTICK.equals(data.action) && !pressedState) {
-            joystickKnobX = w / 2f;
-            joystickKnobY = h / 2f;
+            if (joystickForwardLocked) {
+                positionJoystickKnobAtForwardLock();
+            } else {
+                joystickKnobX = w / 2f;
+                joystickKnobY = h / 2f;
+            }
         }
         updateResponsiveTextSize();
     }
 
     @Override
     protected void onDraw(@NonNull Canvas canvas) {
-        if (TouchControlActions.JOYSTICK.equals(data.action)) drawJoystick(canvas);
-        super.onDraw(canvas);
+        if (TouchControlActions.JOYSTICK.equals(data.action)) {
+            drawJoystick(canvas);
+            super.onDraw(canvas);
+        } else {
+            drawControlImage(canvas);
+            super.onDraw(canvas);
+        }
         if (editMode && editSelected) drawResizeHandle(canvas);
     }
 
@@ -289,16 +331,24 @@ final class TouchControlButtonView extends TextView {
         float height = Math.max(1f, getHeight());
         float centerX = width / 2f;
         float centerY = height / 2f;
-        float outerRadius = Math.min(width, height) * 0.48f;
+        float outerRadius = joystickOuterRadius();
         float guideRadius = Math.min(width, height) * 0.28f;
-        float knobRadius = Math.max(10f * getResources().getDisplayMetrics().density, Math.min(width, height) * 0.18f);
-        canvas.drawCircle(centerX, centerY, outerRadius, joystickBasePaint);
-        canvas.drawCircle(centerX, centerY, outerRadius, joystickStrokePaint);
+        float knobRadius = joystickKnobRadius();
+        boolean imageOnly = hasControlImageConfigured()
+                && TouchControlData.IMAGE_MODE_REPLACE.equals(TouchControlData.normalizeImageMode(data.imageMode));
+        if (!imageOnly) {
+            canvas.drawCircle(centerX, centerY, outerRadius, joystickBasePaint);
+            if (data.strokeWidth > 0f) canvas.drawCircle(centerX, centerY, outerRadius, joystickStrokePaint);
+        }
+        drawControlImage(canvas);
         canvas.drawCircle(centerX, centerY, guideRadius, joystickGuidePaint);
         float knobX = joystickKnobX > 0f ? joystickKnobX : centerX;
         float knobY = joystickKnobY > 0f ? joystickKnobY : centerY;
-        canvas.drawCircle(knobX, knobY, knobRadius, joystickKnobPaint);
-        canvas.drawCircle(knobX, knobY, knobRadius, joystickStrokePaint);
+        float[] safeKnob = clampPointToJoystickCircle(knobX, knobY);
+        canvas.drawCircle(safeKnob[0], safeKnob[1], knobRadius, joystickKnobPaint);
+        if (data.strokeWidth > 0f) {
+            canvas.drawCircle(safeKnob[0], safeKnob[1], knobRadius, joystickStrokePaint);
+        }
     }
 
     private void drawResizeHandle(@NonNull Canvas canvas) {
@@ -523,6 +573,12 @@ final class TouchControlButtonView extends TextView {
                     clearTouchFeedbackSoon();
                     return true;
                 }
+                if (TouchControlActions.DRAWER.equals(data.action)) {
+                    listener.onDrawerToggleRequested(this, data);
+                    performClick();
+                    clearTouchFeedbackSoon();
+                    return true;
+                }
                 if (data.toggle) {
                     pressedState = !pressedState;
                     send(pressedState);
@@ -552,20 +608,37 @@ final class TouchControlButtonView extends TextView {
             case MotionEvent.ACTION_DOWN:
                 setTouchFeedbackActive(true);
                 pressedState = true;
+                joystickForwardGestureHandled = false;
                 setActivated(true);
-                joystickCenterX = data.joystickAbsolute ? event.getX() : getWidth() / 2f;
-                joystickCenterY = data.joystickAbsolute ? event.getY() : getHeight() / 2f;
-                updateJoystick(event.getX(), event.getY());
+                if (data.joystickAbsolute) {
+                    float[] clampedCenter = clampPointToJoystickCircle(event.getX(), event.getY());
+                    joystickCenterX = clampedCenter[0];
+                    joystickCenterY = clampedCenter[1];
+                    // Starting in a square corner outside the visible joystick no longer
+                    // puts half of the knob outside the view or generates an instant direction.
+                    updateJoystick(joystickCenterX, joystickCenterY);
+                } else {
+                    joystickCenterX = getWidth() / 2f;
+                    joystickCenterY = getHeight() / 2f;
+                    updateJoystick(event.getX(), event.getY());
+                }
                 return true;
             case MotionEvent.ACTION_MOVE:
                 updateJoystick(event.getX(), event.getY());
                 return true;
             case MotionEvent.ACTION_CANCEL:
-            case MotionEvent.ACTION_UP:
+                // A cancelled Android gesture must never leave movement latched.
+                // Hard-release here so focus/window changes cannot create a stuck W key.
                 releaseJoystick();
                 setTouchFeedbackActive(false);
                 pressedState = false;
                 setActivated(false);
+                return true;
+            case MotionEvent.ACTION_UP:
+                finishJoystickGesture();
+                setTouchFeedbackActive(false);
+                pressedState = false;
+                setActivated(joystickForwardLocked);
                 performClick();
                 return true;
             default:
@@ -576,25 +649,96 @@ final class TouchControlButtonView extends TextView {
     private void updateJoystick(float x, float y) {
         float dx = x - joystickCenterX;
         float dy = y - joystickCenterY;
-        float size = Math.max(1f, Math.min(getWidth(), getHeight()));
-        float maxKnobTravel = Math.max(1f, size * 0.43f);
+        float maxKnobTravel = joystickSafeTravelRadius();
         float distance = (float) Math.sqrt(dx * dx + dy * dy);
         float unitX = distance > 0f ? dx / distance : 0f;
         float unitY = distance > 0f ? dy / distance : 0f;
         float knobDistance = Math.min(distance, maxKnobTravel);
         float clampedDx = unitX * knobDistance;
         float clampedDy = unitY * knobDistance;
-        joystickKnobX = joystickCenterX + clampedDx;
-        joystickKnobY = joystickCenterY + clampedDy;
+        float[] safeKnob = clampPointToJoystickCircle(
+                joystickCenterX + clampedDx,
+                joystickCenterY + clampedDy
+        );
+        joystickKnobX = safeKnob[0];
+        joystickKnobY = safeKnob[1];
         invalidate();
         float configuredDeadzone = TouchControlData.clampJoystickDeadzonePercent(data.joystickDeadzonePercent) / 100f;
         float deadzone = Math.max(touchSlop, maxKnobTravel * configuredDeadzone);
-        setJoystickKeyStates(clampedDy < -deadzone, clampedDx < -deadzone, clampedDy > deadzone, clampedDx > deadzone);
-        boolean shouldForwardLock = data.joystickForwardLock && clampedDy < -deadzone && distance > (maxKnobTravel * 0.88f);
-        if (shouldForwardLock != joystickForwardLockDown) {
-            joystickForwardLockDown = shouldForwardLock;
-            sendKey(GLFW_KEY_LEFT_CONTROL, shouldForwardLock);
+        boolean wDown = clampedDy < -deadzone;
+        boolean aDown = clampedDx < -deadzone;
+        boolean sDown = clampedDy > deadzone;
+        boolean dDown = clampedDx > deadzone;
+
+        boolean forwardPress = data.joystickForwardLock
+                && wDown
+                && (-clampedDy >= Math.abs(clampedDx));
+        if (forwardPress && !joystickForwardGestureHandled) {
+            joystickForwardGestureHandled = true;
+
+            if (joystickForwardLocked) {
+                // Once running is latched, one deliberate forward press releases it.
+                // Keep W physically down for this gesture; ACTION_UP will release it.
+                joystickForwardLocked = false;
+                joystickLastForwardPressUptimeMs = 0L;
+            } else {
+                long now = SystemClock.uptimeMillis();
+                long sinceLastForward = now - joystickLastForwardPressUptimeMs;
+                boolean doubleTap = joystickLastForwardPressUptimeMs > 0L
+                        && sinceLastForward > 0L
+                        && sinceLastForward <= JOYSTICK_FORWARD_DOUBLE_TAP_MS;
+
+                if (doubleTap) {
+                    // First tap is a normal W press/release. The second tap arrives
+                    // inside Minecraft's sprint-style double-tap window, and this
+                    // latch keeps that second W press held after the finger lifts.
+                    // This gives Minecraft the required tap-release-tap pattern and
+                    // leaves the player running instead of locking into a walk.
+                    joystickForwardLocked = true;
+                    joystickLastForwardPressUptimeMs = 0L;
+                } else {
+                    // A single forward press must remain completely normal. It only
+                    // arms the short double-tap window; it does not latch movement.
+                    joystickLastForwardPressUptimeMs = now;
+                }
+            }
         }
+
+        // While latched, W stays down after the second forward press. A later forward
+        // gesture clears the latch above but still keeps W down until that touch ends.
+        setJoystickKeyStates(wDown || joystickForwardLocked, aDown, sDown, dDown);
+    }
+
+    private float joystickOuterRadius() {
+        return Math.max(1f, Math.min(getWidth(), getHeight()) * 0.48f);
+    }
+
+    private float joystickKnobRadius() {
+        float size = Math.max(1f, Math.min(getWidth(), getHeight()));
+        float desired = Math.max(10f * visualUnitScale(), size * 0.18f);
+        float halfStroke = Math.max(0f, joystickStrokePaint.getStrokeWidth() * 0.5f);
+        float maximum = Math.max(1f, joystickOuterRadius() - halfStroke - 1f);
+        return Math.min(desired, maximum);
+    }
+
+    private float joystickSafeTravelRadius() {
+        float halfStroke = Math.max(0.5f, joystickStrokePaint.getStrokeWidth() * 0.5f);
+        return Math.max(1f, joystickOuterRadius() - joystickKnobRadius() - halfStroke);
+    }
+
+    @NonNull
+    private float[] clampPointToJoystickCircle(float x, float y) {
+        float centerX = getWidth() / 2f;
+        float centerY = getHeight() / 2f;
+        float dx = x - centerX;
+        float dy = y - centerY;
+        float distance = (float) Math.sqrt((dx * dx) + (dy * dy));
+        float maxDistance = joystickSafeTravelRadius();
+        if (distance <= maxDistance || distance <= 0.0001f) {
+            return new float[]{x, y};
+        }
+        float scale = maxDistance / distance;
+        return new float[]{centerX + (dx * scale), centerY + (dy * scale)};
     }
 
     private void setJoystickKeyStates(boolean wDown, boolean aDown, boolean sDown, boolean dDown) {
@@ -604,13 +748,33 @@ final class TouchControlButtonView extends TextView {
         if (joystickDDown != dDown) { joystickDDown = dDown; sendKey(GLFW_KEY_D, dDown); }
     }
 
-    private void releaseJoystick() {
+    private void finishJoystickGesture() {
+        joystickForwardGestureHandled = false;
+        if (joystickForwardLocked && data.joystickForwardLock) {
+            // Keep forward held and leave the knob visibly parked at the top so the
+            // control matches the input state after the user's finger is lifted.
+            setJoystickKeyStates(true, false, false, false);
+            positionJoystickKnobAtForwardLock();
+            return;
+        }
+        joystickForwardLocked = false;
         setJoystickKeyStates(false, false, false, false);
         resetJoystickKnob();
-        if (joystickForwardLockDown) {
-            joystickForwardLockDown = false;
-            sendKey(GLFW_KEY_LEFT_CONTROL, false);
-        }
+    }
+
+    private void positionJoystickKnobAtForwardLock() {
+        joystickKnobX = getWidth() / 2f;
+        joystickKnobY = (getHeight() / 2f) - joystickSafeTravelRadius();
+        invalidate();
+    }
+
+    /** Hard release used for cancellation, detaching, hiding controls, or rebuilding. */
+    private void releaseJoystick() {
+        joystickForwardLocked = false;
+        joystickForwardGestureHandled = false;
+        joystickLastForwardPressUptimeMs = 0L;
+        setJoystickKeyStates(false, false, false, false);
+        resetJoystickKnob();
     }
 
     void releaseInputState() {
@@ -726,23 +890,137 @@ final class TouchControlButtonView extends TextView {
         GradientDrawable drawable = new GradientDrawable();
         boolean joystick = TouchControlActions.JOYSTICK.equals(data.action);
         drawable.setShape(joystick ? GradientDrawable.OVAL : GradientDrawable.RECTANGLE);
-        drawable.setColor(editing ? 0x663F51B5 : data.backgroundColor);
+        boolean imageOnly = hasControlImageConfigured()
+                && TouchControlData.IMAGE_MODE_REPLACE.equals(TouchControlData.normalizeImageMode(data.imageMode));
+
+        /*
+         * The editor must render the same colours as gameplay. The old edit-mode
+         * preview replaced every normal button with a purple fill and white border,
+         * which made colour-wheel changes look broken even though the model value had
+         * changed. Keep the real fill/stroke visible in edit mode; selection is already
+         * communicated by the resize handle and editor panel.
+         */
+        drawable.setColor(joystick || imageOnly ? Color.TRANSPARENT : data.backgroundColor);
         float unitScale = visualUnitScale();
-        int editingStroke = editing ? Math.max(2, Math.round(1.5f * unitScale)) : 0;
-        int strokePx = Math.max(
-                editingStroke,
-                Math.round(Math.max(0f, data.strokeWidth) * unitScale)
+        int strokePx = joystick || imageOnly ? 0 : Math.round(
+                Math.max(0f, data.strokeWidth) * unitScale
         );
-        int strokeColor = editing ? 0xFFFFFFFF : data.strokeColor;
-        if (strokePx > 0) drawable.setStroke(strokePx, strokeColor);
+        if (strokePx > 0) drawable.setStroke(strokePx, data.strokeColor);
         float radius = joystick ? 9999f : Math.max(0f, data.cornerRadius) * unitScale;
         drawable.setCornerRadius(radius);
         return drawable;
     }
 
+    private boolean hasControlImageConfigured() {
+        return data.imageUri != null && !data.imageUri.trim().isEmpty();
+    }
+
+    private void drawControlImage(@NonNull Canvas canvas) {
+        Bitmap bitmap = ensureControlImageLoaded();
+        if (bitmap == null || bitmap.isRecycled()) return;
+
+        float viewWidth = Math.max(1f, getWidth());
+        float viewHeight = Math.max(1f, getHeight());
+        boolean imageOnly = TouchControlData.IMAGE_MODE_REPLACE.equals(
+                TouchControlData.normalizeImageMode(data.imageMode));
+        float strokeInset = imageOnly ? 0f : Math.max(0f, data.strokeWidth * visualUnitScale());
+        RectF clip = new RectF(
+                strokeInset,
+                strokeInset,
+                Math.max(strokeInset + 1f, viewWidth - strokeInset),
+                Math.max(strokeInset + 1f, viewHeight - strokeInset)
+        );
+
+        float bitmapWidth = Math.max(1f, bitmap.getWidth());
+        float bitmapHeight = Math.max(1f, bitmap.getHeight());
+        float fitScale = Math.min(clip.width() / bitmapWidth, clip.height() / bitmapHeight);
+        float userScale = TouchControlData.clampImageScalePercent(data.imageScalePercent) / 100f;
+        float drawWidth = bitmapWidth * fitScale * userScale;
+        float drawHeight = bitmapHeight * fitScale * userScale;
+        float offsetX = (TouchControlData.clampImageOffsetPercent(data.imageOffsetXPercent) / 100f) * clip.width();
+        float offsetY = (TouchControlData.clampImageOffsetPercent(data.imageOffsetYPercent) / 100f) * clip.height();
+        float centerX = clip.centerX() + offsetX;
+        float centerY = clip.centerY() + offsetY;
+        RectF destination = new RectF(
+                centerX - (drawWidth / 2f),
+                centerY - (drawHeight / 2f),
+                centerX + (drawWidth / 2f),
+                centerY + (drawHeight / 2f)
+        );
+
+        int save = canvas.save();
+        imageClipPath.reset();
+        if (TouchControlActions.JOYSTICK.equals(data.action)) {
+            imageClipPath.addOval(clip, Path.Direction.CW);
+        } else {
+            float radius = Math.max(0f, data.cornerRadius) * visualUnitScale();
+            imageClipPath.addRoundRect(clip, radius, radius, Path.Direction.CW);
+        }
+        canvas.clipPath(imageClipPath);
+        canvas.drawBitmap(bitmap, null, destination, imagePaint);
+        canvas.restoreToCount(save);
+    }
+
+    @Nullable
+    private Bitmap ensureControlImageLoaded() {
+        String uriText = data.imageUri == null ? null : data.imageUri.trim();
+        if (uriText == null || uriText.isEmpty()) {
+            releaseControlImage();
+            return null;
+        }
+        if (controlImageBitmap != null && !controlImageBitmap.isRecycled()
+                && uriText.equals(loadedImageUri)) {
+            return controlImageBitmap;
+        }
+
+        releaseControlImage();
+        loadedImageUri = uriText;
+        try {
+            Uri uri = Uri.parse(uriText);
+            BitmapFactory.Options bounds = new BitmapFactory.Options();
+            bounds.inJustDecodeBounds = true;
+            try (InputStream input = getContext().getContentResolver().openInputStream(uri)) {
+                if (input != null) BitmapFactory.decodeStream(input, null, bounds);
+            }
+            int maxDimension = Math.max(bounds.outWidth, bounds.outHeight);
+            int sample = 1;
+            while (maxDimension / sample > 1024) sample *= 2;
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inSampleSize = Math.max(1, sample);
+            options.inPreferredConfig = Bitmap.Config.ARGB_8888;
+            try (InputStream input = getContext().getContentResolver().openInputStream(uri)) {
+                if (input != null) controlImageBitmap = BitmapFactory.decodeStream(input, null, options);
+            }
+        } catch (Throwable throwable) {
+            Logging.e(TAG, "Unable to load custom touch-control image " + uriText, throwable);
+            controlImageBitmap = null;
+        }
+        return controlImageBitmap;
+    }
+
+    private void releaseControlImage() {
+        if (controlImageBitmap != null && !controlImageBitmap.isRecycled()) {
+            controlImageBitmap.recycle();
+        }
+        controlImageBitmap = null;
+        loadedImageUri = null;
+    }
+
+    private static boolean sameNullableString(@Nullable String a, @Nullable String b) {
+        if (a == b) return true;
+        return a != null && a.equals(b);
+    }
+
+    private static int withAlphaFraction(int color, float fraction) {
+        int alpha = Math.round(Color.alpha(color) * Math.max(0f, Math.min(1f, fraction)));
+        return Color.argb(alpha, Color.red(color), Color.green(color), Color.blue(color));
+    }
+
+
     @Override
     protected void onDetachedFromWindow() {
         releaseInputState();
+        releaseControlImage();
         super.onDetachedFromWindow();
     }
 }

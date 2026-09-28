@@ -158,32 +158,40 @@ public final class ControllerModCompat {
             return plan;
         }
 
+        final boolean legacy4JPresent = hasMod(gameDirectory, "legacy4j", "legacy-4j", "legacy");
         File sharedStateFile = getGlfwGamepadStateFile(context);
         String sharedStateArg = "-Ddroidbridge.glfw.gamepad.state=" + sharedStateFile.getAbsolutePath();
 
         List<String> current = plan.getJvmArgs();
-        for (String arg : current) {
-            if (sharedStateArg.equals(arg)) {
-                append("GLFW gamepad shared-state JVM arg already active: " + sharedStateFile.getAbsolutePath());
-                return plan;
-            }
-            if (arg != null && arg.startsWith("-Ddroidbridge.glfw.gamepad.state=")) {
-                ArrayList<String> replaced = new ArrayList<>(current);
-                for (int i = 0; i < replaced.size(); i++) {
-                    String value = replaced.get(i);
-                    if (value != null && value.startsWith("-Ddroidbridge.glfw.gamepad.state=")) {
-                        replaced.set(i, sharedStateArg);
-                    }
-                }
+        ArrayList<String> patched = new ArrayList<>(current.size() + 2);
+        patched.addAll(current);
+
+        boolean foundSharedState = false;
+        for (int i = 0; i < patched.size(); i++) {
+            String value = patched.get(i);
+            if (value == null || !value.startsWith("-Ddroidbridge.glfw.gamepad.state=")) continue;
+            foundSharedState = true;
+            if (!sharedStateArg.equals(value)) {
+                patched.set(i, sharedStateArg);
                 append("GLFW gamepad shared-state JVM arg updated: " + sharedStateFile.getAbsolutePath());
-                return plan.copyWithJvmArgs(replaced);
+            } else {
+                append("GLFW gamepad shared-state JVM arg already active: " + sharedStateFile.getAbsolutePath());
             }
         }
 
-        ArrayList<String> patched = new ArrayList<>(current.size() + 1);
-        patched.add(sharedStateArg);
-        patched.addAll(current);
-        append("GLFW gamepad shared-state JVM arg active: " + sharedStateFile.getAbsolutePath());
+        if (!foundSharedState) {
+            patched.add(0, sharedStateArg);
+            append("GLFW gamepad shared-state JVM arg active: " + sharedStateFile.getAbsolutePath());
+        }
+
+        if (legacy4JPresent) {
+            if (Legacy4JControllerCompatAgentInstaller.addJavaAgentArg(context, patched)) {
+                append("Legacy4J runtime controller compatibility agent active; mod jar is untouched");
+            } else {
+                append("Legacy4J runtime controller compatibility agent unavailable; keeping GLFW shared-state bridge active");
+            }
+        }
+
         return plan.copyWithJvmArgs(patched);
     }
 

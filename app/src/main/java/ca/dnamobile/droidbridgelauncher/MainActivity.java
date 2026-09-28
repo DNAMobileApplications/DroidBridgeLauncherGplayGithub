@@ -15,7 +15,6 @@ package ca.dnamobile.droidbridgelauncher;
 import android.annotation.SuppressLint;
 import android.content.ActivityNotFoundException;
 import android.content.Intent;
-import android.content.pm.ActivityInfo;
 import android.content.res.ColorStateList;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
@@ -51,6 +50,7 @@ import androidx.appcompat.app.AppCompatActivity;
 import androidx.recyclerview.widget.GridLayoutManager;
 
 import com.google.android.material.button.MaterialButton;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 import com.google.android.material.tabs.TabLayout;
 
 import java.io.File;
@@ -72,6 +72,7 @@ import ca.dnamobile.droidbridgelauncher.instance.LauncherInstance;
 import ca.dnamobile.droidbridgelauncher.instance.LauncherInstanceManager;
 import ca.dnamobile.droidbridgelauncher.instance.LauncherInstanceDeleteManager;
 import ca.dnamobile.droidbridgelauncher.installation.InstallationForegroundService;
+import ca.dnamobile.droidbridgelauncher.installation.InstallSessionState;
 import ca.dnamobile.droidbridgelauncher.legal.LegalConsentStore;
 import ca.dnamobile.droidbridgelauncher.legal.LegalLinks;
 import ca.dnamobile.droidbridgelauncher.launcher.InstanceLaunchSettings;
@@ -138,47 +139,11 @@ public class MainActivity extends AppCompatActivity {
     @NonNull
     private String appliedLauncherTheme = LauncherPreferences.LAUNCHER_THEME_ORANGE;
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
-    private static final int MAIN_ORIENTATION_MAX_ATTEMPTS = 8;
-    private static final long MAIN_ORIENTATION_RETRY_DELAY_MS = 350L;
-    private int mainOrientationTarget = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED;
-    private int mainOrientationAttempt;
-    private final Runnable mainOrientationLockRunnable = new Runnable() {
-        @Override
-        public void run() {
-            if (isFinishing() || isDestroyed()) return;
-
-            int savedTarget = AppOrientationHelper.resolveLauncherRequestedOrientation(MainActivity.this);
-            if (savedTarget != mainOrientationTarget) {
-                applyMainActivityOrientationLock();
-                return;
-            }
-
-            if (savedTarget == ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR) {
-                if (getRequestedOrientation() != ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR) {
-                    setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR);
-                }
-                return;
-            }
-
-            if (isCurrentConfigurationCompatibleWith(savedTarget)) {
-                // PORTRAIT/LANDSCAPE gets the Activity into the requested physical rotation.
-                // LOCKED then prevents MainActivity from following later sensor changes.
-                if (getRequestedOrientation() != ActivityInfo.SCREEN_ORIENTATION_LOCKED) {
-                    setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LOCKED);
-                }
-                return;
-            }
-
-            if (getRequestedOrientation() != savedTarget) {
-                setRequestedOrientation(savedTarget);
-            }
-
-            mainOrientationAttempt++;
-            if (mainOrientationAttempt < MAIN_ORIENTATION_MAX_ATTEMPTS) {
-                mainHandler.postDelayed(this, MAIN_ORIENTATION_RETRY_DELAY_MS);
-            }
-        }
-    };
+    // Orientation is owned by Android's configuration system. MainActivity intentionally
+    // does not consume orientation/screenSize changes in the manifest, so rotating the
+    // device recreates the Activity and Android selects res/layout-port/activity_main.xml
+    // or res/layout-land/activity_main.xml before ActivityMainBinding is inflated.
+    private int mainOrientationTarget;
 
     private AlertDialog installDialog;
     private ProgressBar installDialogProgress;
@@ -195,6 +160,8 @@ public class MainActivity extends AppCompatActivity {
     private CheckBox installDialogForegroundCheck;
     private ActivityResultLauncher<String> notificationPermissionLauncher;
     private boolean installSessionActive;
+    private long installSessionGeneration = -1L;
+    private boolean uiLifecycleDestroyed;
     private boolean installPermissionPromptShownThisSession;
     private String activeInstallTitle = "Installing Minecraft";
     private String activeInstallMessage = "Preparing installation...";
@@ -228,8 +195,8 @@ public class MainActivity extends AppCompatActivity {
         mainOrientationTarget = AppOrientationHelper.resolveLauncherRequestedOrientation(this);
         setRequestedOrientation(mainOrientationTarget);
         super.onCreate(savedInstanceState);
+        uiLifecycleDestroyed = false;
         Logging.init(this);
-        applyMainActivityOrientationLock();
 
         appIntegrityBlocked = ControlsMain.blockIfInvalidSignature(this);
         if (appIntegrityBlocked) {
@@ -240,6 +207,9 @@ public class MainActivity extends AppCompatActivity {
         LauncherInstanceDeleteManager.cleanupPendingDeletesAsync(this);
         selectedFilter = sanitizeSavedFilter(LauncherPreferences.getSelectedInstanceFilter(this, FILTER_ALL));
 
+        // Do not choose a layout manually from WindowMetrics here. During an orientation
+        // transition WindowMetrics can still describe the previous window before the new
+        // decor view is attached. Let Android's resource qualifiers select the correct XML.
         binding = ActivityMainBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
         LauncherTheme.applyRainbowBackgroundIfNeeded(this);
@@ -272,7 +242,7 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onResume() {
         super.onResume();
-        applyMainActivityOrientationLock();
+        applySelectedMainOrientation();
 
         if (appIntegrityBlocked || binding == null) {
             return;
@@ -288,6 +258,7 @@ public class MainActivity extends AppCompatActivity {
         FullscreenUtils.enableImmersive(this);
         refreshAccountUiFromStore();
         refreshInstanceTabsForSettings();
+        reattachInstallSessionIfNeeded();
         if (!installSessionActive) {
             refreshInstancesAndRebind(true);
         }
@@ -296,70 +267,38 @@ public class MainActivity extends AppCompatActivity {
     @Override
     public void onConfigurationChanged(@NonNull Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
-        applyMainActivityOrientationLock();
+        // Orientation/screenSize are deliberately NOT listed in MainActivity's
+        // android:configChanges, so normal rotations recreate this Activity instead of
+        // reaching this method. Keep this only for configuration changes we do consume
+        // (for example uiMode/keyboard) and refresh the grid from the current resources.
         if (binding != null && binding.recyclerVersions.getLayoutManager() instanceof GridLayoutManager) {
-            ((GridLayoutManager) binding.recyclerVersions.getLayoutManager()).setSpanCount(getInstanceGridSpanCount());
+            ((GridLayoutManager) binding.recyclerVersions.getLayoutManager())
+                    .setSpanCount(getInstanceGridSpanCount());
         }
     }
 
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        if (appIntegrityBlocked || binding == null) {
-            return;
-        }
-        if (hasFocus) {
-            FullscreenUtils.enableImmersive(this);
-            int savedTarget = AppOrientationHelper.resolveLauncherRequestedOrientation(this);
-            if (savedTarget != ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
-                    && (getRequestedOrientation() != ActivityInfo.SCREEN_ORIENTATION_LOCKED
-                    || !isCurrentConfigurationCompatibleWith(savedTarget))) {
-                applyMainActivityOrientationLock();
-            }
-        }
+        if (appIntegrityBlocked || binding == null) return;
+        if (hasFocus) FullscreenUtils.enableImmersive(this);
     }
 
-    private void applyMainActivityOrientationLock() {
-        mainHandler.removeCallbacks(mainOrientationLockRunnable);
-        mainOrientationAttempt = 0;
-        mainOrientationTarget = AppOrientationHelper.resolveLauncherRequestedOrientation(this);
-
-        if (mainOrientationTarget == ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR) {
-            if (getRequestedOrientation() != ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR) {
-                setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR);
-            }
-            return;
-        }
-
-        if (getRequestedOrientation() != mainOrientationTarget) {
-            setRequestedOrientation(mainOrientationTarget);
-        }
-        // Give Android time to complete normal/reverse rotation before freezing it.
-        mainHandler.postDelayed(mainOrientationLockRunnable, MAIN_ORIENTATION_RETRY_DELAY_MS);
-    }
-
-    private boolean isCurrentConfigurationCompatibleWith(int requestedOrientation) {
-        int configurationOrientation = getResources().getConfiguration().orientation;
-        switch (requestedOrientation) {
-            case ActivityInfo.SCREEN_ORIENTATION_PORTRAIT:
-            case ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT:
-            case ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT:
-            case ActivityInfo.SCREEN_ORIENTATION_USER_PORTRAIT:
-                return configurationOrientation == Configuration.ORIENTATION_PORTRAIT;
-            case ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE:
-            case ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE:
-            case ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE:
-            case ActivityInfo.SCREEN_ORIENTATION_USER_LANDSCAPE:
-                return configurationOrientation == Configuration.ORIENTATION_LANDSCAPE;
-            default:
-                return true;
+    private void applySelectedMainOrientation() {
+        int target = AppOrientationHelper.resolveLauncherRequestedOrientation(this);
+        mainOrientationTarget = target;
+        if (getRequestedOrientation() != target) {
+            setRequestedOrientation(target);
         }
     }
 
     @Override
     protected void onDestroy() {
+        uiLifecycleDestroyed = true;
+        mainHandler.removeCallbacks(installSessionLifecycleRunnable);
+        dismissInstallDialog();
         if (installSessionActive) {
-            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+            clearInstallKeepScreenOnFlagSafely();
         }
         dismissLaunchPrepareDialog();
         if (authManager != null && !isChangingConfigurations()) {
@@ -379,46 +318,30 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        LinearLayout layout = new LinearLayout(this);
-        layout.setOrientation(LinearLayout.VERTICAL);
-        int padding = dp(22);
-        layout.setPadding(padding, 0, padding, 0);
-
-        TextView message = new TextView(this);
-        message.setText("Before using DroidBridge Launcher, you must accept that your use of Minecraft is subject to the Minecraft End User License Agreement (EULA) and Minecraft Usage Guidelines.\n\nYou do not have to read the EULA here before continuing, but the link is provided below for review. Press Accept to start using the launcher.");
-        message.setTextAppearance(android.R.style.TextAppearance_Material_Body1);
-        layout.addView(message, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-        ));
-
-        TextView eulaLink = new TextView(this);
-        eulaLink.setText("Open Minecraft EULA");
-        eulaLink.setTextAppearance(android.R.style.TextAppearance_Material_Medium);
-        eulaLink.setTextColor(0xFF1E88E5);
-        eulaLink.setPadding(0, dp(14), 0, 0);
-        eulaLink.setOnClickListener(view -> LegalLinks.open(this, LegalLinks.MINECRAFT_EULA_URL));
-        layout.addView(eulaLink, new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-        ));
-
-        AlertDialog dialog = new AlertDialog.Builder(this)
-                .setTitle("Minecraft EULA")
-                .setView(layout)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.eula_acceptance_title)
+                .setMessage(R.string.eula_acceptance_message)
                 .setCancelable(false)
-                .setPositiveButton("Accept", null)
+                .setNeutralButton(R.string.button_open_eula, null)
+                .setPositiveButton(R.string.button_accept_eula, null)
                 .create();
 
-        dialog.setOnShowListener(dialogInterface -> dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
-            LegalConsentStore.markCurrentTermsAccepted(this);
-            dialog.dismiss();
-            if (tryConsumePendingShortcutLaunch()) {
-                return;
-            }
-            maybeShowNotificationPermissionLaunchPrompt();
-            LauncherUpdateDialogs.checkOnStartup(this);
-        }));
+        dialog.setOnShowListener(dialogInterface -> {
+            // Opening the EULA is informational; keep this required acceptance
+            // dialog visible when the user returns to DroidBridge.
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL).setOnClickListener(view ->
+                    LegalLinks.open(this, LegalLinks.MINECRAFT_EULA_URL));
+
+            dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(view -> {
+                LegalConsentStore.markCurrentTermsAccepted(this);
+                dialog.dismiss();
+                if (tryConsumePendingShortcutLaunch()) {
+                    return;
+                }
+                maybeShowNotificationPermissionLaunchPrompt();
+                LauncherUpdateDialogs.checkOnStartup(this);
+            });
+        });
 
         dialog.show();
     }
@@ -535,7 +458,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void showSignOutConfirmationDialog() {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.sign_out_confirm_title)
                 .setMessage(R.string.sign_out_confirm_message)
                 .setNegativeButton(android.R.string.cancel, null)
@@ -663,7 +586,7 @@ public class MainActivity extends AppCompatActivity {
             LauncherLogManager.setKeepLogHistoryEnabled(this, isChecked);
             setStatus(getString(isChecked ? R.string.log_history_enabled : R.string.log_history_disabled));
         });
-        binding.buttonShareLatestLog.setOnClickListener(view -> LauncherLogManager.shareLatestLog(this));
+        binding.buttonShareLatestLog.setOnClickListener(view -> LauncherLogManager.shareLogs(this));
 
         binding.buttonLaunchVersion.setEnabled(false);
         binding.buttonOpenFolder.setEnabled(false);
@@ -997,7 +920,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private int getInstanceGridSpanCount() {
-        return getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE ? 2 : 1;
+        // Keep the list in lockstep with the same Configuration Android used to choose
+        // layout-port/layout-land. This avoids raw-pixel/density heuristics producing a
+        // landscape grid while the portrait XML is active (or vice versa).
+        return getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE
+                ? 2
+                : 1;
     }
 
     private void loadVersions(boolean showLoading) {
@@ -1437,7 +1365,7 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onComplete(@NonNull String message, @Nullable LauncherInstance instance) {
-                runOnUiThread(() -> {
+                runInstallCompletionOnUi(() -> {
                     setLoading(false);
                     finishInstallSession();
                     dismissInstallDialog();
@@ -1465,7 +1393,7 @@ public class MainActivity extends AppCompatActivity {
 
             @Override
             public void onError(@NonNull Throwable throwable) {
-                runOnUiThread(() -> {
+                runInstallCompletionOnUi(() -> {
                     setLoading(false);
                     finishInstallSession();
                     dismissInstallDialog();
@@ -1563,7 +1491,7 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(getString(R.string.storage_location_delete_title, location.getDisplayName()))
                 .setMessage(getString(R.string.storage_location_delete_message, location.getDisplayName()))
                 .setNegativeButton(android.R.string.cancel, (dialog, which) -> showStorageLocationsDialog())
@@ -1864,7 +1792,7 @@ public class MainActivity extends AppCompatActivity {
                     syncSelectedStorageMirrorToTree(progressListener);
 
                     final String sharedLaunchVersionId = launchVersionId;
-                    runOnUiThread(() -> {
+                    runInstallCompletionOnUi(() -> {
                         refreshInstancesAndRebind(false);
                         if (LauncherPreferences.isShowSharedInstalls(MainActivity.this)) {
                             selectedFilter = FILTER_SHARED;
@@ -1907,7 +1835,7 @@ public class MainActivity extends AppCompatActivity {
                 ensureModsDirectoryForLoader(request.loader, instance);
                 syncSelectedStorageMirrorToTree(progressListener);
 
-                runOnUiThread(() -> {
+                runInstallCompletionOnUi(() -> {
                     refreshInstancesAndRebind(false);
                     selectedFilter = FILTER_ALL;
                     selectTabByFilter(FILTER_ALL);
@@ -1924,7 +1852,7 @@ public class MainActivity extends AppCompatActivity {
                 });
             } catch (Throwable throwable) {
                 Logging.e("CreateInstance", "Unable to create launcher instance", throwable);
-                runOnUiThread(() -> {
+                runInstallCompletionOnUi(() -> {
                     setLoading(false);
                     finishInstallSession();
                     dismissInstallDialog();
@@ -2033,7 +1961,7 @@ public class MainActivity extends AppCompatActivity {
         if (!LauncherNotificationPermissionHelper.shouldShowLaunchPrompt(this)) return;
 
         LauncherNotificationPermissionHelper.markLaunchPromptShown(this);
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.notification_permission_launch_title)
                 .setMessage(R.string.notification_permission_launch_message)
                 .setNegativeButton(R.string.notification_permission_not_now, null)
@@ -2053,8 +1981,15 @@ public class MainActivity extends AppCompatActivity {
         activeInstallTitle = "Installing " + instanceName;
         activeInstallMessage = "Preparing installation...";
         activeInstallProgress = 0;
+        installSessionGeneration = InstallSessionState.begin(
+                instanceName,
+                activeInstallTitle,
+                activeInstallMessage
+        );
         resetInstallProgressThrottles();
-        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        if (!uiLifecycleDestroyed && !isFinishing() && !isDestroyed()) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
         startOrUpdateInstallForegroundService(true);
     }
 
@@ -2080,13 +2015,16 @@ public class MainActivity extends AppCompatActivity {
 
         activeInstallProgress = safeProgress;
         activeInstallMessage = safeMessage;
+        InstallSessionState.update(installSessionGeneration, safeProgress, safeMessage);
 
         if (!shouldDispatch) return;
 
         lastInstallUiDispatchMs = now;
         lastInstallUiDispatchProgress = safeProgress;
         lastInstallUiDispatchMessage = safeMessage;
-        mainHandler.post(() -> updateInstallProgress(safeProgress, safeMessage));
+        if (!uiLifecycleDestroyed) {
+            mainHandler.post(() -> updateInstallProgress(safeProgress, safeMessage));
+        }
     }
 
     private void updateInstallProgress(int progress, @NonNull String message) {
@@ -2145,14 +2083,108 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void finishInstallSession() {
+        boolean finishedCurrentSession = InstallSessionState.finish(installSessionGeneration);
         installSessionActive = false;
         installPermissionPromptShownThisSession = false;
-        getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
-        InstallationForegroundService.stop(this);
+        clearInstallKeepScreenOnFlagSafely();
+        if (finishedCurrentSession) {
+            InstallationForegroundService.stop(getApplicationContext());
+        }
         resetInstallProgressThrottles();
     }
 
+    private final Runnable installSessionLifecycleRunnable = this::pollInstallSessionLifecycle;
+
+    private void reattachInstallSessionIfNeeded() {
+        InstallSessionState.Snapshot snapshot = InstallSessionState.snapshot();
+        if (!snapshot.active || uiLifecycleDestroyed || binding == null) return;
+
+        installSessionActive = true;
+        installSessionGeneration = snapshot.generation;
+        activeInstallTitle = snapshot.title;
+        activeInstallMessage = snapshot.message;
+        activeInstallProgress = snapshot.progress;
+
+        setLoading(true);
+        if (binding.buttonLaunchVersion != null) {
+            binding.buttonLaunchVersion.setEnabled(false);
+        }
+        if (installDialog == null || !installDialog.isShowing()) {
+            showInstallDialog(snapshot.displayName);
+        }
+        updateInstallDialog(snapshot.progress, snapshot.message);
+        setStatus(snapshot.message);
+        if (!isFinishing() && !isDestroyed()) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+
+        mainHandler.removeCallbacks(installSessionLifecycleRunnable);
+        mainHandler.postDelayed(installSessionLifecycleRunnable, 250L);
+    }
+
+    private void pollInstallSessionLifecycle() {
+        if (uiLifecycleDestroyed || binding == null || isFinishing() || isDestroyed()) return;
+
+        InstallSessionState.Snapshot snapshot = InstallSessionState.snapshot();
+        if (snapshot.active) {
+            if (snapshot.generation != installSessionGeneration) {
+                installSessionGeneration = snapshot.generation;
+            }
+            installSessionActive = true;
+            activeInstallTitle = snapshot.title;
+            activeInstallMessage = snapshot.message;
+            activeInstallProgress = snapshot.progress;
+
+            if (installDialog == null || !installDialog.isShowing()) {
+                showInstallDialog(snapshot.displayName);
+            }
+            updateInstallDialog(snapshot.progress, snapshot.message);
+            setStatus(snapshot.message);
+            mainHandler.postDelayed(installSessionLifecycleRunnable, 250L);
+            return;
+        }
+
+        if (installSessionActive) {
+            installSessionActive = false;
+            clearInstallKeepScreenOnFlagSafely();
+            dismissInstallDialog();
+            setLoading(false);
+            refreshInstancesAndRebind(true);
+            updateSelectedInstanceCard();
+        }
+    }
+
+    private void clearInstallKeepScreenOnFlagSafely() {
+        if (uiLifecycleDestroyed || isDestroyed()) return;
+        try {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } catch (RuntimeException throwable) {
+            Logging.i("InstallLifecycle", "Ignored stale window while clearing install keep-screen-on: " + throwable);
+        }
+    }
+
+    private boolean canApplyInstallCompletionToUi() {
+        return !uiLifecycleDestroyed && binding != null && !isFinishing() && !isDestroyed();
+    }
+
+    private void runInstallCompletionOnUi(@NonNull Runnable action) {
+        runOnUiThread(() -> {
+            if (!canApplyInstallCompletionToUi()) {
+                // The installer outlived an Activity recreation (rotation/display hotplug).
+                // Finish the process-level session and let the newly created Activity
+                // observe it via InstallSessionState instead of touching this stale UI.
+                finishInstallSession();
+                dismissInstallDialog();
+                return;
+            }
+            action.run();
+        });
+    }
+
     private void showInstallDialog(@NonNull String instanceName) {
+        if (uiLifecycleDestroyed || isFinishing() || isDestroyed()) return;
+        dismissInstallDialog();
+
         LinearLayout layout = new LinearLayout(this);
         int padding = (int) (24 * getResources().getDisplayMetrics().density);
         layout.setOrientation(LinearLayout.VERTICAL);
@@ -2185,12 +2217,20 @@ public class MainActivity extends AppCompatActivity {
         layout.addView(installDialogProgress);
         layout.addView(installDialogForegroundCheck);
 
-        installDialog = new AlertDialog.Builder(this)
+        installDialog = new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.create_instance_install_dialog_title)
                 .setView(layout)
                 .setCancelable(false)
                 .create();
-        installDialog.show();
+        try {
+            installDialog.show();
+        } catch (WindowManager.BadTokenException | IllegalStateException throwable) {
+            Logging.i("InstallLifecycle", "Install dialog skipped because Activity window changed: " + throwable);
+            installDialog = null;
+            installDialogProgress = null;
+            installDialogMessage = null;
+            installDialogForegroundCheck = null;
+        }
     }
 
     private void updateInstallDialog(int progress, @NonNull String message) {
@@ -2204,13 +2244,25 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void dismissInstallDialog() {
-        if (installDialog != null) {
-            installDialog.dismiss();
-            installDialog = null;
-        }
+        AlertDialog dialog = installDialog;
+        installDialog = null;
         installDialogProgress = null;
         installDialogMessage = null;
         installDialogForegroundCheck = null;
+
+        if (dialog == null) return;
+        try {
+            Window window = dialog.getWindow();
+            View decor = window != null ? window.getDecorView() : null;
+            if (dialog.isShowing() && (decor == null || decor.isAttachedToWindow())) {
+                dialog.dismiss();
+            }
+        } catch (IllegalArgumentException | WindowManager.BadTokenException throwable) {
+            // The display/orientation may have detached this dialog between the
+            // isAttachedToWindow() check and dismiss(). The installer itself is
+            // process-scoped and must keep running; dropping this stale window is safe.
+            Logging.i("InstallLifecycle", "Ignored stale install dialog during display change: " + throwable);
+        }
     }
 
     private void showDeleteInstanceDialog(@NonNull LauncherInstance instance) {
@@ -2586,7 +2638,7 @@ public class MainActivity extends AppCompatActivity {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        launchPrepareDialog = new AlertDialog.Builder(this)
+        launchPrepareDialog = new MaterialAlertDialogBuilder(this)
                 .setView(root)
                 .setCancelable(false)
                 .create();
@@ -2754,7 +2806,7 @@ public class MainActivity extends AppCompatActivity {
             addGridWorldQuickPlayRow(worldCard, instance, world, dialogRef);
         }
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .create();
@@ -2922,7 +2974,7 @@ public class MainActivity extends AppCompatActivity {
             addGridServerQuickPlayRow(serverCard, instance, server, dialogRef);
         }
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .create();

@@ -55,10 +55,15 @@ public final class FullscreenUtils {
         boolean forceFullscreen = runtimeForceFullscreen
                 || LauncherPreferences.isForceFullscreenMode(activity);
         boolean ignoreDisplayCutout = LauncherPreferences.isIgnoreDisplayCutout(activity);
-        boolean edgeToEdge = forceFullscreen || ignoreDisplayCutout;
+
+        // Force Fullscreen decides whether the game is immersive/edge-to-edge.
+        // Ignore display notch is a separate *safe-area* policy: ON keeps content
+        // out of the physical cutout even while the host window itself is edge-to-edge.
+        boolean hideSystemBars = forceFullscreen;
+        boolean layoutBehindSystemBars = forceFullscreen;
 
         applyDisplayCutoutMode(activity, ignoreDisplayCutout, forceFullscreen);
-        applyWindowFullscreenFlags(window, edgeToEdge);
+        applyWindowFullscreenFlags(window, hideSystemBars);
 
         View decorView = null;
         try {
@@ -68,7 +73,7 @@ public final class FullscreenUtils {
 
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
             try {
-                window.setDecorFitsSystemWindows(!edgeToEdge);
+                window.setDecorFitsSystemWindows(!layoutBehindSystemBars);
             } catch (Throwable ignored) {
             }
 
@@ -84,7 +89,7 @@ public final class FullscreenUtils {
 
             if (controller != null) {
                 try {
-                    if (edgeToEdge) {
+                    if (hideSystemBars) {
                         controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
                         controller.setSystemBarsBehavior(WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
                     } else {
@@ -97,9 +102,23 @@ public final class FullscreenUtils {
 
         if (decorView != null) {
             try {
-                decorView.setFitsSystemWindows(false);
-                decorView.setSystemUiVisibility(buildSystemUiFlags(edgeToEdge));
+                decorView.setFitsSystemWindows(!layoutBehindSystemBars);
+                decorView.setSystemUiVisibility(buildSystemUiFlags(
+                        hideSystemBars, layoutBehindSystemBars));
             } catch (Throwable ignored) {
+            }
+
+            // A few OEMs replace PhoneWindow attributes once the decor is attached or
+            // after an orientation transition. Reassert the cutout policy on the next
+            // frame so "Ignore display notch" cannot silently fall back to DEFAULT.
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+                final boolean savedIgnoreDisplayCutout = ignoreDisplayCutout;
+                final boolean savedForceFullscreen = forceFullscreen;
+                try {
+                    decorView.post(() -> applyDisplayCutoutMode(
+                            activity, savedIgnoreDisplayCutout, savedForceFullscreen));
+                } catch (Throwable ignored) {
+                }
             }
         }
     }
@@ -128,7 +147,10 @@ public final class FullscreenUtils {
 
             if (edgeToEdge) {
                 window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
-                window.addFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+                // FLAG_LAYOUT_NO_LIMITS can bypass/blur OEM cutout policy and make the
+                // notch toggle appear identical in both states. Standard edge-to-edge
+                // layout flags + layoutInDisplayCutoutMode are sufficient here.
+                window.clearFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
                 window.addFlags(WindowManager.LayoutParams.FLAG_DRAWS_SYSTEM_BAR_BACKGROUNDS);
 
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
@@ -143,13 +165,18 @@ public final class FullscreenUtils {
         }
     }
 
-    private static int buildSystemUiFlags(boolean edgeToEdge) {
+    private static int buildSystemUiFlags(
+            boolean hideSystemBars,
+            boolean layoutBehindSystemBars
+    ) {
         int flags = View.SYSTEM_UI_FLAG_LAYOUT_STABLE;
-        if (edgeToEdge) {
+        if (hideSystemBars) {
             flags |= View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
                     | View.SYSTEM_UI_FLAG_FULLSCREEN
-                    | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                    | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION;
+        }
+        if (layoutBehindSystemBars) {
+            flags |= View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
                     | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION;
         }
         return flags;
@@ -157,14 +184,18 @@ public final class FullscreenUtils {
 
     @RequiresApi(api = Build.VERSION_CODES.P)
     private static int resolveDisplayCutoutMode(boolean ignoreDisplayCutout, boolean forceFullscreen) {
+        // The UI label is literal: ON means ignore the notch as usable game space.
+        // NEVER asks Android to keep the window's content out of the physical cutout.
         if (ignoreDisplayCutout) {
+            return WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER;
+        }
+
+        // With notch avoidance OFF, immersive fullscreen may use the whole panel.
+        // ALWAYS is required on modern Android; Android 9/10 only expose SHORT_EDGES.
+        if (forceFullscreen) {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
                 return LAYOUT_IN_DISPLAY_CUTOUT_MODE_ALWAYS_COMPAT;
             }
-            return WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
-        }
-
-        if (forceFullscreen) {
             return WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES;
         }
 

@@ -14,6 +14,9 @@
 
 #include <jni.h>
 #include <dlfcn.h>
+#include <stdint.h>
+#include <string.h>
+#include <strings.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -129,6 +132,32 @@ JNIEXPORT void JNICALL Java_ca_dnamobile_droidbridgelauncher_runtime_utils_JREUt
     (*env)->ReleaseStringUTFChars(env, ldLibraryPath, ldLibPathUtf);
 }
 
+static int droidbridge_is_ltw_library_path(const char *path) {
+    if (path == NULL || path[0] == '\0') return 0;
+    const char *base = strrchr(path, '/');
+    base = base != NULL ? base + 1 : path;
+    return strcasecmp(base, "libltw.so") == 0;
+}
+
+static void droidbridge_publish_ltw_handle(const char *path, void *handle) {
+    if (handle == NULL || !droidbridge_is_ltw_library_path(path)) return;
+
+    /*
+     * Android 10 keeps the app/ART and embedded-OpenJDK native loaders in
+     * different linker namespaces. The SDL3 EGL shim cannot dlopen an LTW
+     * copy staged under app-private files from its anonymous namespace, even
+     * though this ART-side preload has already succeeded. A dlopen handle is
+     * process-local, so publish the already-loaded handle for the SDL3 shim to
+     * reuse with dlsym() instead of reopening the library across namespaces.
+     */
+    char handle_text[2 + sizeof(uintptr_t) * 2 + 1];
+    snprintf(handle_text, sizeof(handle_text), "0x%llx",
+             (unsigned long long)(uintptr_t)handle);
+    setenv("DROIDBRIDGE_LTW_PRELOADED_HANDLE", handle_text, 1);
+    setenv("DROIDBRIDGE_LTW_PRELOADED_PATH", path, 1);
+    LOGD("published LTW preload handle=%s path=%s", handle_text, path);
+}
+
 JNIEXPORT jboolean JNICALL Java_ca_dnamobile_droidbridgelauncher_runtime_utils_JREUtils_dlopen(JNIEnv *env, jclass clazz, jstring name) {
     const char *nameUtf = (*env)->GetStringUTFChars(env, name, 0);
     void* handle = dlopen(nameUtf, RTLD_GLOBAL | RTLD_LAZY);
@@ -136,6 +165,7 @@ JNIEXPORT jboolean JNICALL Java_ca_dnamobile_droidbridgelauncher_runtime_utils_J
         LOGE("dlopen %s failed: %s", nameUtf, dlerror());
     } else {
         LOGD("dlopen %s success", nameUtf);
+        droidbridge_publish_ltw_handle(nameUtf, handle);
     }
     (*env)->ReleaseStringUTFChars(env, name, nameUtf);
     return handle != NULL;

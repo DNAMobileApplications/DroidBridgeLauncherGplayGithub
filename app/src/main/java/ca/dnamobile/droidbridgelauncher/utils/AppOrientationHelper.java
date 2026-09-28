@@ -63,16 +63,22 @@ public final class AppOrientationHelper {
             case LauncherPreferences.APP_ORIENTATION_REVERSE_LANDSCAPE:
                 return ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE;
             case LauncherPreferences.APP_ORIENTATION_PORTRAIT:
+            case LauncherPreferences.APP_ORIENTATION_PORTRAIT_CENTERED_GAME:
+                // Centered-game mode still keeps the Activity itself in portrait.
+                // GameActivity constrains only MinecraftGLSurface to the centered
+                // landscape-aspect rectangle.
                 return ActivityInfo.SCREEN_ORIENTATION_PORTRAIT;
             case LauncherPreferences.APP_ORIENTATION_REVERSE_PORTRAIT:
                 return ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT;
             case LauncherPreferences.APP_ORIENTATION_AUTO:
             default:
-                // Launcher auto rotation permits all four physical rotations. Game auto
-                // rotation intentionally stays in landscape/reverse-landscape.
+                // Launcher Auto follows Android's/user's rotation policy while allowing
+                // all four orientations. FULL_SENSOR ignores the user's rotation lock,
+                // which is not what the launcher setting named "Auto Rotate" should do.
+                // Game Auto intentionally stays in landscape/reverse-landscape.
                 return gameSurfaceOnly
                         ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
-                        : ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR;
+                        : ActivityInfo.SCREEN_ORIENTATION_FULL_USER;
         }
     }
 }

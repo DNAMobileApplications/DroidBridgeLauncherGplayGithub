@@ -292,6 +292,8 @@ public final class ModrinthApiClient {
             }
         } else if (contentType == ModManagerContentType.RESOURCEPACKS) {
             array.put("minecraft");
+        } else if (contentType == ModManagerContentType.DATAPACKS) {
+            array.put("datapack");
         } else if (contentType == ModManagerContentType.SHADERPACKS) {
             array.put("iris");
             array.put("optifine");

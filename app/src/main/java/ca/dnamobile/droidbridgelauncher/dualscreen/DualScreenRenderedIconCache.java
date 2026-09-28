@@ -60,16 +60,74 @@ final class DualScreenRenderedIconCache {
         renderedIconsDir = new File(new File(gameDir, "droidbridge_dual_screen_assets"), "rendered_icons");
     }
 
+    /**
+     * Extracts a vetted special-item PNG from the installed companion mod once, then serves the
+     * copied file from memory/disk. This is the stable path for banners, pots, heads, scaffolding
+     * and other vanilla items whose inventory icon is produced by a special Minecraft renderer.
+     */
+    @Nullable
+    Bitmap getEmbeddedReference(@NonNull String rawName) {
+        String clean = rawName.trim().toLowerCase(Locale.ROOT);
+        if (clean.endsWith(".png")) clean = clean.substring(0, clean.length() - 4);
+        clean = clean.replaceAll("[^a-z0-9_]+", "_");
+        if (clean.isEmpty()) return null;
+
+        String memoryKey = "embedded/reference-v1/" + clean;
+        Bitmap cached = memory.get(memoryKey);
+        if (cached != null && !cached.isRecycled()) return cached;
+
+        if (!renderedIconsDir.isDirectory() && !renderedIconsDir.mkdirs()) return null;
+        File destination = new File(renderedIconsDir, "embedded_" + clean + ".png");
+        Bitmap existing = loadFile(destination, memoryKey);
+        if (existing != null && !existing.isRecycled()) return existing;
+
+        String[] entries = new String[] {
+                "assets/droidbridge_dualscreen/reference_icons/" + clean + ".png",
+                "assets/droidbridge_dualscreen/rendered_icons/" + clean + ".png"
+        };
+        for (File jar : findBundledIconJarCandidates()) {
+            if (jar == null || !jar.isFile() || jar.length() <= 0L) continue;
+            try (ZipFile zip = new ZipFile(jar)) {
+                for (String entryName : entries) {
+                    ZipEntry entry = zip.getEntry(entryName);
+                    if (entry == null || entry.isDirectory() || entry.getSize() == 0L) continue;
+                    File temporary = new File(renderedIconsDir,
+                            "embedded_" + clean + ".png.tmp");
+                    try (InputStream input = zip.getInputStream(entry);
+                         FileOutputStream output = new FileOutputStream(temporary)) {
+                        byte[] buffer = new byte[8192];
+                        int read;
+                        while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
+                        output.flush();
+                    }
+                    BitmapFactory.Options options = new BitmapFactory.Options();
+                    options.inScaled = false;
+                    Bitmap decoded = BitmapFactory.decodeFile(temporary.getAbsolutePath(), options);
+                    if (decoded == null || decoded.isRecycled()
+                            || decoded.getWidth() <= 1 || decoded.getHeight() <= 1) {
+                        if (decoded != null && !decoded.isRecycled()) decoded.recycle();
+                        temporary.delete();
+                        continue;
+                    }
+                    if (destination.isFile()) destination.delete();
+                    if (!temporary.renameTo(destination)) {
+                        decoded.recycle();
+                        temporary.delete();
+                        continue;
+                    }
+                    if (memory.size() > MAX_MEMORY_ICONS) clearMemory();
+                    memory.put(memoryKey, decoded);
+                    return decoded;
+                }
+            } catch (Throwable throwable) {
+                Logging.e(TAG, "Unable to extract embedded reference icon " + clean, throwable);
+            }
+        }
+        return null;
+    }
+
     @Nullable
     Bitmap getIfReady(@NonNull String itemId, @NonNull String itemKey, @Nullable String iconPath, int size) {
-        // 1.0.148: never return old rendered_icons PNGs for complex/special item
-        // families. Those files were created by earlier workaround jars and are the reason
-        // chest boats/chests/stonecutter/pots appeared unchanged. Special items must be
-        // rebuilt from installed assets by DualScreenControlsView instead.
-        if (isSpecialOrComplexItem(itemId) || isSpecialOrComplexItem(itemKey) || isSpecialOrComplexItem(iconPath)) {
-            return null;
-        }
-
         String[] names = deterministicNames(itemId, itemKey, iconPath);
 
         // Asset-translator rework: never load pregenerated final PNG icons bundled inside

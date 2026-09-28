@@ -63,6 +63,15 @@ public final class LegacySkinProxyServer {
     private final Map<String, File> skinsByLowerName = new ConcurrentHashMap<>();
     private final AtomicBoolean running = new AtomicBoolean(false);
 
+    // BTA 8 can replace the authenticated launcher username with a transient
+    // Player### session name and then request that profile's texture hash. For a
+    // Microsoft launch, DroidBridge already has the authenticated account skin
+    // cached locally, so allow the BTA-only proxy path to serve that exact PNG for
+    // any textures.minecraft.net/texture/<hash> request. This avoids both the
+    // Player### mismatch and BTA's plain-HTTP texture transport.
+    @Nullable
+    private volatile File modernTextureOverride;
+
     @Nullable
     private ServerSocket serverSocket;
     @Nullable
@@ -73,6 +82,10 @@ public final class LegacySkinProxyServer {
         if (!key.isEmpty() && skinFile.isFile()) {
             skinsByLowerName.put(key, skinFile);
         }
+    }
+
+    public void setModernTextureOverride(@Nullable File skinFile) {
+        modernTextureOverride = skinFile != null && skinFile.isFile() ? skinFile : null;
     }
 
     public void start() throws IOException {
@@ -439,9 +452,18 @@ public final class LegacySkinProxyServer {
             return;
         }
 
+        File override = modernTextureOverride;
+        if (override != null && override.isFile() && isModernMinecraftTextureRequest(request.url)) {
+            writeFile(output, 200, "image/png", override);
+            Logging.i(TAG, "Served authenticated BTA skin override for "
+                    + request.url.getPath() + " from " + override.getAbsolutePath());
+            return;
+        }
+
         HttpURLConnection connection = null;
         try {
-            connection = (HttpURLConnection) request.url.openConnection(java.net.Proxy.NO_PROXY);
+            URL forwardUrl = upgradeMinecraftTextureUrl(request.url);
+            connection = (HttpURLConnection) forwardUrl.openConnection(java.net.Proxy.NO_PROXY);
             connection.setConnectTimeout(15000);
             connection.setReadTimeout(30000);
             connection.setUseCaches(true);
@@ -463,6 +485,26 @@ public final class LegacySkinProxyServer {
         } finally {
             if (connection != null) connection.disconnect();
         }
+    }
+
+    private boolean isModernMinecraftTextureRequest(@NonNull URL url) {
+        String host = url.getHost() == null ? "" : url.getHost().toLowerCase(Locale.ROOT);
+        String path = url.getPath() == null ? "" : url.getPath().toLowerCase(Locale.ROOT);
+        return ("textures.minecraft.net".equals(host) || host.endsWith(".textures.minecraft.net"))
+                && path.startsWith("/texture/");
+    }
+
+    @NonNull
+    private URL upgradeMinecraftTextureUrl(@NonNull URL original) throws IOException {
+        String protocol = original.getProtocol() == null ? "" : original.getProtocol();
+        String host = original.getHost() == null ? "" : original.getHost().toLowerCase(Locale.ROOT);
+        if ("http".equalsIgnoreCase(protocol)
+                && ("textures.minecraft.net".equals(host) || host.endsWith(".textures.minecraft.net"))) {
+            URL upgraded = new URL("https", original.getHost(), -1, original.getFile());
+            Logging.i(TAG, "Upgraded Minecraft texture request to HTTPS: " + upgraded);
+            return upgraded;
+        }
+        return original;
     }
 
     private void tunnel(

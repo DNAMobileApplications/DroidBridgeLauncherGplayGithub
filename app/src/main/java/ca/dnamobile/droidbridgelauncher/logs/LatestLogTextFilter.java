@@ -29,8 +29,10 @@ public final class LatestLogTextFilter {
         String line = normalizeLauncherLine(text);
         if (line.isEmpty()) return "";
 
+        if (isForeignMesaBuilderBranding(line)) return null;
         if (isControllerCompatibilityNoise(line, false)) return null;
         if (isLauncherProgressNoise(line)) return null;
+        if (isHighFrequencyRuntimeNoise(line)) return null;
         if (isMitigationBoundaryNoise(line)) return null;
 
         return line;
@@ -43,9 +45,11 @@ public final class LatestLogTextFilter {
         String line = normalizeLauncherLine(text);
         if (line.isEmpty()) return "";
 
+        if (isForeignMesaBuilderBranding(line)) return null;
         if (isControlifyScanSpam(line)) return null;
         if (isControllerCompatibilityNoise(line, false)) return null;
         if (isLauncherProgressNoise(line)) return null;
+        if (isHighFrequencyRuntimeNoise(line)) return null;
         if (isMitigationBoundaryNoise(line)) return null;
 
         return line;
@@ -137,9 +141,11 @@ public final class LatestLogTextFilter {
                 continue;
             }
 
-            if (isControlifyScanSpam(trimmed)
+            if (isForeignMesaBuilderBranding(trimmed)
+                    || isControlifyScanSpam(trimmed)
                     || isControllerCompatibilityNoise(trimmed, controllableLaunch)
                     || isLauncherProgressNoise(trimmed)
+                    || isHighFrequencyRuntimeNoise(trimmed)
                     || isMitigationBoundaryNoise(trimmed)) {
                 continue;
             }
@@ -214,6 +220,15 @@ public final class LatestLogTextFilter {
         return builder.toString();
     }
 
+
+    private static boolean isForeignMesaBuilderBranding(@NonNull String line) {
+        String lower = line.toLowerCase(Locale.ROOT);
+        // Imported Kopper/Mesa builds may print their builder banner directly to stdout.
+        // DroidBridge keeps Mesa's legal attribution separately and suppresses only the
+        // foreign-launcher runtime banner from launcher-owned logs.
+        return lower.startsWith("hello, zink! (c) mesa,") && lower.endsWith(", fcl");
+    }
+
     private static boolean isControllerCompatibilityNoise(
             @NonNull String line,
             boolean controllableLaunch
@@ -274,6 +289,22 @@ public final class LatestLogTextFilter {
         if (line.startsWith("Info: Network DNS args:")) return true;
 
         return false;
+    }
+
+    private static boolean isHighFrequencyRuntimeNoise(@NonNull String line) {
+        // These are useful only while actively debugging input/surface plumbing. They can
+        // emit many lines per minute and bury the launch configuration and actual game errors.
+        if (line.startsWith("DroidBridgeSDL3MouseSync:")) return true;
+        if (line.startsWith("DroidBridgeSDL3Cursor:")) return true;
+        if (line.startsWith("DroidBridgeSDL3Mouse:")) return true;
+        if (line.startsWith("DroidBridgeSDL3: cursor recentered reason=")) return true;
+        if (line.startsWith("DroidBridgeSDL3: SDL relative mouse=")) return true;
+        if (line.startsWith("DroidBridgeSDL3: Android SDL input devices registered;")) return true;
+
+        // Touch-keyboard cancellation can be emitted repeatedly without representing an
+        // actual Vulkan lifecycle transition. Preserve real pause/resume and failure lines.
+        return line.startsWith("DroidBridgeVulkanLifecycle: presentationPaused=false")
+                && line.contains("reason=TouchKeyboardHelper IME cancel");
     }
 
     private static boolean isMitigationBoundaryNoise(@NonNull String line) {
@@ -371,7 +402,28 @@ public final class LatestLogTextFilter {
                 || line.startsWith("Account:")
                 || line.startsWith("Renderer:")
                 || line.startsWith("Renderer plugin:")
+                || line.startsWith("Renderer settings (selected):")
                 || line.startsWith("Graphics:")
+                || line.startsWith("Graphics API:")
+                || line.startsWith("System Vulkan driver:")
+                || line.startsWith("System Vulkan driver (effective):")
+                || line.startsWith("Use System Vulkan Driver setting:")
+                || line.startsWith("Use OpenGL for Minecraft 26+:")
+                || line.startsWith("Version-specific renderer defaults:")
+                || line.startsWith("Vulkan VSync:")
+                || line.startsWith("Vulkan Zink driver:")
+                || line.startsWith("Alternative surface rendering:")
+                || line.startsWith("Sustained performance:")
+                || line.startsWith("Game resolution:")
+                || line.startsWith("Resolution scale:")
+                || line.startsWith("Surface size at launch:")
+                || line.startsWith("Force fullscreen:")
+                || line.startsWith("Ignore notch:")
+                || line.startsWith("Avoid rounded display corners:")
+                || line.startsWith("MobileGlues:")
+                || line.startsWith("MobileGlues config source:")
+                || line.startsWith("Mods:")
+                || line.startsWith("Mod:")
                 || line.startsWith("Java:")
                 || line.startsWith("Instance overrides:")
                 || line.startsWith("Detected:")

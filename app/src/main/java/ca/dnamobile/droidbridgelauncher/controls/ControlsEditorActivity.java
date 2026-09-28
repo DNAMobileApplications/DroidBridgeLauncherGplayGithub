@@ -14,6 +14,7 @@ package ca.dnamobile.droidbridgelauncher.controls;
 
 import ca.dnamobile.droidbridgelauncher.LauncherTheme;
 import android.content.Context;
+import android.content.Intent;
 import android.content.SharedPreferences;
 import android.graphics.Rect;
 import android.graphics.Typeface;
@@ -46,6 +47,7 @@ import java.util.Collections;
 
 import ca.dnamobile.droidbridgelauncher.ui.LauncherDialogStyle;
 import ca.dnamobile.droidbridgelauncher.utils.FullscreenUtils;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 /** Drag buttons to move; tap a button to edit/delete it. */
 public final class ControlsEditorActivity extends AppCompatActivity {
@@ -78,6 +80,14 @@ public final class ControlsEditorActivity extends AppCompatActivity {
     private boolean menuDragging;
 
     private final Runnable immersiveReapplyRunnable = this::enableImmersiveSafely;
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (TouchControlsOverlay.dispatchActivityResult(requestCode, resultCode, data)) {
+            enableImmersiveSafely();
+        }
+    }
 
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
@@ -186,7 +196,7 @@ public final class ControlsEditorActivity extends AppCompatActivity {
             return;
         }
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle("Close touch editor?")
                 .setMessage("Save your touch-control changes before closing, or close without saving to restore the layout from when you opened the editor.")
                 .setNegativeButton("Close without saving", (unused, which) -> {
@@ -334,6 +344,17 @@ public final class ControlsEditorActivity extends AppCompatActivity {
             }
         });
         rowThree.addView(redo, panelButtonParams());
+
+        Button addDrawer = panelButton("Add Drawer");
+        addDrawer.setOnClickListener(view -> {
+            overlay.addControl(TouchControlData.drawer("Drawer", 320, 120, 96, 52));
+            Toast.makeText(
+                    this,
+                    "Added drawer. Tap it to choose which buttons it shows and hides.",
+                    Toast.LENGTH_SHORT
+            ).show();
+        });
+        rowFour.addView(addDrawer, panelButtonParams());
 
         Button closeEditor = panelButton("Close Editor");
         closeEditor.setOnClickListener(view -> requestCloseEditor());

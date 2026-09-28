@@ -98,7 +98,7 @@ public final class ModManagerUpdateManager {
         String projectId = getProjectId(entry);
         if (projectId.isEmpty()) return null;
 
-        File installedFile = resolveEntryFile(gameDirectory, contentType, entry);
+        File installedFile = resolveEntryFile(gameDirectory, contentType, entry, minecraftVersion);
         String currentVersionId = getVersionId(entry);
         String currentVersionNumber = firstNonBlank(
                 entry.optString("versionNumber", ""),
@@ -247,7 +247,8 @@ public final class ModManagerUpdateManager {
     private static File resolveEntryFile(
             @NonNull File gameDirectory,
             @NonNull ModManagerContentType type,
-            @NonNull JSONObject entry
+            @NonNull JSONObject entry,
+            @Nullable String minecraftVersion
     ) {
         String path = firstNonBlank(
                 entry.optString("targetPath", ""),
@@ -275,12 +276,13 @@ public final class ModManagerUpdateManager {
 
         String fileName = entry.optString("fileName", "").trim();
         if (!fileName.isEmpty()) {
-            File file = new File(type.getTargetDirectory(gameDirectory), fileName);
+            File targetDirectory = type.getTargetDirectory(gameDirectory, minecraftVersion);
+            File file = new File(targetDirectory, fileName);
             if (file.isFile()) return file;
-            File disabled = new File(type.getTargetDirectory(gameDirectory), fileName + ".disabled");
+            File disabled = new File(targetDirectory, fileName + ".disabled");
             if (disabled.isFile()) return disabled;
             String enabledName = stripDisabledSuffix(fileName);
-            File enabled = new File(type.getTargetDirectory(gameDirectory), enabledName);
+            File enabled = new File(targetDirectory, enabledName);
             if (enabled.isFile()) return enabled;
         }
         return null;
@@ -353,12 +355,17 @@ public final class ModManagerUpdateManager {
 
     public static void updateCandidate(@NonNull Context context, @NonNull File gameDirectory, @NonNull String minecraftVersion,
             @Nullable String loader, @NonNull UpdateCandidate candidate, @NonNull ModrinthInstallManager.Listener listener) {
+        File installedFile = resolveEntryFile(gameDirectory, candidate.contentType, candidate.entry, minecraftVersion);
+        File targetDirectory = installedFile != null && installedFile.getParentFile() != null
+                ? installedFile.getParentFile()
+                : candidate.contentType.getTargetDirectory(gameDirectory, minecraftVersion);
+
         if (candidate.source == ModManagerSource.CURSEFORGE) {
             CurseForgeInstallManager.installSpecificVersion(new CurseForgeApiClient(context), gameDirectory, minecraftVersion,
-                    loader, candidate.contentType, candidate.project, candidate.latestVersion, listener);
+                    loader, candidate.contentType, candidate.project, candidate.latestVersion, targetDirectory, listener);
         } else {
             ModrinthInstallManager.installSpecificVersion(gameDirectory, minecraftVersion, loader,
-                    candidate.contentType, candidate.project, candidate.latestVersion, listener);
+                    candidate.contentType, candidate.project, candidate.latestVersion, targetDirectory, listener);
         }
     }
 

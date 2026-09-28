@@ -14,7 +14,7 @@ package ca.dnamobile.droidbridgelauncher;
 
 import android.Manifest;
 import android.annotation.SuppressLint;
-import android.app.AlertDialog;
+import androidx.appcompat.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.res.ColorStateList;
@@ -30,6 +30,8 @@ import android.os.Bundle;
 import android.os.PowerManager;
 import android.text.InputType;
 import android.view.Gravity;
+import android.view.InputDevice;
+import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
@@ -108,6 +110,7 @@ import ca.dnamobile.droidbridgelauncher.notifications.LauncherNotificationPermis
 import ca.dnamobile.droidbridgelauncher.renderer.Driver;
 import ca.dnamobile.droidbridgelauncher.renderer.DriverPluginManager;
 import ca.dnamobile.droidbridgelauncher.renderer.MobileGluesConfigHelper;
+import ca.dnamobile.droidbridgelauncher.renderer.BtaRendererPolicy;
 import ca.dnamobile.droidbridgelauncher.renderer.RendererInterface;
 import ca.dnamobile.droidbridgelauncher.renderer.RendererPluginManager;
 import ca.dnamobile.droidbridgelauncher.renderer.Renderers;
@@ -116,6 +119,7 @@ import ca.dnamobile.droidbridgelauncher.settings.GameOverlayPreferences;
 import ca.dnamobile.droidbridgelauncher.settings.GameResolutionSettings;
 import ca.dnamobile.droidbridgelauncher.settings.LauncherPreferences;
 import ca.dnamobile.droidbridgelauncher.settings.MemoryAllocationUtils;
+import ca.dnamobile.droidbridgelauncher.recording.RecordingPreferences;
 import ca.dnamobile.droidbridgelauncher.skin.CustomSkinStore;
 import ca.dnamobile.droidbridgelauncher.skin.MicrosoftCapeService;
 import ca.dnamobile.droidbridgelauncher.skin.MicrosoftSkinUploader;
@@ -130,6 +134,7 @@ import ca.dnamobile.droidbridgelauncher.utils.FullscreenUtils;
 import ca.dnamobile.droidbridgelauncher.utils.path.PathManager;
 import ca.dnamobile.droidbridgelauncher.utils.path.LibPath;
 import ca.dnamobile.droidbridgelauncher.runtime.multirt.MultiRTUtils;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 public final class LauncherSettingsActivity extends AppCompatActivity {
     // Dialog colors are resolved from the active DroidBridge theme after super.onCreate().
@@ -226,15 +231,25 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
     private boolean driverSpinnerReady;
     @Nullable private MaterialButton buttonRendererVersionRules;
     @Nullable private TextView textRendererVersionRulesSummary;
+    @Nullable private MaterialButton buttonDualScreenHudLayout;
+    @Nullable private TextView textDualScreenHudLayoutSummary;
+    @Nullable private MaterialButton buttonDualScreenTouchScale;
+    @Nullable private TextView textDualScreenTouchScaleSummary;
     @Nullable private MaterialButton buttonDualScreenBackground;
     @Nullable private TextView textDualScreenBackgroundSummary;
     @Nullable private MaterialButton buttonDualScreenMapFrame;
     @Nullable private TextView textDualScreenMapFrameSummary;
+    @Nullable private MaterialCardView cardDualScreenSettings;
+    @Nullable private MaterialCardView cardRecordingSettings;
+    @Nullable private com.google.android.material.switchmaterial.SwitchMaterial switchRecordingBothScreens;
+    @Nullable private TextView textRecordingBothScreensSummary;
     private volatile boolean runtimeComponentsReinstalling;
     private TextView textControllerCameraSensitivity;
     private SeekBar sliderControllerCameraSensitivity;
     private TextView textHardwareMouseDpiScale;
     private SeekBar sliderHardwareMouseDpiScale;
+    @Nullable private MaterialButton buttonPhysicalMouseMode;
+    @Nullable private TextView textPhysicalMouseModeSummary;
     private com.google.android.material.switchmaterial.SwitchMaterial switchVirtualMouseAtGameStart;
     private com.google.android.material.switchmaterial.SwitchMaterial switchGyroscopeCamera;
     private TextView textGyroscopeCameraSummary;
@@ -301,6 +316,8 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         setupRenderSurfaceSettings();
         setupControllerSettings();
         setupLauncherSettings();
+        setupDualScreenSettingsSection();
+        setupRecordingSettingsSection();
         setupPrivacyPolicySettings();
     }
 
@@ -319,6 +336,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             refreshControllerSettingsValues();
             refreshGameDisplaySettingsValues();
             refreshDualScreenSettingsUi();
+            refreshRecordingDualScreenOption();
             updateLauncherThemeSettingsUi();
             updateInstallNotificationSettingsUi();
             updateGridPlayIconModeButtonText();
@@ -451,7 +469,9 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         addSettingsSectionTab(R.string.renderer_settings_title);
         addSettingsSectionTab(R.string.controller_settings_title);
         addSettingsSectionTab(R.string.settings_launcher_title);
+        addSettingsSectionTab("Recording Settings");
         addSettingsSectionTab(R.string.settings_instance_title);
+        addSettingsSectionTab("Dual-screen Settings");
         addSettingsSectionTab("Privacy Policy");
 
 
@@ -505,9 +525,17 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
                 target = binding.cardLauncherSettings;
                 break;
             case 4:
-                target = binding.cardInstanceSettings;
+                if (cardRecordingSettings == null) return;
+                target = cardRecordingSettings;
                 break;
             case 5:
+                target = binding.cardInstanceSettings;
+                break;
+            case 6:
+                if (cardDualScreenSettings == null) return;
+                target = cardDualScreenSettings;
+                break;
+            case 7:
                 target = binding.cardPrivacyPolicySettings;
                 break;
             default:
@@ -629,7 +657,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
     }
 
     private void showSignOutConfirmationDialog() {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.sign_out_confirm_title)
                 .setMessage(R.string.sign_out_confirm_message)
                 .setNegativeButton(android.R.string.cancel, null)
@@ -1023,7 +1051,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
                         + "'Latest release' has no fixed upper limit, so it also covers future stable releases. "
                         + "Snapshots, pre-releases, release candidates, alpha and beta versions are ignored by this feature.");
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton("Save", null)
@@ -1179,7 +1207,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
                 "You will be brought to a download renderer site to get other renderers for DroidBridge Launcher. "
                         + "Only install renderer APKs from sources you trust.");
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton("Open site", null)
@@ -1616,7 +1644,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         addStyledDialogCardTitle(card, getString(R.string.settings_renderer_game_resolution_title));
         addStyledDialogInfoText(card, getString(R.string.settings_renderer_game_resolution_warning));
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton(R.string.settings_renderer_game_resolution_confirm_button, null)
@@ -1673,7 +1701,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
                 LinearLayout.LayoutParams.WRAP_CONTENT
         ));
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton(android.R.string.ok, null)
@@ -1808,13 +1836,9 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             LauncherPreferences.setForceFullscreenMode(this, isChecked);
             updateForceFullscreenSwitchText(isChecked);
 
-            // The notch/cutout mode only works when the game window is edge-to-edge.
-            // If the user disables fullscreen, turn the notch override off too so the UI
-            // cannot show an enabled setting that Android will ignore.
-            if (!isChecked && LauncherPreferences.isIgnoreDisplayCutout(this)) {
-                setIgnoreDisplayCutoutQuietly(false);
-            }
-
+            // Fullscreen visibility and notch avoidance are independent. Keeping the
+            // notch preference untouched here prevents Force Fullscreen from silently
+            // reversing the user's safe-area choice on phones such as the Galaxy S22.
             FullscreenUtils.enableImmersive(this);
         });
     }
@@ -1830,14 +1854,9 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             LauncherPreferences.setIgnoreDisplayCutout(this, isChecked);
             updateIgnoreDisplayCutoutSwitchText(isChecked);
 
-            if (isChecked) {
-                // A display cutout can still be excluded by the system unless the
-                // game window is edge-to-edge/fullscreen. Also disable the manual
-                // rounded-corner inset because that setting intentionally adds safe padding.
-                setForceFullscreenQuietly(true);
-                setAvoidRoundedCornersQuietly(false);
-            }
-
+            // ON means avoid/ignore the physical notch as usable game space. Do not
+            // force fullscreen or alter the rounded-corner preference; both options
+            // are deliberately independent now.
             FullscreenUtils.enableImmersive(this);
         });
     }
@@ -1853,11 +1872,8 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             LauncherPreferences.setAvoidRoundedDisplayCorners(this, isChecked);
             updateAvoidRoundedCornersSwitchText(isChecked);
 
-            // Rounded-corner padding fights the notch override because it intentionally
-            // keeps content away from unsafe display edges.
-            if (isChecked && LauncherPreferences.isIgnoreDisplayCutout(this)) {
-                setIgnoreDisplayCutoutQuietly(false);
-            }
+            // Rounded-corner padding and notch avoidance can coexist. The final safe
+            // inset is the larger of the physical cutout inset and this small margin.
         });
     }
 
@@ -1894,7 +1910,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         input.setSelectAllOnFocus(true);
         input.setText(String.valueOf(currentScale));
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.settings_renderer_resolution_scale_title)
                 .setMessage(getString(
                         R.string.settings_renderer_resolution_scale_dialog_message,
@@ -1958,21 +1974,42 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         binding.buttonGameOrientationMode.setOnClickListener(view -> showOrientationModeDialog(true));
     }
 
+    private void setupImeViewportPushSetting() {
+        if (binding == null || binding.switchImeViewportPush == null) return;
+
+        boolean enabled = LauncherPreferences.isImeViewportPushEnabled(this);
+        binding.switchImeViewportPush.setOnCheckedChangeListener(null);
+        binding.switchImeViewportPush.setChecked(enabled);
+        updateImeViewportPushSwitchText(enabled);
+        binding.switchImeViewportPush.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            LauncherPreferences.setImeViewportPushEnabled(this, isChecked);
+            updateImeViewportPushSwitchText(isChecked);
+        });
+    }
+
     private void showOrientationModeDialog(boolean gameOrientation) {
-        List<String> labels = Arrays.asList(
+        List<String> labels = new ArrayList<>(Arrays.asList(
                 getString(R.string.app_orientation_auto_rotate),
                 getString(R.string.app_orientation_landscape),
                 getString(R.string.app_orientation_reverse_landscape),
                 getString(R.string.app_orientation_portrait),
                 getString(R.string.app_orientation_reverse_portrait)
-        );
-        List<String> values = Arrays.asList(
+        ));
+        List<String> values = new ArrayList<>(Arrays.asList(
                 LauncherPreferences.APP_ORIENTATION_AUTO,
                 LauncherPreferences.APP_ORIENTATION_LANDSCAPE,
                 LauncherPreferences.APP_ORIENTATION_REVERSE_LANDSCAPE,
                 LauncherPreferences.APP_ORIENTATION_PORTRAIT,
                 LauncherPreferences.APP_ORIENTATION_REVERSE_PORTRAIT
-        );
+        ));
+
+        // The launcher itself has no Minecraft SurfaceView to center, so expose this
+        // additional mode only for Game Orientation. The Activity stays portrait while
+        // GameActivity places the game surface in a smaller centered landscape rectangle.
+        if (gameOrientation) {
+            labels.add(4, getString(R.string.app_orientation_portrait_centered_game));
+            values.add(4, LauncherPreferences.APP_ORIENTATION_PORTRAIT_CENTERED_GAME);
+        }
 
         String current = gameOrientation
                 ? LauncherPreferences.getGameOrientationMode(this)
@@ -2041,6 +2078,8 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
                 return getString(R.string.app_orientation_portrait);
             case LauncherPreferences.APP_ORIENTATION_REVERSE_PORTRAIT:
                 return getString(R.string.app_orientation_reverse_portrait);
+            case LauncherPreferences.APP_ORIENTATION_PORTRAIT_CENTERED_GAME:
+                return getString(R.string.app_orientation_portrait_centered_game);
             case LauncherPreferences.APP_ORIENTATION_AUTO:
             default:
                 return getString(R.string.app_orientation_auto_rotate);
@@ -2064,6 +2103,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
 
         setupControllerCameraSensitivitySettings();
         setupGyroscopeCameraSettings();
+        setupPhysicalMouseModeSettings();
         setupHardwareMouseDpiScaleSettings();
         setupVirtualMouseAtGameStartSettings();
         setupVirtualMouseSpeedSettings();
@@ -2193,6 +2233,87 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         host.addView(container, Math.min(1, host.getChildCount()));
     }
 
+    private void setupPhysicalMouseModeSettings() {
+        if (binding == null || binding.layoutControllerSettings == null) return;
+
+        LinearLayout host = binding.layoutHardwareMouseDpiScaleHost != null
+                ? binding.layoutHardwareMouseDpiScaleHost
+                : binding.layoutControllerSettings;
+        if (host.findViewWithTag("physical_mouse_mode") != null) return;
+
+        LinearLayout container = new LinearLayout(this);
+        container.setTag("physical_mouse_mode");
+        container.setOrientation(LinearLayout.VERTICAL);
+        container.setPadding(0, dp(12), 0, 0);
+
+        TextView title = new TextView(this);
+        title.setText("Physical Mouse Mode");
+        title.setTextSize(16f);
+        title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
+        container.addView(title, new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        ));
+
+        buttonPhysicalMouseMode = new MaterialButton(this);
+        LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        buttonParams.topMargin = dp(8);
+        container.addView(buttonPhysicalMouseMode, buttonParams);
+
+        textPhysicalMouseModeSummary = new TextView(this);
+        textPhysicalMouseModeSummary.setTextSize(13f);
+        LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        summaryParams.topMargin = dp(4);
+        container.addView(textPhysicalMouseModeSummary, summaryParams);
+
+        buttonPhysicalMouseMode.setOnClickListener(view -> showPhysicalMouseModeDialog());
+        host.addView(container);
+        updatePhysicalMouseModeUi();
+    }
+
+    private void showPhysicalMouseModeDialog() {
+        String current = LauncherPreferences.getPhysicalMouseMode(this);
+        String[] labels = new String[]{"Native Mouse", "Android Virtual Mouse"};
+        int checked = LauncherPreferences.PHYSICAL_MOUSE_MODE_ANDROID_VIRTUAL.equals(current) ? 1 : 0;
+
+        new AlertDialog.Builder(this)
+                .setTitle("Physical Mouse Mode")
+                .setSingleChoiceItems(labels, checked, (dialog, which) -> {
+                    LauncherPreferences.setPhysicalMouseMode(
+                            this,
+                            which == 1
+                                    ? LauncherPreferences.PHYSICAL_MOUSE_MODE_ANDROID_VIRTUAL
+                                    : LauncherPreferences.PHYSICAL_MOUSE_MODE_NATIVE
+                    );
+                    updatePhysicalMouseModeUi();
+                    dialog.dismiss();
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+    }
+
+    private void updatePhysicalMouseModeUi() {
+        if (buttonPhysicalMouseMode == null || textPhysicalMouseModeSummary == null) return;
+        boolean androidVirtual = LauncherPreferences.isAndroidVirtualPhysicalMouse(this);
+        if (androidVirtual) {
+            buttonPhysicalMouseMode.setText("Android Virtual Mouse");
+            textPhysicalMouseModeSummary.setText(
+                    "Less accurate. Uses Android's native OS mouse so the pointer can click "
+                            + "DroidBridge on-screen buttons and also interact with Minecraft.");
+        } else {
+            buttonPhysicalMouseMode.setText("Native Mouse");
+            textPhysicalMouseModeSummary.setText(
+                    "More accurate. Sends physical mouse input directly to Java Minecraft using "
+                            + "DroidBridge's native/raw mouse path.");
+        }
+    }
+
     private void setupHardwareMouseDpiScaleSettings() {
         if (binding == null || binding.layoutControllerSettings == null) return;
 
@@ -2282,23 +2403,13 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         container.setPadding(0, dp(12), 0, 0);
 
         TextView title = new TextView(this);
-        title.setText("Virtual mouse");
+        title.setText("Touch Virtual Mouse");
         title.setTextSize(16f);
         title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
         container.addView(title, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 LinearLayout.LayoutParams.WRAP_CONTENT
         ));
-
-        TextView summary = new TextView(this);
-        summary.setText("Off starts with direct touchscreen mouse input. On starts each game with the virtual cursor enabled. A Toggle virtual cursor button in the selected touch controls can still switch it off and on during play.");
-        summary.setTextSize(13f);
-        LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT
-        );
-        summaryParams.topMargin = dp(2);
-        container.addView(summary, summaryParams);
 
         switchVirtualMouseAtGameStart =
                 new com.google.android.material.switchmaterial.SwitchMaterial(this);
@@ -2415,6 +2526,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         GamepadMappingStore mappingStore = GamepadMappingStore.get(this);
         updateControllerCameraSensitivityUi(mappingStore.getGameCameraSensitivity());
         updateGyroscopeCameraUi();
+        updatePhysicalMouseModeUi();
         updateHardwareMouseDpiScaleUi(mappingStore.getHardwareMouseDpiScale());
         updateVirtualMouseAtGameStartUi();
         updateVirtualMouseSpeedUi(ControlsPreferences.getVirtualMouseSpeedPercent(this));
@@ -2586,8 +2698,8 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         if (switchVirtualMouseAtGameStart != null) {
             switchVirtualMouseAtGameStart.setText(
                     enabled
-                            ? "Start games with virtual cursor: On"
-                            : "Start games with virtual cursor: Off"
+                            ? "Touch Virtual Mouse: On (offset virtual mouse)"
+                            : "Touch Virtual Mouse: Off (normal touch at finger location)"
             );
         }
     }
@@ -2766,7 +2878,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         updateMouseCursorIconPreview(preview, selectedStyle[0], selectedSize[0]);
         sizeValue.setText("Cursor size: " + selectedSize[0] + "%");
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton(android.R.string.ok, null)
@@ -2957,7 +3069,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
     }
 
     private void showNotificationDeniedSettingsDialog() {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.notification_permission_denied_title)
                 .setMessage(R.string.notification_permission_denied_message)
                 .setNegativeButton(android.R.string.cancel, null)
@@ -3056,7 +3168,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
 
     private void showDroidBridgeBackupDialog() {
         File launcherHome = resolveCurrentLauncherHome();
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Back up DroidBridge data")
                 .setMessage("Choose a folder where DroidBridge will create a portable .zip backup of the current data folder. This can include instances, saves, versions, libraries, assets, mods, configs, logs, and account/session files, so choose a private location.")
                 .setNegativeButton(android.R.string.cancel, null)
@@ -3081,7 +3193,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
 
     private void showDroidBridgeRestoreDialog() {
         File launcherHome = resolveCurrentLauncherHome();
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Restore DroidBridge data")
                 .setMessage("Choose a DroidBridge backup .zip to restore into the current data folder. This replaces the current DroidBridge data folder and moves the previous data aside as a .before_restore folder.")
                 .setNegativeButton(android.R.string.cancel, null)
@@ -3111,7 +3223,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
 
     private void confirmDroidBridgeRestore(@NonNull Uri backupZipUri) {
         File launcherHome = resolveCurrentLauncherHome();
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Restore this backup?")
                 .setMessage("DroidBridge will restore this backup into:\n\n"
                         + launcherHome.getAbsolutePath()
@@ -3257,7 +3369,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
     }
 
     private void showSimpleVoiceChatPermissionGrantedDialog() {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.simple_voice_chat_microphone_title)
                 .setMessage(R.string.simple_voice_chat_microphone_already_granted)
                 .setPositiveButton(android.R.string.ok, null)
@@ -3265,7 +3377,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
     }
 
     private void showSimpleVoiceChatPermissionDeniedDialog() {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.simple_voice_chat_microphone_title)
                 .setMessage(R.string.simple_voice_chat_microphone_denied_message)
                 .setNegativeButton(android.R.string.cancel, null)
@@ -3296,6 +3408,14 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             updateLauncherDiagnosticLogsSwitchText(isChecked);
         });
 
+        boolean shareLogChooserEnabled = LauncherPreferences.isShareLogChooserEnabled(this);
+        binding.switchShareLogChooser.setChecked(shareLogChooserEnabled);
+        updateShareLogChooserSwitchText(shareLogChooserEnabled);
+        binding.switchShareLogChooser.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            LauncherPreferences.setShareLogChooserEnabled(this, isChecked);
+            updateShareLogChooserSwitchText(isChecked);
+        });
+
         boolean showInGameSettingsButton = LauncherPreferences.isShowInGameSettingsButton(this);
         binding.switchShowInGameSettingsButton.setChecked(showInGameSettingsButton);
         updateInGameSettingsButtonSwitchText(showInGameSettingsButton);
@@ -3313,10 +3433,27 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         binding.switchDualScreenSwap.setEnabled(dualScreenSupport);
         updateDualScreenSwapSwitchText(dualScreenSwapped);
 
+        boolean dualScreenFourThree = LauncherPreferences.isDualScreenFourThreeLayout(this);
+        binding.switchDualScreenAspectRatio.setChecked(dualScreenFourThree);
+        binding.switchDualScreenAspectRatio.setEnabled(dualScreenSupport);
+        updateDualScreenAspectRatioSwitchText();
+
+        boolean dualScreenFps = LauncherPreferences.isDualScreenFpsEnabled(this);
+        binding.switchDualScreenFps.setChecked(dualScreenFps);
+        binding.switchDualScreenFps.setEnabled(dualScreenSupport);
+        updateDualScreenFpsSwitchText();
+
         binding.switchDualScreenSupport.setOnCheckedChangeListener((buttonView, isChecked) -> {
             LauncherPreferences.setDualScreenSupportEnabled(this, isChecked);
             updateDualScreenSupportSwitchText(isChecked);
             binding.switchDualScreenSwap.setEnabled(isChecked);
+            binding.switchDualScreenAspectRatio.setEnabled(isChecked);
+            binding.switchDualScreenFps.setEnabled(isChecked);
+            if (buttonDualScreenHudLayout != null) buttonDualScreenHudLayout.setEnabled(isChecked);
+            if (buttonDualScreenTouchScale != null) buttonDualScreenTouchScale.setEnabled(isChecked);
+            if (buttonDualScreenBackground != null) buttonDualScreenBackground.setEnabled(isChecked);
+            if (buttonDualScreenMapFrame != null) buttonDualScreenMapFrame.setEnabled(isChecked);
+            refreshRecordingDualScreenOption();
         });
         binding.switchDualScreenSwap.setOnCheckedChangeListener((buttonView, isChecked) -> {
             // This is an absolute desired layout, not a one-shot toggle command.
@@ -3325,13 +3462,32 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             LauncherPreferences.setDualScreenSwapState(this, isChecked);
             updateDualScreenSwapSwitchText(isChecked);
         });
+        binding.switchDualScreenAspectRatio.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            LauncherPreferences.setDualScreenAspectRatio(
+                    this,
+                    isChecked
+                            ? LauncherPreferences.DUAL_SCREEN_ASPECT_RATIO_4_3
+                            : LauncherPreferences.DUAL_SCREEN_ASPECT_RATIO_16_9
+            );
+            updateDualScreenAspectRatioSwitchText();
+        });
+        binding.switchDualScreenFps.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            LauncherPreferences.setDualScreenFpsEnabled(this, isChecked);
+            updateDualScreenFpsSwitchText();
+        });
+        installDualScreenHudLayoutSetting();
+        installDualScreenTouchScaleSetting();
         installDualScreenBackgroundSetting();
         installDualScreenMapFrameSetting();
 
         updateAndroidBackButtonActionButtonText();
         binding.buttonAndroidBackAction.setOnClickListener(view -> showAndroidBackButtonActionDialog());
+        updateInGameMenuKeyboardShortcutButtonText();
+        binding.buttonInGameMenuKeyboardShortcut.setOnClickListener(
+                view -> showInGameMenuKeyboardShortcutDialog());
 
         setupOrientationSettings();
+        setupImeViewportPushSetting();
 
         boolean showGameLogOverlay = LauncherPreferences.isShowGameLogOverlay(this);
         binding.switchShowGameLogOverlay.setChecked(showGameLogOverlay);
@@ -3425,7 +3581,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
                 getString(messageResId)
         );
 
-        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+        AlertDialog.Builder builder = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setPositiveButton(positiveButtonResId, null);
         if (showCancelButton) {
@@ -3496,7 +3652,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
     }
 
     private void showGameAssetCleanupDialog() {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.cleanup_game_files_title)
                 .setMessage(R.string.cleanup_game_files_message)
                 .setNegativeButton(android.R.string.cancel, null)
@@ -3517,7 +3673,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
                 runOnUiThread(() -> {
                     setGameAssetCleanupButtonRunning(false);
                     String message = throwable.getMessage() != null ? throwable.getMessage() : throwable.toString();
-                    new AlertDialog.Builder(this)
+                    new MaterialAlertDialogBuilder(this)
                             .setTitle(R.string.cleanup_game_files_failed_title)
                             .setMessage(getString(R.string.cleanup_game_files_failed_message, message))
                             .setPositiveButton(android.R.string.ok, null)
@@ -3559,7 +3715,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             message.append("\nFailed deletions: ").append(result.getFailedDeleteCount());
         }
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.cleanup_game_files_complete_title)
                 .setMessage(message.toString())
                 .setPositiveButton(android.R.string.ok, null)
@@ -3820,7 +3976,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         argsInputParams.topMargin = dp(4);
         card.addView(argumentsInput, argsInputParams);
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton("Run jar", null)
@@ -3926,7 +4082,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
                         : "DroidBridge will download Fabric's Minecraft and loader version lists, let you choose the target Minecraft version and Fabric Loader version, then run this installer with the correct command-line arguments. "
                         + "After the installer finishes, DroidBridge will create a normal Fabric instance from the installed profile.");
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton("Choose version", null)
@@ -4110,7 +4266,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             group.check(20000);
         }
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton("Next", null)
@@ -4204,7 +4360,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             group.check(30000);
         }
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton("Install", null)
@@ -4402,7 +4558,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
                         + "Instead, DroidBridge will download BTA's release/nightly manifests, show the versions Amethyst marks as tested separately, then create a normal DroidBridge instance that inherits "
                         + BTA_BASE_VERSION_ID + ".");
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton("Choose version", null)
@@ -4483,7 +4639,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             group.check(10000);
         }
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton("Install", null)
@@ -4691,6 +4847,11 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         json.put("type", "old_beta");
         json.put("inheritsFrom", BTA_BASE_VERSION_ID);
         json.put("mainClass", "net.minecraft.client.Minecraft");
+        if (BtaRendererPolicy.isBta8OrNewer(versionId, null)) {
+            JSONObject javaVersion = new JSONObject();
+            javaVersion.put("majorVersion", 17);
+            json.put("javaVersion", javaVersion);
+        }
 
         /*
          * Important for DroidBridge:
@@ -4736,7 +4897,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
 
         if (minecraftVersion.isEmpty()) {
             updateJarExecutionSummary("Unable to infer the Minecraft version from " + displayName + ". Expected a name like OptiFine_1.20.1_HD_U_I6.jar.");
-            new AlertDialog.Builder(this)
+            new MaterialAlertDialogBuilder(this)
                     .setTitle("OptiFine install")
                     .setMessage("Unable to infer the Minecraft version from this file name. Expected a name like OptiFine_1.20.1_HD_U_I6.jar.")
                     .setPositiveButton(android.R.string.ok, null)
@@ -4746,7 +4907,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
 
         if (!agentsReady) {
             updateJarExecutionSummary("OptiFine standalone install requires forge_installer.jar and OptiFineRenamer.jar in DroidBridge components.");
-            new AlertDialog.Builder(this)
+            new MaterialAlertDialogBuilder(this)
                     .setTitle("OptiFine install")
                     .setMessage("OptiFine standalone install requires these component files:\n\n• forge_installer.jar\n• OptiFineRenamer.jar\n\nReinstall DroidBridge components, then try again.")
                     .setPositiveButton(android.R.string.ok, null)
@@ -4754,7 +4915,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             return;
         }
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle("Install OptiFine")
                 .setMessage(message.toString())
                 .setPositiveButton("Install as instance", null)
@@ -5519,10 +5680,128 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
     private void ensureInheritedMinecraftVersionInstalled(
             @NonNull File minecraftHome,
             @NonNull String minecraftVersion
-    ) {
-        throw new UnsupportedOperationException(
-                "Minecraft game acquisition is not included in this public source snapshot."
+    ) throws Exception {
+        /*
+         * A loader profile is not launch-ready merely because its inherited
+         * version JSON and client jar exist. OptiFine also needs every vanilla
+         * library, the asset index, asset objects, and the Android native AAR
+         * extraction produced by MinecraftVersionInstaller.
+         *
+         * The old shortcut downloaded only <version>.json and <version>.jar.
+         * That allowed OptiFine to finish and the instance to be created, but
+         * the first launch then reported missing files until Repair Instance
+         * ran the complete vanilla installer. Always run the complete installer
+         * here; it hash-checks existing files and downloads only missing or
+         * damaged entries, so already-complete versions are retained efficiently.
+         */
+        PathManager.initContextConstants(this);
+        File activeMinecraftHome = new File(PathManager.DIR_MINECRAFT_HOME);
+        if (!activeMinecraftHome.getCanonicalFile().equals(minecraftHome.getCanonicalFile())) {
+            throw new IllegalStateException(
+                    "OptiFine base install path does not match the active launcher storage location: "
+                            + minecraftHome.getAbsolutePath()
+            );
+        }
+
+        MinecraftVersionMetadata metadata = findMinecraftVersionMetadata(minecraftVersion);
+        if (metadata == null || metadata.url.trim().isEmpty()) {
+            throw new IllegalStateException(
+                    "Loader installed, but inherited Minecraft version metadata was not found: "
+                            + minecraftVersion
+            );
+        }
+
+        Logging.i("LauncherSettings", "Verifying complete inherited Minecraft version " + minecraftVersion);
+        updateJarExecutionSummary("Verifying complete Minecraft base " + minecraftVersion + "...");
+        appendJarExecutionProgressLine("Checking vanilla files, libraries, assets, and natives for "
+                + minecraftVersion + "...");
+
+        MinecraftVersion manifestVersion = new MinecraftVersion(
+                metadata.id,
+                metadata.type,
+                metadata.releaseTime,
+                metadata.url
         );
+        MinecraftVersionInstaller.installVanillaVersion(
+                this,
+                manifestVersion,
+                (progress, message) -> {
+                    Logging.i("LauncherSettings", "OptiFine base " + progress + "%: " + message);
+                    appendJarExecutionProgressLine(message);
+                    updateJarExecutionSummary(message);
+                }
+        );
+    }
+
+    @Nullable
+    private MinecraftVersionMetadata findMinecraftVersionMetadata(@NonNull String minecraftVersion) throws Exception {
+        JSONObject manifest = new JSONObject(httpGetTextForJarInstaller("https://piston-meta.mojang.com/mc/game/version_manifest_v2.json"));
+        org.json.JSONArray versions = manifest.optJSONArray("versions");
+        if (versions == null) return null;
+        for (int i = 0; i < versions.length(); i++) {
+            JSONObject item = versions.optJSONObject(i);
+            if (item == null) continue;
+            if (minecraftVersion.equals(item.optString("id", ""))) {
+                return new MinecraftVersionMetadata(
+                        item.optString("id", ""),
+                        item.optString("type", "release"),
+                        item.optString("releaseTime", ""),
+                        item.optString("url", "")
+                );
+            }
+        }
+        return null;
+    }
+
+    @NonNull
+    private String httpGetTextForJarInstaller(@NonNull String urlText) throws Exception {
+        HttpURLConnection connection = (HttpURLConnection) new URL(urlText).openConnection();
+        connection.setConnectTimeout(15000);
+        connection.setReadTimeout(30000);
+        connection.setRequestProperty("User-Agent", "DroidBridge Launcher");
+        int code = connection.getResponseCode();
+        InputStream stream = code >= 200 && code < 300 ? connection.getInputStream() : connection.getErrorStream();
+        if (stream == null) throw new IllegalStateException("HTTP " + code + " for " + urlText);
+        try (InputStream input = stream; java.io.ByteArrayOutputStream output = new java.io.ByteArrayOutputStream()) {
+            byte[] buffer = new byte[16 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
+            String text = output.toString(StandardCharsets.UTF_8.name());
+            if (code < 200 || code >= 300) throw new IllegalStateException("HTTP " + code + ": " + text);
+            return text;
+        } finally {
+            connection.disconnect();
+        }
+    }
+
+    private void downloadFileForJarInstaller(@NonNull String urlText, @NonNull File target) throws Exception {
+        File parent = target.getParentFile();
+        if (parent != null && !parent.exists() && !parent.mkdirs()) {
+            throw new IllegalStateException("Unable to create folder: " + parent.getAbsolutePath());
+        }
+
+        HttpURLConnection connection = (HttpURLConnection) new URL(urlText).openConnection();
+        connection.setConnectTimeout(15000);
+        connection.setReadTimeout(60000);
+        connection.setRequestProperty("User-Agent", "DroidBridge Launcher");
+        int code = connection.getResponseCode();
+        if (code < 200 || code >= 300) {
+            throw new IllegalStateException("HTTP " + code + " while downloading " + urlText);
+        }
+        File tmp = new File(target.getParentFile(), target.getName() + ".tmp");
+        try (InputStream input = connection.getInputStream(); FileOutputStream output = new FileOutputStream(tmp)) {
+            byte[] buffer = new byte[64 * 1024];
+            int read;
+            while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
+        } finally {
+            connection.disconnect();
+        }
+        if (target.isFile() && !target.delete()) {
+            throw new IllegalStateException("Unable to replace existing file: " + target.getAbsolutePath());
+        }
+        if (!tmp.renameTo(target)) {
+            throw new IllegalStateException("Unable to move downloaded file to: " + target.getAbsolutePath());
+        }
     }
 
     @NonNull
@@ -5819,7 +6098,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             logParams.topMargin = dp(12);
             root.addView(logScroll, logParams);
 
-            AlertDialog dialog = new AlertDialog.Builder(this)
+            AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                     .setView(root)
                     .setPositiveButton("Run in background", null)
                     .create();
@@ -7130,7 +7409,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
                         + "Keep DroidBridge open during the repair. Leave at least 1 GB of free device storage for Java runtimes, LWJGL files, and temporary extraction data."
         );
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton("Reinstall", null)
@@ -7166,19 +7445,19 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
                 PathManager.initContextConstants(getApplicationContext());
                 ComponentInstallationManager.InstallResult result = reinstallEverything
                         ? ComponentInstallationManager.reinstallAll(
-                                getApplicationContext(),
-                                (current, total, itemName, detail) ->
-                                        updateRuntimeComponentsReinstallSummary(
-                                                detail + " (" + current + "/" + total + ")"
-                                        )
-                        )
+                        getApplicationContext(),
+                        (current, total, itemName, detail) ->
+                                updateRuntimeComponentsReinstallSummary(
+                                        detail + " (" + current + "/" + total + ")"
+                                )
+                )
                         : ComponentInstallationManager.installMissing(
-                                getApplicationContext(),
-                                (current, total, itemName, detail) ->
-                                        updateRuntimeComponentsReinstallSummary(
-                                                detail + " (" + current + "/" + total + ")"
-                                        )
-                        );
+                        getApplicationContext(),
+                        (current, total, itemName, detail) ->
+                                updateRuntimeComponentsReinstallSummary(
+                                        detail + " (" + current + "/" + total + ")"
+                                )
+                );
 
                 runOnUiThread(() -> finishRuntimeComponentsReinstall(result));
             } catch (Throwable throwable) {
@@ -7243,7 +7522,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         }
         message.append("\nTry reinstalling again. If it still fails, clear DroidBridge cache, restart the phone, and confirm that at least 1 GB of device storage is free.");
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Components still missing")
                 .setMessage(message.toString())
                 .setNegativeButton("Close", null)
@@ -7640,7 +7919,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
                 LinearLayout.LayoutParams.WRAP_CONTENT
         ));
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .create();
 
@@ -7667,7 +7946,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         input.setSelectAllOnFocus(true);
         input.setText(String.valueOf(currentMemoryMb));
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.memory_dialog_title)
                 .setMessage(getString(R.string.memory_dialog_message, maxMemoryMb))
                 .setView(input)
@@ -7800,6 +8079,147 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         binding.buttonAndroidBackAction.setText(label);
     }
 
+    private void showInGameMenuKeyboardShortcutDialog() {
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle(R.string.in_game_menu_keyboard_shortcut_capture_title)
+                .setMessage(R.string.in_game_menu_keyboard_shortcut_capture_summary)
+                .setNeutralButton("Clear", (dialogInterface, which) -> {
+                    LauncherPreferences.setInGameMenuKeyboardShortcut(this, 0, 0);
+                    updateInGameMenuKeyboardShortcutButtonText();
+                })
+                .setNegativeButton("Cancel", null)
+                .create();
+
+        dialog.setOnKeyListener((dialogInterface, keyCode, event) -> {
+            if (event == null || event.getAction() != KeyEvent.ACTION_DOWN
+                    || event.getRepeatCount() != 0) {
+                return true;
+            }
+
+            // Only accept actual keyboard events. Controller buttons must keep their existing
+            // mapping behavior and must never become launcher-menu shortcuts accidentally.
+            int source = event.getSource();
+            boolean keyboardSource = source == 0
+                    || (source & InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD;
+            int normalizedKeyCode = normalizeKeyboardShortcutCaptureKeyCode(keyCode, event);
+            // Do not reject an entire HID device just because Android also reports GAMEPAD or
+            // JOYSTICK sources. DeX docks and many USB/Bluetooth keyboard+mouse receivers are
+            // composite devices. Reject actual controller key codes instead.
+            if (!keyboardSource || isControllerShortcutPrimaryKey(normalizedKeyCode)) {
+                Toast.makeText(this,
+                        "Press a shortcut on a physical keyboard.",
+                        Toast.LENGTH_SHORT).show();
+                return true;
+            }
+
+            // Modifier DOWN arrives before the primary key. Keep the dialog open and wait for
+            // the non-modifier key so Ctrl+Esc / Alt+F8 / Ctrl+Shift+M are captured as one
+            // shortcut instead of accidentally binding just Ctrl, Alt, Shift, or Meta.
+            if (KeyEvent.isModifierKey(normalizedKeyCode)) {
+                return true;
+            }
+
+            // A genuine Android navigation Back still cancels the dialog. Physical keyboard
+            // Escape reported as Back/scan-code 1 was normalized to KEYCODE_ESCAPE above.
+            if (normalizedKeyCode == KeyEvent.KEYCODE_BACK) {
+                dialog.dismiss();
+                return true;
+            }
+
+            if (isSystemReservedShortcutPrimaryKey(normalizedKeyCode)) {
+                Toast.makeText(this,
+                        "Android reserves that key. Choose another keyboard shortcut.",
+                        Toast.LENGTH_SHORT).show();
+                return true;
+            }
+
+            int modifiers = normalizedKeyboardShortcutModifiers(event.getMetaState());
+            LauncherPreferences.setInGameMenuKeyboardShortcut(
+                    this, normalizedKeyCode, modifiers);
+            updateInGameMenuKeyboardShortcutButtonText();
+            Toast.makeText(this,
+                    "In-game launcher menu shortcut: "
+                            + keyboardShortcutLabel(normalizedKeyCode, modifiers),
+                    Toast.LENGTH_SHORT).show();
+            dialog.dismiss();
+            return true;
+        });
+        dialog.setOnShowListener(dialogInterface -> styleLauncherDialogChrome(dialog));
+        dialog.show();
+    }
+
+    private void updateInGameMenuKeyboardShortcutButtonText() {
+        if (binding == null || binding.buttonInGameMenuKeyboardShortcut == null) return;
+        int keyCode = LauncherPreferences.getInGameMenuKeyboardShortcutKeyCode(this);
+        int modifiers = LauncherPreferences.getInGameMenuKeyboardShortcutModifiers(this);
+        binding.buttonInGameMenuKeyboardShortcut.setText(
+                keyCode == 0
+                        ? getString(R.string.in_game_menu_keyboard_shortcut_disabled)
+                        : "Keyboard shortcut: " + keyboardShortcutLabel(keyCode, modifiers));
+    }
+
+    private static int normalizeKeyboardShortcutCaptureKeyCode(int keyCode, @NonNull KeyEvent event) {
+        if (keyCode == KeyEvent.KEYCODE_BACK
+                && (event.getSource() & InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD
+                && event.getScanCode() == 1) {
+            return KeyEvent.KEYCODE_ESCAPE;
+        }
+        return keyCode;
+    }
+
+    private static int normalizedKeyboardShortcutModifiers(int metaState) {
+        int normalized = KeyEvent.normalizeMetaState(metaState);
+        return normalized & (KeyEvent.META_CTRL_ON
+                | KeyEvent.META_ALT_ON
+                | KeyEvent.META_SHIFT_ON
+                | KeyEvent.META_META_ON);
+    }
+
+    private static boolean isControllerShortcutPrimaryKey(int keyCode) {
+        if (KeyEvent.isGamepadButton(keyCode)) return true;
+        switch (keyCode) {
+            case KeyEvent.KEYCODE_DPAD_UP:
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static boolean isSystemReservedShortcutPrimaryKey(int keyCode) {
+        return keyCode == KeyEvent.KEYCODE_HOME
+                || keyCode == KeyEvent.KEYCODE_POWER
+                || keyCode == KeyEvent.KEYCODE_APP_SWITCH;
+    }
+
+    @NonNull
+    private static String keyboardShortcutLabel(int keyCode, int modifiers) {
+        StringBuilder label = new StringBuilder();
+        if ((modifiers & KeyEvent.META_CTRL_ON) != 0) label.append("Ctrl + ");
+        if ((modifiers & KeyEvent.META_ALT_ON) != 0) label.append("Alt + ");
+        if ((modifiers & KeyEvent.META_SHIFT_ON) != 0) label.append("Shift + ");
+        if ((modifiers & KeyEvent.META_META_ON) != 0) label.append("Meta + ");
+        label.append(keyboardShortcutPrimaryKeyLabel(keyCode));
+        return label.toString();
+    }
+
+    @NonNull
+    private static String keyboardShortcutPrimaryKeyLabel(int keyCode) {
+        if (keyCode == KeyEvent.KEYCODE_ESCAPE) return "Esc";
+        if (keyCode == KeyEvent.KEYCODE_ENTER) return "Enter";
+        if (keyCode == KeyEvent.KEYCODE_SPACE) return "Space";
+
+        String value = KeyEvent.keyCodeToString(keyCode);
+        if (value == null || value.trim().isEmpty()) return "Key " + keyCode;
+        if (value.startsWith("KEYCODE_")) value = value.substring("KEYCODE_".length());
+        value = value.replace('_', ' ').trim();
+        if (value.isEmpty()) return "Key " + keyCode;
+        return value;
+    }
+
     private void showGridPlayIconModeDialog() {
         List<String> labels = Arrays.asList(
                 getString(R.string.grid_play_icon_mode_regular),
@@ -7892,6 +8312,15 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         );
     }
 
+    private void updateImeViewportPushSwitchText(boolean enabled) {
+        if (binding == null || binding.switchImeViewportPush == null) return;
+        binding.switchImeViewportPush.setText(
+                enabled
+                        ? R.string.settings_game_ime_viewport_push_on
+                        : R.string.settings_game_ime_viewport_push_off
+        );
+    }
+
     private void updateSystemVulkanDriverSwitchText(boolean useSystemVulkanDriver) {
         binding.switchUseSystemVulkanDriver.setText(
                 useSystemVulkanDriver
@@ -7957,6 +8386,402 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         );
     }
 
+    // DROIDBRIDGE_DUAL_SCREEN_SETTINGS_SECTION_BEGIN
+    /**
+     * Moves the existing Dual-screen controls out of Launcher Settings and into a
+     * normal MaterialCardView section on this same settings ScrollView. The existing
+     * switches/buttons themselves are re-parented, so every listener and preference
+     * binding remains the same object and no setting is duplicated.
+     */
+    private void setupDualScreenSettingsSection() {
+        if (binding == null || cardDualScreenSettings != null) return;
+
+        android.view.ViewParent rawSourceParent = binding.switchDualScreenSupport.getParent();
+        android.view.ViewParent rawPageParent = binding.cardInstanceSettings.getParent();
+        if (!(rawSourceParent instanceof LinearLayout) || !(rawPageParent instanceof LinearLayout)) {
+            Logging.e("LauncherSettings", "Dual-screen Settings section: expected LinearLayout parents; no views moved");
+            return;
+        }
+
+        LinearLayout source = (LinearLayout) rawSourceParent;
+        LinearLayout page = (LinearLayout) rawPageParent;
+
+        // setupLauncherSettings() creates these four dynamic rows before this method runs.
+        if (buttonDualScreenHudLayout == null || textDualScreenHudLayoutSummary == null
+                || buttonDualScreenBackground == null || textDualScreenBackgroundSummary == null
+                || buttonDualScreenMapFrame == null || textDualScreenMapFrameSummary == null
+                || buttonDualScreenTouchScale == null || textDualScreenTouchScaleSummary == null) {
+            Logging.e("LauncherSettings", "Dual-screen Settings section: one or more existing Dual-screen rows are missing; no views moved");
+            return;
+        }
+
+        int first = source.indexOfChild(binding.switchDualScreenSupport);
+        int last = first;
+        View[] anchors = new View[] {
+                binding.switchDualScreenSupport,
+                binding.switchDualScreenSwap,
+                binding.switchDualScreenAspectRatio,
+                binding.switchDualScreenFps,
+                buttonDualScreenHudLayout,
+                textDualScreenHudLayoutSummary,
+                buttonDualScreenBackground,
+                textDualScreenBackgroundSummary,
+                buttonDualScreenMapFrame,
+                textDualScreenMapFrameSummary,
+                buttonDualScreenTouchScale,
+                textDualScreenTouchScaleSummary
+        };
+        for (View anchor : anchors) {
+            int index = source.indexOfChild(anchor);
+            if (index < 0) {
+                Logging.e("LauncherSettings", "Dual-screen Settings section: an expected existing view is not in Launcher Settings; no views moved");
+                return;
+            }
+            last = Math.max(last, index);
+        }
+        if (first < 0 || last < first) return;
+
+        // Guard the two known neighboring Launcher settings. If either ever moves into
+        // the Dual-screen range in a future layout revision, fail closed instead of
+        // accidentally stealing an unrelated setting.
+        int inGameButtonIndex = source.indexOfChild(binding.switchShowInGameSettingsButton);
+        int androidBackIndex = source.indexOfChild(binding.buttonAndroidBackAction);
+        if ((inGameButtonIndex >= first && inGameButtonIndex <= last)
+                || (androidBackIndex >= first && androidBackIndex <= last)) {
+            Logging.e("LauncherSettings", "Dual-screen Settings section: range overlaps a non-Dual-screen setting; no views moved");
+            return;
+        }
+
+        ArrayList<View> dualViews = new ArrayList<>();
+        for (int i = first; i <= last; i++) {
+            dualViews.add(source.getChildAt(i));
+        }
+
+        MaterialCardView card = new MaterialCardView(this);
+        card.setTag("dual_screen_settings_card");
+        // Match the existing Instances card instead of inventing a second settings style.
+        card.setRadius(binding.cardInstanceSettings.getRadius());
+        card.setCardElevation(binding.cardInstanceSettings.getCardElevation());
+        card.setMaxCardElevation(binding.cardInstanceSettings.getMaxCardElevation());
+        card.setUseCompatPadding(binding.cardInstanceSettings.getUseCompatPadding());
+        card.setPreventCornerOverlap(binding.cardInstanceSettings.getPreventCornerOverlap());
+        card.setCardBackgroundColor(binding.cardInstanceSettings.getCardBackgroundColor());
+        card.setStrokeWidth(binding.cardInstanceSettings.getStrokeWidth());
+        card.setStrokeColor(binding.cardInstanceSettings.getStrokeColor());
+
+        LinearLayout.LayoutParams cardParams;
+        ViewGroup.LayoutParams existingCardParams = binding.cardInstanceSettings.getLayoutParams();
+        if (existingCardParams instanceof LinearLayout.LayoutParams) {
+            cardParams = new LinearLayout.LayoutParams((LinearLayout.LayoutParams) existingCardParams);
+        } else {
+            cardParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            cardParams.topMargin = dp(12);
+        }
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(source.getPaddingLeft(), source.getPaddingTop(),
+                source.getPaddingRight(), source.getPaddingBottom());
+        card.addView(content, new android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView sourceTitle = findSettingsSectionTitle(
+                binding.cardInstanceSettings,
+                getString(R.string.settings_instance_title)
+        );
+        TextView title = cloneSettingsSectionTitle(sourceTitle, "Dual-screen Settings");
+        content.addView(title);
+
+        // Re-parent the complete contiguous Dual-screen block. This also carries the
+        // existing XML summary TextViews for the four switches, while the four dynamic
+        // button/summary pairs remain in their already-established order:
+        // HUD layout -> background -> exploration map -> touch scale.
+        for (View view : dualViews) {
+            source.removeView(view);
+            content.addView(view);
+        }
+
+        int instanceIndex = page.indexOfChild(binding.cardInstanceSettings);
+        int insertIndex = instanceIndex >= 0
+                ? Math.min(page.getChildCount(), instanceIndex + 1)
+                : page.getChildCount();
+        page.addView(card, insertIndex, cardParams);
+        cardDualScreenSettings = card;
+
+        Logging.i("LauncherSettings", "Dual-screen Settings section installed on main settings page; existing controls moved=" + dualViews.size());
+    }
+
+    // DROIDBRIDGE_RECORDING_SETTINGS_SECTION_BEGIN
+    /**
+     * Installs a dedicated Recording section and tab without duplicating any existing
+     * launcher settings. This is intentionally a small first version so more recording
+     * controls (quality, frame rate, dual-display layout, audio choices) can be added later.
+     */
+    private void setupRecordingSettingsSection() {
+        if (binding == null || cardRecordingSettings != null) return;
+        android.view.ViewParent rawPageParent = binding.cardInstanceSettings.getParent();
+        if (!(rawPageParent instanceof LinearLayout)) {
+            Logging.e("LauncherSettings", "Recording Settings section: expected LinearLayout parent");
+            return;
+        }
+
+        LinearLayout page = (LinearLayout) rawPageParent;
+        MaterialCardView card = new MaterialCardView(this);
+        card.setTag("recording_settings_card");
+        card.setRadius(binding.cardInstanceSettings.getRadius());
+        card.setCardElevation(binding.cardInstanceSettings.getCardElevation());
+        card.setMaxCardElevation(binding.cardInstanceSettings.getMaxCardElevation());
+        card.setUseCompatPadding(binding.cardInstanceSettings.getUseCompatPadding());
+        card.setPreventCornerOverlap(binding.cardInstanceSettings.getPreventCornerOverlap());
+        card.setCardBackgroundColor(binding.cardInstanceSettings.getCardBackgroundColor());
+        card.setStrokeWidth(binding.cardInstanceSettings.getStrokeWidth());
+        card.setStrokeColor(binding.cardInstanceSettings.getStrokeColor());
+
+        LinearLayout.LayoutParams cardParams;
+        ViewGroup.LayoutParams existingCardParams = binding.cardInstanceSettings.getLayoutParams();
+        if (existingCardParams instanceof LinearLayout.LayoutParams) {
+            cardParams = new LinearLayout.LayoutParams((LinearLayout.LayoutParams) existingCardParams);
+        } else {
+            cardParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            cardParams.topMargin = dp(12);
+        }
+
+        LinearLayout content = new LinearLayout(this);
+        content.setOrientation(LinearLayout.VERTICAL);
+        content.setPadding(dp(16), dp(16), dp(16), dp(16));
+        card.addView(content, new android.widget.FrameLayout.LayoutParams(
+                android.widget.FrameLayout.LayoutParams.MATCH_PARENT,
+                android.widget.FrameLayout.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView title = cloneSettingsSectionTitle(null, "Recording Settings");
+        content.addView(title);
+
+        TextView summary = new TextView(this);
+        summary.setText("Recording saves MP4 videos to Movies/DroidBridge/Recordings. Choose game audio, microphone voice, or both. When DroidBridge Dual-screen Mode is enabled, this tab can also record the HUD/touch display at the same time.");
+        summary.setTextSize(13f);
+        LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        summaryParams.bottomMargin = dp(10);
+        content.addView(summary, summaryParams);
+
+        MaterialButton audioModeButton = new MaterialButton(this);
+        audioModeButton.setTag("recording_audio_mode");
+        updateRecordingAudioModeText(audioModeButton);
+        audioModeButton.setOnClickListener(view -> showRecordingAudioModeDialog(audioModeButton));
+        LinearLayout.LayoutParams audioButtonParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        audioButtonParams.bottomMargin = dp(4);
+        content.addView(audioModeButton, audioButtonParams);
+
+        TextView audioModeSummary = new TextView(this);
+        audioModeSummary.setText("Select what goes into the recording's audio track. Voice modes use the device microphone; Voice & Game Audio mixes microphone voice with Minecraft audio.");
+        audioModeSummary.setTextSize(13f);
+        LinearLayout.LayoutParams audioSummaryParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        audioSummaryParams.bottomMargin = dp(10);
+        content.addView(audioModeSummary, audioSummaryParams);
+
+        com.google.android.material.switchmaterial.SwitchMaterial bothScreens =
+                new com.google.android.material.switchmaterial.SwitchMaterial(this);
+        bothScreens.setTag("recording_both_screens");
+        bothScreens.setChecked(RecordingPreferences.isRecordBothScreensEnabled(this));
+        updateRecordingBothScreensText(bothScreens, bothScreens.isChecked());
+        bothScreens.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            RecordingPreferences.setRecordBothScreensEnabled(this, isChecked);
+            updateRecordingBothScreensText(bothScreens, isChecked);
+        });
+        content.addView(bothScreens, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+        switchRecordingBothScreens = bothScreens;
+
+        TextView bothScreensSummary = new TextView(this);
+        bothScreensSummary.setText("Records the Minecraft/game display plus DroidBridge's HUD/touch display as a matched second MP4. The selected recording audio mode is stored in the game-screen MP4. This option is shown only while Dual-screen Mode is enabled.");
+        bothScreensSummary.setTextSize(13f);
+        LinearLayout.LayoutParams bothSummaryParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        bothSummaryParams.topMargin = dp(2);
+        bothSummaryParams.bottomMargin = dp(10);
+        content.addView(bothScreensSummary, bothSummaryParams);
+        textRecordingBothScreensSummary = bothScreensSummary;
+
+        com.google.android.material.switchmaterial.SwitchMaterial hideTouch =
+                new com.google.android.material.switchmaterial.SwitchMaterial(this);
+        hideTouch.setTag("recording_hide_touch_controls");
+        hideTouch.setChecked(RecordingPreferences.isHideTouchControlsEnabled(this));
+        updateRecordingHideTouchText(hideTouch, hideTouch.isChecked());
+        hideTouch.setOnCheckedChangeListener((buttonView, isChecked) -> {
+            RecordingPreferences.setHideTouchControlsEnabled(this, isChecked);
+            updateRecordingHideTouchText(hideTouch, isChecked);
+        });
+        content.addView(hideTouch, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView hideSummary = new TextView(this);
+        hideSummary.setText("When enabled, touch controls stay visible and usable on your device, but DroidBridge excludes their artwork from the recording. The controls are no longer hidden from the player while capture is active.");
+        hideSummary.setTextSize(13f);
+        LinearLayout.LayoutParams hideSummaryParams = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        hideSummaryParams.topMargin = dp(2);
+        content.addView(hideSummary, hideSummaryParams);
+
+        // Keep the physical settings-card order identical to the tab order:
+        // Launcher Settings -> Recording Settings -> Instance Settings -> Dual-screen Settings.
+        int launcherIndex = page.indexOfChild(binding.cardLauncherSettings);
+        int insertIndex = launcherIndex >= 0
+                ? Math.min(page.getChildCount(), launcherIndex + 1)
+                : page.getChildCount();
+        page.addView(card, insertIndex, cardParams);
+        cardRecordingSettings = card;
+        refreshRecordingDualScreenOption();
+        Logging.i("LauncherSettings", "Recording Settings section installed");
+    }
+
+    private void refreshRecordingDualScreenOption() {
+        com.google.android.material.switchmaterial.SwitchMaterial toggle = switchRecordingBothScreens;
+        TextView summary = textRecordingBothScreensSummary;
+        if (toggle == null || summary == null) return;
+
+        boolean dualScreenEnabled = LauncherPreferences.isDualScreenSupportEnabled(this);
+        int visibility = dualScreenEnabled ? View.VISIBLE : View.GONE;
+        toggle.setVisibility(visibility);
+        summary.setVisibility(visibility);
+        if (!dualScreenEnabled) return;
+
+        boolean enabled = RecordingPreferences.isRecordBothScreensEnabled(this);
+        if (toggle.isChecked() != enabled) toggle.setChecked(enabled);
+        updateRecordingBothScreensText(toggle, enabled);
+    }
+
+    private void showRecordingAudioModeDialog(@NonNull MaterialButton button) {
+        final String[] labels = new String[]{
+                "Game Only Audio",
+                "Voice Only Audio",
+                "Voice & Game Audio"
+        };
+        final String[] modes = new String[]{
+                RecordingPreferences.AUDIO_MODE_GAME_ONLY,
+                RecordingPreferences.AUDIO_MODE_VOICE_ONLY,
+                RecordingPreferences.AUDIO_MODE_VOICE_AND_GAME
+        };
+
+        String current = RecordingPreferences.getAudioMode(this);
+        int selected = 0;
+        for (int i = 0; i < modes.length; i++) {
+            if (modes[i].equals(current)) {
+                selected = i;
+                break;
+            }
+        }
+
+        final androidx.appcompat.app.AlertDialog[] dialogRef = new androidx.appcompat.app.AlertDialog[1];
+        androidx.appcompat.app.AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle("Recording audio")
+                .setSingleChoiceItems(labels, selected, (whichDialog, which) -> {
+                    int safeIndex = Math.max(0, Math.min(which, modes.length - 1));
+                    RecordingPreferences.setAudioMode(this, modes[safeIndex]);
+                    updateRecordingAudioModeText(button);
+                    if (dialogRef[0] != null) dialogRef[0].dismiss();
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .create();
+        dialogRef[0] = dialog;
+        dialog.show();
+    }
+
+    private void updateRecordingAudioModeText(@NonNull MaterialButton button) {
+        button.setText("Recording audio: " + RecordingPreferences.getAudioModeLabel(this));
+    }
+
+    private void updateRecordingBothScreensText(
+            @NonNull com.google.android.material.switchmaterial.SwitchMaterial toggle,
+            boolean enabled
+    ) {
+        toggle.setText(enabled
+                ? "Record both screens: On"
+                : "Record both screens: Off");
+    }
+
+    private void updateRecordingHideTouchText(
+            @NonNull com.google.android.material.switchmaterial.SwitchMaterial toggle,
+            boolean enabled
+    ) {
+        toggle.setText(enabled
+                ? "Hide touch controls in recordings: On"
+                : "Hide touch controls in recordings: Off");
+    }
+    // DROIDBRIDGE_RECORDING_SETTINGS_SECTION_END
+
+    @Nullable
+    private TextView findSettingsSectionTitle(@NonNull View root, @NonNull CharSequence wanted) {
+        if (root instanceof TextView) {
+            TextView textView = (TextView) root;
+            CharSequence value = textView.getText();
+            if (value != null && wanted.toString().contentEquals(value)) return textView;
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) root;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                TextView found = findSettingsSectionTitle(group.getChildAt(i), wanted);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
+    @NonNull
+    private TextView cloneSettingsSectionTitle(@Nullable TextView source, @NonNull String titleText) {
+        TextView title = new TextView(this);
+        title.setText(titleText);
+        if (source != null) {
+            title.setTextColor(source.getTextColors());
+            title.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, source.getTextSize());
+            title.setTypeface(source.getTypeface());
+            title.setGravity(source.getGravity());
+            title.setIncludeFontPadding(source.getIncludeFontPadding());
+            title.setPadding(source.getPaddingLeft(), source.getPaddingTop(),
+                    source.getPaddingRight(), source.getPaddingBottom());
+            ViewGroup.LayoutParams params = source.getLayoutParams();
+            if (params instanceof LinearLayout.LayoutParams) {
+                title.setLayoutParams(new LinearLayout.LayoutParams((LinearLayout.LayoutParams) params));
+            }
+        } else {
+            title.setTextColor(COLOR_TEXT_PRIMARY);
+            title.setTextSize(20f);
+            title.setTypeface(Typeface.DEFAULT_BOLD);
+            LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            params.bottomMargin = dp(10);
+            title.setLayoutParams(params);
+        }
+        return title;
+    }
+    // DROIDBRIDGE_DUAL_SCREEN_SETTINGS_SECTION_END
+
     private void refreshDualScreenSettingsUi() {
         if (binding == null
                 || binding.switchDualScreenSupport == null
@@ -7969,10 +8794,213 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         binding.switchDualScreenSupport.setChecked(enabled);
         binding.switchDualScreenSwap.setEnabled(enabled);
         binding.switchDualScreenSwap.setChecked(swapped);
+        binding.switchDualScreenAspectRatio.setEnabled(enabled);
+        binding.switchDualScreenAspectRatio.setChecked(LauncherPreferences.isDualScreenFourThreeLayout(this));
+        binding.switchDualScreenFps.setEnabled(enabled);
+        binding.switchDualScreenFps.setChecked(LauncherPreferences.isDualScreenFpsEnabled(this));
         updateDualScreenSupportSwitchText(enabled);
         updateDualScreenSwapSwitchText(swapped);
+        updateDualScreenAspectRatioSwitchText();
+        updateDualScreenFpsSwitchText();
+        updateDualScreenHudLayoutSettingUi();
+        updateDualScreenTouchScaleSettingUi();
         updateDualScreenBackgroundSettingUi();
         updateDualScreenMapFrameSettingUi();
+    }
+
+    private void installDualScreenHudLayoutSetting() {
+        if (binding == null || binding.switchDualScreenSwap == null) return;
+        android.view.ViewParent rawParent = binding.switchDualScreenSwap.getParent();
+        if (!(rawParent instanceof ViewGroup)) return;
+
+        ViewGroup parent = (ViewGroup) rawParent;
+        final String buttonTag = "dual_screen_hud_layout_button";
+        final String summaryTag = "dual_screen_hud_layout_summary";
+
+        View existingButton = parent.findViewWithTag(buttonTag);
+        if (existingButton instanceof MaterialButton) {
+            buttonDualScreenHudLayout = (MaterialButton) existingButton;
+        } else {
+            MaterialButton button = new MaterialButton(
+                    this,
+                    null,
+                    com.google.android.material.R.attr.materialButtonOutlinedStyle
+            );
+            button.setTag(buttonTag);
+            button.setAllCaps(false);
+            button.setOnClickListener(view -> showDualScreenHudLayoutDialog());
+
+            LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            buttonParams.topMargin = dp(10);
+            int anchorIndex = parent.indexOfChild(binding.textDualScreenFpsSummary);
+            if (anchorIndex < 0) anchorIndex = parent.indexOfChild(binding.switchDualScreenSwap);
+            parent.addView(button, Math.min(parent.getChildCount(), Math.max(0, anchorIndex + 1)), buttonParams);
+            buttonDualScreenHudLayout = button;
+        }
+
+        View existingSummary = parent.findViewWithTag(summaryTag);
+        if (existingSummary instanceof TextView) {
+            textDualScreenHudLayoutSummary = (TextView) existingSummary;
+        } else {
+            TextView summary = new TextView(this);
+            summary.setTag(summaryTag);
+            summary.setText("Modern keeps the current HUD style with larger status/XP elements. Legacy uses the old-console-inspired HUD arrangement. 3DS matches the compact map-and-button lower screen and intentionally hides hearts, armor, hunger, air, and XP from the bottom display.");
+
+            LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            summaryParams.topMargin = dp(2);
+            int buttonIndex = buttonDualScreenHudLayout == null
+                    ? parent.getChildCount()
+                    : parent.indexOfChild(buttonDualScreenHudLayout);
+            parent.addView(summary, Math.min(parent.getChildCount(), buttonIndex + 1), summaryParams);
+            textDualScreenHudLayoutSummary = summary;
+        }
+        updateDualScreenHudLayoutSettingUi();
+    }
+
+    private void updateDualScreenHudLayoutSettingUi() {
+        if (buttonDualScreenHudLayout == null) return;
+        buttonDualScreenHudLayout.setEnabled(LauncherPreferences.isDualScreenSupportEnabled(this));
+        String layout = LauncherPreferences.getDualScreenHudLayout(this);
+        String label;
+        if (LauncherPreferences.DUAL_SCREEN_HUD_LAYOUT_LEGACY.equals(layout)) {
+            label = "Legacy";
+        } else if (LauncherPreferences.DUAL_SCREEN_HUD_LAYOUT_3DS.equals(layout)) {
+            label = "3DS";
+        } else {
+            label = "Modern";
+        }
+        buttonDualScreenHudLayout.setText("Bottom-screen HUD layout: " + label);
+    }
+
+    private void showDualScreenHudLayoutDialog() {
+        String current = LauncherPreferences.getDualScreenHudLayout(this);
+        int checked;
+        if (LauncherPreferences.DUAL_SCREEN_HUD_LAYOUT_LEGACY.equals(current)) {
+            checked = 1;
+        } else if (LauncherPreferences.DUAL_SCREEN_HUD_LAYOUT_3DS.equals(current)) {
+            checked = 2;
+        } else {
+            checked = 0;
+        }
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("Bottom-screen HUD layout")
+                .setSingleChoiceItems(
+                        new String[]{"Modern", "Legacy", "3DS"},
+                        checked,
+                        (dialog, which) -> {
+                            String selected;
+                            if (which == 1) {
+                                selected = LauncherPreferences.DUAL_SCREEN_HUD_LAYOUT_LEGACY;
+                            } else if (which == 2) {
+                                selected = LauncherPreferences.DUAL_SCREEN_HUD_LAYOUT_3DS;
+                            } else {
+                                selected = LauncherPreferences.DUAL_SCREEN_HUD_LAYOUT_MODERN;
+                            }
+                            LauncherPreferences.setDualScreenHudLayout(this, selected);
+                            updateDualScreenHudLayoutSettingUi();
+                            dialog.dismiss();
+                        }
+                )
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
+    }
+
+    private void installDualScreenTouchScaleSetting() {
+        if (binding == null || binding.switchDualScreenSwap == null) return;
+        android.view.ViewParent rawParent = binding.switchDualScreenSwap.getParent();
+        if (!(rawParent instanceof ViewGroup)) return;
+
+        ViewGroup parent = (ViewGroup) rawParent;
+        final String buttonTag = "dual_screen_touch_scale_button";
+        final String summaryTag = "dual_screen_touch_scale_summary";
+
+        View existingButton = parent.findViewWithTag(buttonTag);
+        if (existingButton instanceof MaterialButton) {
+            buttonDualScreenTouchScale = (MaterialButton) existingButton;
+        } else {
+            MaterialButton button = new MaterialButton(
+                    this,
+                    null,
+                    com.google.android.material.R.attr.materialButtonOutlinedStyle
+            );
+            button.setTag(buttonTag);
+            button.setAllCaps(false);
+            button.setOnClickListener(view -> showDualScreenTouchScaleDialog());
+
+            LinearLayout.LayoutParams buttonParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            buttonParams.topMargin = dp(10);
+            int anchorIndex = textDualScreenHudLayoutSummary == null
+                    ? parent.indexOfChild(buttonDualScreenHudLayout)
+                    : parent.indexOfChild(textDualScreenHudLayoutSummary);
+            if (anchorIndex < 0) anchorIndex = parent.indexOfChild(binding.textDualScreenFpsSummary);
+            parent.addView(button, Math.min(parent.getChildCount(), Math.max(0, anchorIndex + 1)), buttonParams);
+            buttonDualScreenTouchScale = button;
+        }
+
+        View existingSummary = parent.findViewWithTag(summaryTag);
+        if (existingSummary instanceof TextView) {
+            textDualScreenTouchScaleSummary = (TextView) existingSummary;
+        } else {
+            TextView summary = new TextView(this);
+            summary.setTag(summaryTag);
+            summary.setText("Scales only the touch-control overlay on the bottom screen. Useful when the phone is attached to a TV or monitor; the normal single-screen touch layout is unchanged.");
+
+            LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            summaryParams.topMargin = dp(2);
+            int buttonIndex = buttonDualScreenTouchScale == null
+                    ? parent.getChildCount()
+                    : parent.indexOfChild(buttonDualScreenTouchScale);
+            parent.addView(summary, Math.min(parent.getChildCount(), buttonIndex + 1), summaryParams);
+            textDualScreenTouchScaleSummary = summary;
+        }
+        updateDualScreenTouchScaleSettingUi();
+    }
+
+    private void updateDualScreenTouchScaleSettingUi() {
+        if (buttonDualScreenTouchScale == null) return;
+        buttonDualScreenTouchScale.setEnabled(LauncherPreferences.isDualScreenSupportEnabled(this));
+        int percent = ControlsPreferences.getDualScreenButtonScalePercent(this);
+        buttonDualScreenTouchScale.setText("Bottom-screen touch control scale: " + percent + "%");
+    }
+
+    private void showDualScreenTouchScaleDialog() {
+        final int[] values = new int[]{75, 100, 125, 150, 175, 200, 225, 250, 275, 300};
+        String[] labels = new String[values.length];
+        int current = ControlsPreferences.getDualScreenButtonScalePercent(this);
+        int checked = 0;
+        int bestDistance = Integer.MAX_VALUE;
+        for (int i = 0; i < values.length; i++) {
+            labels[i] = values[i] + "%";
+            int distance = Math.abs(values[i] - current);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                checked = i;
+            }
+        }
+
+        new MaterialAlertDialogBuilder(this)
+                .setTitle("Bottom-screen touch control scale")
+                .setSingleChoiceItems(labels, checked, (dialog, which) -> {
+                    if (which >= 0 && which < values.length) {
+                        ControlsPreferences.setDualScreenButtonScalePercent(this, values[which]);
+                        updateDualScreenTouchScaleSettingUi();
+                    }
+                    dialog.dismiss();
+                })
+                .setNegativeButton(android.R.string.cancel, null)
+                .show();
     }
 
     private void registerDualScreenBackgroundPickerLauncher() {
@@ -8028,7 +9056,14 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             buttonParams.topMargin = dp(10);
 
             int swapIndex = parent.indexOfChild(binding.switchDualScreenSwap);
-            int insertIndex = Math.min(parent.getChildCount(), Math.max(0, swapIndex + 2));
+            int insertIndex = Math.min(parent.getChildCount(), Math.max(0, swapIndex + 1));
+            if (textDualScreenHudLayoutSummary != null) {
+                int summaryIndex = parent.indexOfChild(textDualScreenHudLayoutSummary);
+                if (summaryIndex >= 0) insertIndex = Math.min(parent.getChildCount(), summaryIndex + 1);
+            } else if (buttonDualScreenHudLayout != null) {
+                int layoutIndex = parent.indexOfChild(buttonDualScreenHudLayout);
+                if (layoutIndex >= 0) insertIndex = Math.min(parent.getChildCount(), layoutIndex + 1);
+            }
             parent.addView(button, insertIndex, buttonParams);
             buttonDualScreenBackground = button;
         }
@@ -8039,7 +9074,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         } else {
             TextView summary = new TextView(this);
             summary.setTag(summaryTag);
-            summary.setText("Choose an image shown behind the touch controls and HUD on the dual-screen controls display.");
+            summary.setText("Choose an image shown behind the touch controls and HUD. Without a custom image, DroidBridge uses its built-in dark block texture for both Modern and Legacy layouts.");
 
             LinearLayout.LayoutParams summaryParams = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -8059,11 +9094,12 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
 
     private void updateDualScreenBackgroundSettingUi() {
         if (buttonDualScreenBackground == null) return;
+        buttonDualScreenBackground.setEnabled(LauncherPreferences.isDualScreenSupportEnabled(this));
         boolean custom = LauncherPreferences.hasDualScreenBackgroundImage(this);
         buttonDualScreenBackground.setText(
                 custom
                         ? "Dual-screen background: Custom image"
-                        : "Dual-screen background: Default"
+                        : "Dual-screen background: Default block texture"
         );
     }
 
@@ -8074,7 +9110,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             return;
         }
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Dual-screen background")
                 .setItems(new String[]{"Choose a different image", "Use default background"}, (dialog, which) -> {
                     if (which == 0) {
@@ -8204,6 +9240,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
 
     private void updateDualScreenMapFrameSettingUi() {
         if (buttonDualScreenMapFrame == null) return;
+        buttonDualScreenMapFrame.setEnabled(LauncherPreferences.isDualScreenSupportEnabled(this));
         boolean custom = LauncherPreferences.hasDualScreenMapFrameImage(this);
         buttonDualScreenMapFrame.setText(
                 custom
@@ -8219,7 +9256,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             return;
         }
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Exploration map texture")
                 .setItems(new String[]{"Choose a different image", "Use default parchment"}, (dialog, which) -> {
                     if (which == 0) {
@@ -8299,11 +9336,35 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         );
     }
 
+    private void updateDualScreenAspectRatioSwitchText() {
+        binding.switchDualScreenAspectRatio.setText(
+                LauncherPreferences.isDualScreenFourThreeLayout(this)
+                        ? "Bottom-screen layout: 4:3"
+                        : "Bottom-screen layout: 16:9"
+        );
+    }
+
+    private void updateDualScreenFpsSwitchText() {
+        binding.switchDualScreenFps.setText(
+                LauncherPreferences.isDualScreenFpsEnabled(this)
+                        ? "Bottom-screen FPS: On"
+                        : "Bottom-screen FPS: Off"
+        );
+    }
+
     private void updateLauncherDiagnosticLogsSwitchText(boolean enabled) {
         binding.switchLauncherDiagnosticLogs.setText(
                 enabled
                         ? R.string.launcher_logs_on
                         : R.string.launcher_logs_off
+        );
+    }
+
+    private void updateShareLogChooserSwitchText(boolean enabled) {
+        binding.switchShareLogChooser.setText(
+                enabled
+                        ? R.string.share_logs_dialog_setting_on
+                        : R.string.share_logs_dialog_setting_off
         );
     }
 
@@ -8476,7 +9537,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             }
         }
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton("Add another", null)
@@ -8611,7 +9672,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
     }
 
     private void confirmRemoveMicrosoftAccount(@NonNull AccountStore.Account account) {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Remove Microsoft account?")
                 .setMessage("Remove " + account.getBestDisplayName() + " from DroidBridge's saved account list?")
                 .setNegativeButton(android.R.string.cancel, null)
@@ -8644,7 +9705,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
 
     private void showOfflineAccountsDialog() {
         if (accountStore == null || !accountStore.canUseOfflineMode()) {
-            new AlertDialog.Builder(this)
+            new MaterialAlertDialogBuilder(this)
                     .setTitle(R.string.offline_locked_title)
                     .setMessage(R.string.offline_locked_message)
                     .setPositiveButton(android.R.string.ok, null)
@@ -8691,7 +9752,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             }
         }
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton(R.string.offline_account_add, null)
@@ -8936,7 +9997,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         clearParams.leftMargin = dp(8);
         skinActions.addView(clearSkinButton, clearParams);
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton(existing == null ? R.string.offline_account_create : R.string.offline_account_save, null)
@@ -9095,7 +10156,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
     }
 
     private void confirmDeleteOfflineAccount(@NonNull AccountStore.Account account) {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(getString(R.string.offline_account_delete_title, account.getBestDisplayName()))
                 .setMessage(R.string.offline_account_delete_message)
                 .setNegativeButton(android.R.string.cancel, null)
@@ -9467,7 +10528,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         }
 
         final AlertDialog[] dialogRef = new AlertDialog[1];
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton(R.string.microsoft_cape_apply, null)
@@ -9742,7 +10803,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             return;
         }
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.microsoft_skin_change_title)
                 .setMessage(getString(R.string.microsoft_skin_change_message, account.getBestDisplayName()))
                 .setNegativeButton(android.R.string.cancel, null)
@@ -9786,7 +10847,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
         };
         int checked = selectedModel[0] == SkinModelType.SLIM ? 1 : 0;
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.microsoft_skin_upload_title)
                 .setMessage(R.string.microsoft_skin_upload_message)
                 .setSingleChoiceItems(choices, checked, (dialog, which) ->
@@ -9902,7 +10963,7 @@ public final class LauncherSettingsActivity extends AppCompatActivity {
             );
         }
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .create();

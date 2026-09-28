@@ -150,15 +150,63 @@ static bool droidbridge_snapshot4_safe_buffers_enabled(void) {
      * LWJGL can resolve the wrapped GL library before that marker is visible
      * to this linker hook. Wrapped SDL OpenGL is itself enough to identify the
      * Snapshot 4 path that must not expose persistent buffer storage.
+     *
+     * LTW is the exception. It implements coherent dynamic storage itself and
+     * MJ's working 26.3 path exposes GL_ARB_buffer_storage. The Java launcher
+     * also explicitly leaves DROIDBRIDGE_SDL3_DISABLE_PERSISTENT_MAPPING off
+     * for LTW, so do not accidentally re-enable the old compatibility filter
+     * merely because LTW participates in the wrapped SDL3 route.
      */
-    return droidbridge_truthy_env("DROIDBRIDGE_SDL3_DISABLE_PERSISTENT_MAPPING")
-            || droidbridge_truthy_env("DROIDBRIDGE_SDL3_WRAPPED_OPENGL")
+    if (droidbridge_truthy_env("DROIDBRIDGE_SDL3_DISABLE_PERSISTENT_MAPPING")) {
+        return true;
+    }
+
+    const char* kind = getenv("DROIDBRIDGE_SDL3_OPENGL_KIND");
+    const char* renderer = getenv("DROIDBRIDGE_RENDERER");
+    const char* library = getenv("DROIDBRIDGE_SDL3_OPENGL_LIBRARY");
+    const bool ltw = (kind != NULL && strcmp(kind, "ltw") == 0)
+            || (renderer != NULL && strstr(renderer, "ltw") != NULL)
+            || (library != NULL && strstr(library, "ltw") != NULL);
+    if (ltw) return false;
+
+    return droidbridge_truthy_env("DROIDBRIDGE_SDL3_WRAPPED_OPENGL")
             || droidbridge_truthy_env("DROIDBRIDGE_SDL3_MOBILEGLUES_OPENGL");
 }
 
 static bool droidbridge_is_krypton_wrapped_renderer(void) {
     const char* kind = getenv("DROIDBRIDGE_SDL3_OPENGL_KIND");
     return kind != NULL && strcmp(kind, "krypton") == 0;
+}
+
+static bool droidbridge_is_ltw_renderer(void) {
+    const char* renderer = getenv("DROIDBRIDGE_RENDERER");
+    if (renderer != NULL && strstr(renderer, "ltw") != NULL) return true;
+    const char* kind = getenv("DROIDBRIDGE_SDL3_OPENGL_KIND");
+    if (kind != NULL && strcmp(kind, "ltw") == 0) return true;
+    const char* library = getenv("DROIDBRIDGE_SDL3_OPENGL_LIBRARY");
+    return library != NULL && strstr(library, "ltw") != NULL;
+}
+
+static void droidbridge_publish_openjdk_ltw_handle(void* handle) {
+    if (handle == NULL || !droidbridge_is_ltw_renderer()) return;
+
+    char handle_text[2 + sizeof(uintptr_t) * 2 + 1];
+    snprintf(handle_text, sizeof(handle_text), "0x%llx",
+             (unsigned long long)(uintptr_t)handle);
+    setenv("DROIDBRIDGE_LTW_OPENJDK_HANDLE", handle_text, 1);
+
+    const char* path = getenv("DROIDBRIDGE_SDL3_OPENGL_LIBRARY");
+    if (path == NULL || path[0] == '\0') path = getenv("DROIDBRIDGE_RENDERSPEC_EGL");
+    if (path == NULL || path[0] == '\0') path = getenv("DROIDBRIDGE_EGL");
+    if (path != NULL && path[0] != '\0') {
+        setenv("DROIDBRIDGE_LTW_OPENJDK_PATH", path, 1);
+    }
+
+    fprintf(stderr,
+            "DroidBridgeSDL3GL: published OpenJDK LTW provider handle=%p path=%s\n",
+            handle,
+            path != NULL && path[0] != '\0' ? path : "<unknown>");
+    fflush(stderr);
 }
 
 static bool droidbridge_is_blocked_buffer_storage_extension(const char* extension) {
@@ -177,12 +225,43 @@ static bool droidbridge_is_blocked_buffer_storage_proc(const char* name) {
 
 static void* droidbridge_resolve_gl_symbol(void* handle, const char* name) {
     if (handle == NULL || name == NULL) return NULL;
-    void* symbol = dlsym(handle, name);
-    if (symbol == NULL) {
-        db_egl_get_proc_address_fn get_proc =
-                (db_egl_get_proc_address_fn)dlsym(handle, "eglGetProcAddress");
-        if (get_proc != NULL) symbol = get_proc(name);
+
+    /* LTW intentionally overrides core GL entry points through its EGL proc
+     * resolver. RenderPearl 26.3 verifies that the OpenGL loader and SDL's
+     * SDL_GL_GetProcAddress return the exact same function pointer. Resolving
+     * LTW through dlsym first can return the ELF export while SDL receives the
+     * wrapper trampoline from eglGetProcAddress, producing "glGetError mismatch".
+     * Match MJ's LTW path and make the EGL resolver authoritative for LTW. */
+    db_egl_get_proc_address_fn get_proc =
+            (db_egl_get_proc_address_fn)dlsym(handle, "eglGetProcAddress");
+    if (droidbridge_is_ltw_renderer() && get_proc != NULL) {
+        void* via_egl = get_proc(name);
+        if (via_egl != NULL) return via_egl;
     }
+
+    void* symbol = dlsym(handle, name);
+    if (symbol == NULL && get_proc != NULL) symbol = get_proc(name);
+    return symbol;
+}
+
+/*
+ * Kopper presents desktop OpenGL through Mesa EGL on Android, but LWJGL's
+ * Linux OpenGL loader only probes glXGetProcAddress/glXGetProcAddressARB (or
+ * OSMesaGetProcAddress). FCL normally satisfies that contract with
+ * libglxshim.so. DroidBridge already owns the DynamicLinkLoader hook and can
+ * provide the same proc-address contract directly: resolve GL entry points
+ * through the active Mesa EGL handle's eglGetProcAddress.
+ *
+ * This intentionally has a GLX-compatible signature without depending on GLX
+ * headers, keeping the Android native build free of X11/GLX linkage.
+ */
+static void* droidbridge_glx_get_proc_address_egl(const unsigned char* proc_name) {
+    if (proc_name == NULL || proc_name[0] == '\0') return NULL;
+
+    void* handle = g_droidbridge_opengl_proxy_handle;
+    if (handle == NULL) return NULL;
+
+    void* symbol = droidbridge_resolve_gl_symbol(handle, (const char*)proc_name);
     return symbol;
 }
 
@@ -551,6 +630,17 @@ static const DB_GLubyte* droidbridge_glGetString_compat_filter(DB_GLenum name) {
         snprintf(g_droidbridge_vendor_string, sizeof(g_droidbridge_vendor_string),
                  "freedreno/DroidBridge");
         return (const DB_GLubyte*) g_droidbridge_vendor_string;
+    }
+
+    // Keep third-party builder branding out of the user-visible GL vendor string
+    // while preserving GL_RENDERER unchanged so logs can still prove whether the
+    // actual Vulkan device is Turnip or the Android system driver.
+    if (name == DB_GL_VENDOR
+            && getenv("DROIDBRIDGE_RENDERER") != NULL
+            && strcmp(getenv("DROIDBRIDGE_RENDERER"), "opengles3_desktopgl_zink_kopper") == 0) {
+        snprintf(g_droidbridge_vendor_string, sizeof(g_droidbridge_vendor_string),
+                 "Mesa/DroidBridge");
+        return (const DB_GLubyte*)g_droidbridge_vendor_string;
     }
 
     if (!droidbridge_snapshot4_safe_buffers_enabled() || result == NULL) return result;
@@ -1168,8 +1258,13 @@ static jlong ndlopen_bugfix(__attribute__((unused)) JNIEnv* env,
         void* handle = acquire_droidbridge_opengl_handle(mode);
         if (handle != NULL) {
             g_droidbridge_opengl_proxy_handle = handle;
+            droidbridge_publish_openjdk_ltw_handle(handle);
             if (g_real_glGetString == NULL) {
-                g_real_glGetString = (db_gl_get_string_fn)dlsym(handle, "glGetString");
+                /* Keep LTW on the same canonical EGL-resolved entry point from the
+                 * first OpenGL symbol lookup onward. Non-LTW renderers retain the
+                 * existing dlsym-first behavior inside droidbridge_resolve_gl_symbol(). */
+                g_real_glGetString = (db_gl_get_string_fn)
+                        droidbridge_resolve_gl_symbol(handle, "glGetString");
                 printf("LWJGL linkerhook-v26: glGetString branding filter real=%p handle=%p\n",
                        (void*) g_real_glGetString,
                        handle);
@@ -3723,9 +3818,14 @@ static void db_vk_log_compat_once(void) {
 
 __attribute__((used, visibility("default"))) int
 droidbridge_vulkan_compat_prepare_real_loader(void* realLoaderHandle) {
-    if (!db_vk_any_compat_enabled() || realLoaderHandle == NULL) return 0;
+    if (realLoaderHandle == NULL) return 0;
 
-    db_vk_log_compat_once();
+    /*
+     * The Vulkan proxy is also the early-loader gate for Kopper. In that mode
+     * no Vulkan compatibility transforms are enabled; still capture the real
+     * loader's proc-address functions so the proxy is a transparent passthrough.
+     */
+    if (db_vk_any_compat_enabled()) db_vk_log_compat_once();
     g_db_real_vkGetInstanceProcAddr = (DB_PFN_vkGetInstanceProcAddr)
             dlsym(realLoaderHandle, "vkGetInstanceProcAddr");
     g_db_real_vkGetDeviceProcAddr = (DB_PFN_vkGetDeviceProcAddr)
@@ -9074,6 +9174,29 @@ static jlong ndlsym_branding_hook(__attribute__((unused)) JNIEnv* env,
         fprintf(stderr,
                 "DroidBridgeSDL3GL: blocked direct LWJGL proc=%s\n", name);
         return 0;
+    }
+
+    /* LWJGL desktop OpenGL on Linux requires a GLX-style proc resolver.
+     * When the DroidBridge OpenGL proxy is backed by Mesa EGL (Kopper/direct
+     * Mesa), synthesize glXGetProcAddress[ARB] and forward each lookup to
+     * eglGetProcAddress on the already-loaded provider. */
+    if (handle == g_droidbridge_opengl_proxy_handle && name != NULL
+            && (strcmp(name, "glXGetProcAddress") == 0
+                || strcmp(name, "glXGetProcAddressARB") == 0)) {
+        fprintf(stderr,
+                "DroidBridgeSDL3GL: providing GLX->EGL proc-address adapter name=%s handle=%p\n",
+                name, handle);
+        return (jlong)(uintptr_t)&droidbridge_glx_get_proc_address_egl;
+    }
+
+    if (handle == g_droidbridge_opengl_proxy_handle
+            && droidbridge_is_ltw_renderer()
+            && name != NULL && strcmp(name, "glGetError") == 0) {
+        void* gl_get_error = droidbridge_resolve_gl_symbol(handle, name);
+        fprintf(stderr,
+                "DroidBridgeSDL3GL: LTW RenderPearl glGetError canonical proc=%p handle=%p\n",
+                gl_get_error, handle);
+        return (jlong)(uintptr_t)gl_get_error;
     }
 
     if (name != NULL && strcmp(name, "glGetString") == 0) {

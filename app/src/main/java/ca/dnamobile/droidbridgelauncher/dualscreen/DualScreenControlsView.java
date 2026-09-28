@@ -15,9 +15,13 @@ import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.Paint;
 import android.graphics.Path;
+import android.graphics.PorterDuff;
+import android.graphics.PorterDuffColorFilter;
 import android.graphics.Rect;
 import android.graphics.RectF;
 import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.FileObserver;
 import android.os.Looper;
 import android.os.SystemClock;
 import android.util.Base64;
@@ -45,9 +49,11 @@ import java.io.InputStream;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Locale;
+import java.util.Properties;
 import java.util.Collections;
 import java.util.Comparator;
 import java.util.zip.ZipEntry;
@@ -67,13 +73,33 @@ final class DualScreenControlsView extends View {
     private static final String TAG = "DualScreenControlsView";
     private static final int SLOT_COUNT = 9;
     private static final int MAP_PIXEL_SIZE = 128;
-    private static final long HUD_POLL_MS = 75L;
+    // FileObserver delivers state changes immediately. The fallback only stats
+    // the files; JSON is still parsed exclusively after a detected change. Keep
+    // it responsive because emulated/FUSE storage can lose atomic-move events.
+    private static final long HUD_POLL_MS = 250L;
+    private static final long HUD_EVENT_DEBOUNCE_MS = 35L;
+    // The top-screen Legacy HUD is only a visual mirror. It must never create a second
+    // state-file reader: doing so duplicates JSON parsing, FileObserver wakeups, icon
+    // signature work and UI invalidations on the same frame stream. The normal lower HUD
+    // remains the single state owner and publishes its already-parsed HudState here.
+    private static final long LEGACY_HUD_CONFIG_POLL_MS = 1000L;
+    @Nullable private static volatile HudState sharedLatestHudState;
+    @Nullable private static volatile String sharedHudStatePath;
+    @Nullable private static volatile DualScreenControlsView activeTopLegacyOverlay;
+    // Special/entity-style ItemStacks are marked live_stack by the companion mod.
+    // Ordinary block/item assets keep the fast Android asset/model path.
+    // Android must display the bitmap rendered by Minecraft itself rather than reconstructing
+    // the item from exported textures/models or embedded reference icons.
+    private static final boolean HOTBAR_LIVE_ITEM_CAPTURE_ENABLED = true;
+    private static final long LIVE_ICON_RETRY_MS = 750L;
+    private static final long MAP_DECODE_MIN_MS = 250L;
     private static final long HUD_STALE_MS = 30000L;
     private static final long CONTROLLER_HOTBAR_NAV_DEBOUNCE_MS = 115L;
     // Touching a hotbar slot updates the local selector before the Fabric HUD-state
     // writer can make its next pass. Hold the tapped slot briefly until Minecraft
     // acknowledges it so one stale poll cannot flash the previously selected slot.
     private static final long TOUCH_HOTBAR_ACK_TIMEOUT_MS = 900L;
+    private static final long CONTROLLER_HOTBAR_ACK_TIMEOUT_MS = 900L;
 
     // Default Minecraft block GUI projection. Some models, especially stairs, author a
     // different display.gui yaw. Respect that transform instead of flipping the finished image.
@@ -98,17 +124,173 @@ final class DualScreenControlsView extends View {
     private static final String ACTION_JUMP = "jump";
     private static final String ACTION_SNEAK = "sneak";
     private static final String ACTION_PERSPECTIVE = "perspective";
+    private static final String ACTION_DUAL_SETTINGS = "dual_settings";
+    private static final String ACTION_TOGGLE_MAP = "dual_toggle_map";
+    private static final String ACTION_TOGGLE_COORDS = "dual_toggle_coords";
 
     @NonNull private final File hudStateFile;
     @NonNull private final File coordinateStateFile;
     @NonNull private final Runnable launcherMenuCallback;
+    private final boolean topLegacyOverlayMode;
     @NonNull private final Handler handler = new Handler(Looper.getMainLooper());
+    @Nullable private HandlerThread pollThread;
+    @Nullable private Handler pollHandler;
+    @Nullable private FileObserver stateFileObserver;
+    private volatile long lastHudFileStamp = Long.MIN_VALUE;
+    private volatile long lastCoordinateFileStamp = Long.MIN_VALUE;
     @NonNull private final Runnable pollRunnable = new Runnable() {
         @Override public void run() {
-            hudState = HudState.read(hudStateFile);
-            coordinateState = CoordinateState.read(coordinateStateFile);
-            invalidate();
-            if (attached) handler.postDelayed(this, HUD_POLL_MS);
+            if (!attached) return;
+            // JSON + map Base64 state files can be tens of KB and are rewritten frequently.
+            // Never parse them on Android's UI thread: doing so made the second panel steal
+            // frame time from Minecraft whenever dual-screen mode was active.
+            long hudStamp = fileStamp(hudStateFile);
+            long coordinateStamp = fileStamp(coordinateStateFile);
+            final boolean hudChanged = hudStamp != lastHudFileStamp;
+            final boolean coordinatesChanged = coordinateStamp != lastCoordinateFileStamp;
+            if (hudChanged) lastHudFileStamp = hudStamp;
+            if (coordinatesChanged) lastCoordinateFileStamp = coordinateStamp;
+            if (hudChanged || coordinatesChanged) {
+                final HudState nextHud = hudChanged ? HudState.read(hudStateFile) : null;
+                final CoordinateState nextCoordinates = coordinatesChanged
+                        ? CoordinateState.read(coordinateStateFile) : null;
+                // Never replace the last good frame with an empty/transient state. Forge 1.12.2
+                // updates these files asynchronously and an Android/FUSE rename can briefly make
+                // the target unreadable. Treat that as an in-flight update, not as "HUD hidden".
+                final boolean nextHudValid = nextHud != null && nextHud.valid;
+                final boolean nextCoordinatesValid = nextCoordinates != null && nextCoordinates.valid;
+                final String nextIconSignature = hudChanged && nextHudValid
+                        ? visibleIconSignature(nextHud) : null;
+                handler.post(() -> {
+                    if (!attached) return;
+                    if (nextHudValid) {
+                        boolean oldOffhandVisible = hudState != null && hudState.offhand != null && !hudState.offhand.isEmpty();
+                        boolean oldMainArmLeft = hudState != null
+                                && hudState.mainArm != null
+                                && hudState.mainArm.toLowerCase(Locale.ROOT).contains("left");
+                        boolean iconsChanged = !nextIconSignature.equals(lastVisibleIconSignature);
+                        hudState = nextHud;
+                        publishSharedHudState(nextHud);
+                        boolean newOffhandVisible = hudState.offhand != null && !hudState.offhand.isEmpty();
+                        boolean newMainArmLeft = hudState.mainArm != null
+                                && hudState.mainArm.toLowerCase(Locale.ROOT).contains("left");
+                        if (oldOffhandVisible != newOffhandVisible || oldMainArmLeft != newMainArmLeft) {
+                            rebuildLayout(getWidth(), getHeight());
+                        }
+                        if (iconsChanged) {
+                            lastVisibleIconSignature = nextIconSignature;
+                            requestVisibleLiveIcons();
+                        }
+                    }
+                    if (nextCoordinatesValid) coordinateState = nextCoordinates;
+                    // Invalid reads keep the previous composited frame/state instead of briefly
+                    // drawing a transparent/empty HUD. A later CREATE/MOVED_TO event or 200 ms
+                    // fallback poll will consume the completed replacement file.
+                    if (nextHudValid || nextCoordinatesValid) postInvalidateOnAnimation();
+                });
+            }
+            // Exact-icon transport is event-driven. requestVisibleLiveIcons() runs when the
+            // visible stack signature changes, while DualScreenLiveBridge's FileObserver wakes
+            // the HUD when Minecraft publishes the completed PNG. Avoid re-requesting every
+            // 200 ms; repeated filesystem probes here can steal frame time from Minecraft.
+            Handler background = pollHandler;
+            if (attached && background != null) background.postDelayed(this, HUD_POLL_MS);
+        }
+    };
+
+    private static long fileStamp(@NonNull File file) {
+        if (!file.isFile()) return -1L;
+        return (file.lastModified() * 31L) ^ file.length();
+    }
+
+    private void startStateFileObserver() {
+        stopStateFileObserver();
+        File parent = hudStateFile.getParentFile();
+        if (parent == null) return;
+        final String hudName = hudStateFile.getName();
+        final String coordinateName = coordinateStateFile.getName();
+        try {
+            stateFileObserver = new FileObserver(
+                    parent.getAbsolutePath(),
+                    FileObserver.CLOSE_WRITE | FileObserver.MOVED_TO
+                            | FileObserver.CREATE | FileObserver.MODIFY
+            ) {
+                @Override
+                public void onEvent(int event, @Nullable String path) {
+                    if (path == null) return;
+                    boolean relevant = false;
+                    if (hudName.equals(path)) {
+                        // An atomic replacement may retain the same coarse FUSE
+                        // timestamp and byte length. The event itself is proof that
+                        // the contents must be re-read (notably offhand-only swaps).
+                        lastHudFileStamp = Long.MIN_VALUE;
+                        relevant = true;
+                    }
+                    if (coordinateName.equals(path)) {
+                        lastCoordinateFileStamp = Long.MIN_VALUE;
+                        relevant = true;
+                    }
+                    if (relevant) {
+                        scheduleStateRead(HUD_EVENT_DEBOUNCE_MS);
+                    }
+                }
+            };
+            stateFileObserver.startWatching();
+        } catch (Throwable throwable) {
+            stateFileObserver = null;
+            Logging.e(TAG, "Unable to watch dual-screen state files; using fallback polling", throwable);
+        }
+    }
+
+    private void stopStateFileObserver() {
+        FileObserver observer = stateFileObserver;
+        stateFileObserver = null;
+        if (observer != null) {
+            try {
+                observer.stopWatching();
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void scheduleStateRead(long delayMs) {
+        Handler background = pollHandler;
+        if (!attached || background == null) return;
+        background.removeCallbacks(pollRunnable);
+        background.postDelayed(pollRunnable, Math.max(0L, delayMs));
+    }
+
+    private void publishSharedHudState(@NonNull HudState state) {
+        if (topLegacyOverlayMode) return;
+        String path = hudStateFile.getAbsolutePath();
+        sharedHudStatePath = path;
+        sharedLatestHudState = state;
+
+        DualScreenControlsView overlay = activeTopLegacyOverlay;
+        if (overlay == null || !overlay.attached || !overlay.topLegacyOverlayMode) return;
+        if (!path.equals(overlay.hudStateFile.getAbsolutePath())) return;
+        overlay.acceptSharedHudState(state);
+    }
+
+    private void acceptSharedHudState(@NonNull HudState state) {
+        if (!topLegacyOverlayMode || !attached) return;
+        hudState = state;
+        // When Legacy HUD is disabled, keep the overlay completely idle. The lightweight
+        // one-second config watcher below is enough to wake it when the user turns it on.
+        if (readLegacyHudOptions().legacyHudEnabled) {
+            postInvalidateOnAnimation();
+        }
+    }
+
+    @NonNull private final Runnable topLegacyConfigPollRunnable = new Runnable() {
+        @Override public void run() {
+            if (!attached || !topLegacyOverlayMode) return;
+            LegacyHudOptions before = legacyHudOptions;
+            LegacyHudOptions after = readLegacyHudOptions();
+            if (!sameLegacyHudOptions(before, after)) {
+                postInvalidateOnAnimation();
+            }
+            handler.postDelayed(this, LEGACY_HUD_CONFIG_POLL_MS);
         }
     };
 
@@ -120,6 +302,10 @@ final class DualScreenControlsView extends View {
     @NonNull private final RectF hotbarOuter = new RectF();
     @NonNull private final RectF offhandSlot = new RectF();
     @NonNull private final RectF mapRect = new RectF();
+    @NonNull private final RectF layoutViewport = new RectF();
+    @NonNull private final RectF dualSettingsGearRect = new RectF();
+    @NonNull private final RectF dualSettingsMapRect = new RectF();
+    @NonNull private final RectF dualSettingsCoordsRect = new RectF();
     @NonNull private final RectF xpRect = new RectF();
     @NonNull private final RectF scratch = new RectF();
     @NonNull private final RectF scratch2 = new RectF();
@@ -135,32 +321,95 @@ final class DualScreenControlsView extends View {
     private boolean installedAssetIndexesLoaded = false;
     @NonNull private final Map<String, Bitmap> faceBitmapCache = new HashMap<>();
     @NonNull private final Map<String, Bitmap> hudAssetCache = new HashMap<>();
+    // The real-XP-bar fallback can probe Minecraft/resource-pack JARs when a split HUD
+    // sprite was not exported by the mod. A missing 26.2 sprite must NEVER trigger that
+    // full installed-JAR search from every onDraw() call: doing so repeatedly opens and
+    // scans the version/mod/resource-pack archives on Android's UI thread and can starve
+    // Minecraft enough to knock a 120 Hz Thor run down into the 80-100 FPS range.
+    // Cache only JAR misses here. resolveHudAssetFile() still runs before this cache, so
+    // an exporter that creates the sprite a little later in startup is picked up normally.
+    @NonNull private final HashSet<String> missingInstalledHudJarAssetCache = new HashSet<>();
     // Completed hotbar icon cache. JSON/model rasterizing is expensive enough that
     // doing it on every bottom-view redraw can steal time from Minecraft.
     @NonNull private final Map<String, Bitmap> renderedItemCache = new HashMap<>();
+    // A failed model resolution used to be repeated by every onDraw() call. On Forge 1.20.1
+    // an empty stack can still be serialized as minecraft:air, so nine failed scans of the
+    // version/mod JARs could run on Android's main thread every HUD poll and stall both panels.
+    @NonNull private final HashSet<String> failedRenderedItemCache = new HashSet<>();
+    @NonNull private final Map<String, Boolean> missingInstalledItemAssetCache = new HashMap<>();
+    @NonNull private final Map<String, Long> liveIconLastRequestMs = new HashMap<>();
+    @NonNull private String lastVisibleIconSignature = "";
     @NonNull private final DualScreenRenderedIconCache externalRenderedIconCache;
+    @Nullable private DualScreenLiveBridge liveIconBridge;
+    private boolean legacyTransportActive = true;
+    @Nullable private Bitmap minecraftAsciiFontBitmap;
+    @Nullable private String minecraftAsciiFontSourceKey;
     @Nullable private Bitmap mapBitmap;
     @Nullable private String mapBitmapKey;
+    private long lastMapDecodeAtMs;
     @Nullable private Bitmap mapFrameBitmap;
     @Nullable private String mapFrameBitmapKey;
 
     @NonNull private HudState hudState = HudState.empty();
     @NonNull private CoordinateState coordinateState = CoordinateState.empty();
-    private boolean attached;
+    private volatile boolean attached;
     private int selectedSlot = 0;
     private int touchedHotbarSlot = -1;
     private int pendingTouchHotbarSlot = -1;
     private long pendingTouchHotbarUntilMs = 0L;
+    // Controller hotbar feedback is armed only after GamepadInputController has
+    // resolved the active profile to an actual gameplay scroll action. Keep that
+    // short-lived prediction visible until the HUD state writer acknowledges it.
+    private int pendingControllerHotbarSlot = -1;
+    private long pendingControllerHotbarUntilMs = 0L;
     private long lastControllerHotbarNavMs = 0L;
-    private boolean leftTriggerWasDown = false;
-    private boolean rightTriggerWasDown = false;
+    private boolean dualSettingsOpen = false;
+    private boolean legacyHudLayout = false;
+    private boolean threeDsHudLayout = false;
+    private boolean fourThreeLayout = false;
+
+    // Shared mod-side HUD preferences. The companion mod writes these into
+    // config/droidbridge_dualscreen.properties; both the lower HUD and the optional
+    // top-screen Legacy HUD read the same file so there is one source of truth.
+    private long legacyHudConfigNextReadMs = 0L;
+    private long legacyHudConfigLastModified = Long.MIN_VALUE;
+    @NonNull private LegacyHudOptions legacyHudOptions = LegacyHudOptions.defaults();
+
+    // 3DS layout is authored against the exact 640x480 inner canvas from the
+    // supplied reference image. On narrower native lower panels (such as Thor)
+    // it is width-fitted and top-aligned; on wider panels it is height-fitted
+    // and horizontally centered. This preserves the reference proportions
+    // without changing the physical lower-display size.
+    private static final float THREE_DS_REFERENCE_WIDTH = 640f;
+    private static final float THREE_DS_REFERENCE_HEIGHT = 480f;
+    private float threeDsReferenceScale = 1f;
+    private float threeDsReferenceLeft = 0f;
+    private float threeDsReferenceTop = 0f;
+    private float threeDsReferenceRight = 0f;
+    private float threeDsReferenceBottom = 0f;
+    // 1.16.5 uses the legacy icons.png atlas for air bubbles. Log only if we ever
+    // have to use the final procedural fallback so testing can distinguish a bad
+    // state value from a missing/blank legacy sprite without spamming every frame.
+    private boolean loggedMc116AirSpriteFallback = false;
+    private boolean loggedMc116MissingAirState = false;
+    private boolean loggedMc116LiveAirState = false;
 
     DualScreenControlsView(
             @NonNull Context context,
             @NonNull File hudStateFile,
             @NonNull Runnable launcherMenuCallback
     ) {
+        this(context, hudStateFile, launcherMenuCallback, false);
+    }
+
+    DualScreenControlsView(
+            @NonNull Context context,
+            @NonNull File hudStateFile,
+            @NonNull Runnable launcherMenuCallback,
+            boolean topLegacyOverlayMode
+    ) {
         super(context);
+        this.topLegacyOverlayMode = topLegacyOverlayMode;
         this.hudStateFile = hudStateFile;
         File hudParent = hudStateFile.getParentFile();
         this.coordinateStateFile = new File(
@@ -169,32 +418,219 @@ final class DualScreenControlsView extends View {
         );
         this.launcherMenuCallback = launcherMenuCallback;
         this.externalRenderedIconCache = new DualScreenRenderedIconCache(hudStateFile);
-        setFocusable(true);
-        setFocusableInTouchMode(true);
-        setClickable(true);
+        setFocusable(!topLegacyOverlayMode);
+        setFocusableInTouchMode(!topLegacyOverlayMode);
+        setClickable(!topLegacyOverlayMode);
         for (int i = 0; i < hotbarSlots.length; i++) hotbarSlots[i] = new RectF();
+    }
+
+    void setLiveIconBridge(@Nullable DualScreenLiveBridge bridge) {
+        if (liveIconBridge == bridge) return;
+        liveIconLastRequestMs.clear();
+        liveIconBridge = bridge;
+        if (bridge != null && bridge.isProtocolReady()) requestVisibleLiveIcons();
+        invalidate();
+    }
+
+    void setLegacyTransportActive(boolean active) {
+        legacyTransportActive = active;
+        if (active) requestVisibleLiveIcons();
+        invalidate();
+    }
+
+    void onLiveIconBridgeChanged() {
+        DualScreenLiveBridge bridge = liveIconBridge;
+        if (bridge == null || !bridge.isProtocolReady()) {
+            liveIconLastRequestMs.clear();
+            invalidate();
+            return;
+        }
+        requestVisibleLiveIcons();
+        invalidate();
+    }
+
+    private void requestVisibleLiveIcons() {
+        if (!HOTBAR_LIVE_ITEM_CAPTURE_ENABLED) return;
+        if (!legacyTransportActive) return;
+        DualScreenLiveBridge bridge = liveIconBridge;
+        if (bridge == null || !bridge.isProtocolReady()) return;
+        HudState state = hudState;
+        if (state == null) return;
+        for (HudItem item : state.items) requestLiveIcon(bridge, item);
+        requestLiveIcon(bridge, state.offhand);
+    }
+
+    private void requestLiveIcon(@NonNull DualScreenLiveBridge bridge, @Nullable HudItem item) {
+        if (item == null || item.isEmpty()) return;
+        // Exact Minecraft-rendered stacks use live_stack; ordinary items remain on the fast
+        // Android asset path. Keep this guard for compatibility with older state writers.
+        if (!isExactStackItem(item)) return;
+        String id = canonicalLiveItemId(item);
+        if (id.isEmpty()) return;
+        String token = id + '|' + item.iconPath;
+        Bitmap cached = bridge.getIcon(id);
+        if (cached != null && !cached.isRecycled() && !isBitmapEffectivelyBlank(cached)) {
+            liveIconLastRequestMs.remove(token);
+            return;
+        }
+        long now = SystemClock.uptimeMillis();
+        Long lastRequest = liveIconLastRequestMs.get(token);
+        if (lastRequest != null && now - lastRequest < LIVE_ICON_RETRY_MS) return;
+        liveIconLastRequestMs.put(token, now);
+        bridge.requestIconFresh(id);
+    }
+
+    @NonNull
+    private static String visibleIconSignature(@Nullable HudState state) {
+        if (state == null) return "";
+        StringBuilder out = new StringBuilder(384);
+        for (HudItem item : state.items) appendIconSignature(out, item);
+        appendIconSignature(out, state.offhand);
+        return out.toString();
+    }
+
+    private static void appendIconSignature(@NonNull StringBuilder out, @Nullable HudItem item) {
+        if (item == null || item.isEmpty()) {
+            out.append("-|;");
+            return;
+        }
+        out.append(item.iconMode).append('|').append(item.id).append('|')
+                .append(item.iconPath).append(';');
+    }
+
+    @NonNull
+    private String canonicalLiveItemId(@NonNull HudItem item) {
+        String mode = item.iconMode == null ? "" : item.iconMode.trim();
+        if (mode.regionMatches(true, 0, "live_stack:", 0, "live_stack:".length())) {
+            String stackKey = mode.substring("live_stack:".length()).trim().toLowerCase(Locale.ROOT);
+            if (!stackKey.isEmpty()) return stackKey;
+        }
+        String id = item.id == null ? "" : item.id.trim().toLowerCase(Locale.ROOT);
+        if (!id.isEmpty()) return id.indexOf(':') >= 0 ? id : "minecraft:" + id;
+        String key = item.itemKey();
+        if (key.indexOf(':') >= 0) return key;
+        // Labels are not reliable resource locations. Only use a path-derived key when it
+        // is already a safe identifier; otherwise let the installed-asset fallback handle it.
+        if (isSafeResourcePath(key)) return "minecraft:" + key;
+        return "";
+    }
+
+    private boolean isSafeResourcePath(@Nullable String value) {
+        if (value == null || value.isEmpty()) return false;
+        for (int i = 0; i < value.length(); i++) {
+            char c = value.charAt(i);
+            boolean ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+                    || c == '_' || c == '.' || c == '/' || c == '-';
+            if (!ok) return false;
+        }
+        return true;
+    }
+
+    private boolean isExactStackItem(@Nullable HudItem item) {
+        if (item == null || item.iconMode == null) return false;
+        return item.iconMode.trim().regionMatches(
+                true, 0, "live_stack:", 0, "live_stack:".length());
+    }
+
+    @Nullable
+    private Bitmap obtainLiveItemIcon(@NonNull HudItem item) {
+        // 26.2's v11 mailbox is the authoritative geometry-normalized path. Check it before
+        // any path remembered in HUD state so an older 32x32-in-64 capture can never win over
+        // a fresh 64x64 response after a launcher update.
+        DualScreenLiveBridge bridge = liveIconBridge;
+        if (legacyTransportActive && bridge != null && bridge.isProtocolReady()
+                && bridge.isMinecraft262Mailbox()) {
+            String id = canonicalLiveItemId(item);
+            if (!id.isEmpty()) {
+                Bitmap icon = bridge.getIcon(id);
+                if (icon != null && !icon.isRecycled() && !isBitmapEffectivelyBlank(icon)) {
+                    return icon;
+                }
+            }
+            // Compatibility rule: v11 is preferred, not exclusive. Some otherwise-compatible
+            // 26.2 HUD builds still publish their exact capture path through HUD state (or the
+            // legacy v9 mailbox). Falling through preserves that known-good path while the v11
+            // response is warming up instead of forcing an empty/placeholder icon.
+        }
+
+        // The companion mod may also publish a finished capture path in HUD state. Keep this
+        // established path available as a fallback, including for 26.2 hybrid compatibility.
+        Bitmap fileIcon = loadItemIcon(item.iconPath);
+        if (fileIcon != null && !fileIcon.isRecycled() && !isBitmapEffectivelyBlank(fileIcon)) {
+            return fileIcon;
+        }
+
+        if (!legacyTransportActive || bridge == null || !bridge.isProtocolReady()) return null;
+        String id = canonicalLiveItemId(item);
+        if (id.isEmpty()) return null;
+        Bitmap icon = bridge.getIcon(id);
+        if (icon == null || icon.isRecycled() || isBitmapEffectivelyBlank(icon)) return null;
+        return icon;
     }
 
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
         attached = true;
+        if (topLegacyOverlayMode) {
+            activeTopLegacyOverlay = this;
+            String path = sharedHudStatePath;
+            HudState shared = sharedLatestHudState;
+            if (shared != null && path != null && path.equals(hudStateFile.getAbsolutePath())) {
+                hudState = shared;
+            }
+            // Do not create a HandlerThread/FileObserver for the mirror overlay. It consumes
+            // the lower HUD's parsed state and only watches the tiny settings file once/sec.
+            handler.removeCallbacks(topLegacyConfigPollRunnable);
+            handler.post(topLegacyConfigPollRunnable);
+            return;
+        }
         keepMinecraftInputReady();
-        handler.removeCallbacks(pollRunnable);
-        handler.post(pollRunnable);
+        HandlerThread thread = pollThread;
+        if (thread == null || !thread.isAlive()) {
+            thread = new HandlerThread("DroidBridge-DualScreenState");
+            thread.start();
+            pollThread = thread;
+            pollHandler = new Handler(thread.getLooper());
+        }
+        Handler background = pollHandler;
+        if (background != null) {
+            background.removeCallbacks(pollRunnable);
+            background.post(pollRunnable);
+        }
+        startStateFileObserver();
     }
 
     @Override
     protected void onDetachedFromWindow() {
         attached = false;
-        handler.removeCallbacks(pollRunnable);
+        handler.removeCallbacks(topLegacyConfigPollRunnable);
+        if (activeTopLegacyOverlay == this) activeTopLegacyOverlay = null;
+        stopStateFileObserver();
+        Handler background = pollHandler;
+        if (background != null) background.removeCallbacks(pollRunnable);
+        HandlerThread thread = pollThread;
+        pollHandler = null;
+        pollThread = null;
+        if (thread != null) thread.quitSafely();
         releaseAllActiveTouches();
         recycleBitmapCache(hudAssetCache);
         recycleBitmapCache(renderedItemCache);
+        failedRenderedItemCache.clear();
+        missingInstalledItemAssetCache.clear();
+        missingInstalledHudJarAssetCache.clear();
+        liveIconLastRequestMs.clear();
+        lastVisibleIconSignature = "";
+        lastHudFileStamp = Long.MIN_VALUE;
+        lastCoordinateFileStamp = Long.MIN_VALUE;
         externalRenderedIconCache.clearMemory();
+        if (minecraftAsciiFontBitmap != null && !minecraftAsciiFontBitmap.isRecycled()) minecraftAsciiFontBitmap.recycle();
+        minecraftAsciiFontBitmap = null;
+        minecraftAsciiFontSourceKey = null;
         if (mapBitmap != null && !mapBitmap.isRecycled()) mapBitmap.recycle();
         mapBitmap = null;
         mapBitmapKey = null;
+        lastMapDecodeAtMs = 0L;
         if (mapFrameBitmap != null && !mapFrameBitmap.isRecycled()) mapFrameBitmap.recycle();
         mapFrameBitmap = null;
         mapFrameBitmapKey = null;
@@ -205,37 +641,125 @@ final class DualScreenControlsView extends View {
     protected void onSizeChanged(int w, int h, int oldw, int oldh) {
         super.onSizeChanged(w, h, oldw, oldh);
         recycleBitmapCache(renderedItemCache);
+        failedRenderedItemCache.clear();
         rebuildLayout(w, h);
     }
 
     private void rebuildLayout(int width, int height) {
         buttons.clear();
+        String hudLayout = LauncherPreferences.getDualScreenHudLayout(getContext());
+        legacyHudLayout = LauncherPreferences.DUAL_SCREEN_HUD_LAYOUT_LEGACY.equals(hudLayout);
+        threeDsHudLayout = LauncherPreferences.DUAL_SCREEN_HUD_LAYOUT_3DS.equals(hudLayout);
+        fourThreeLayout = LauncherPreferences.isDualScreenFourThreeLayout(getContext());
+
+        // The parent DualScreenBottomViewportLayout changes the actual lower-screen image
+        // dimensions. Use the full measured view so HUD geometry, background, launcher
+        // buttons, and real touch controls all agree on the same bounds.
+        float viewportWidth = Math.max(0, width);
+        float viewportHeight = Math.max(0, height);
+        layoutViewport.set(0f, 0f, viewportWidth, viewportHeight);
+
+        if (threeDsHudLayout && viewportWidth > 0f && viewportHeight > 0f) {
+            threeDsReferenceScale = Math.min(
+                    viewportWidth / THREE_DS_REFERENCE_WIDTH,
+                    viewportHeight / THREE_DS_REFERENCE_HEIGHT
+            );
+            float referenceWidth = THREE_DS_REFERENCE_WIDTH * threeDsReferenceScale;
+            float referenceHeight = THREE_DS_REFERENCE_HEIGHT * threeDsReferenceScale;
+            threeDsReferenceLeft = layoutViewport.centerX() - referenceWidth * 0.5f;
+            // The source image starts with the hotbar at y=0. On Thor's narrower native
+            // lower display there is extra height, so keep the authored UI pinned to the
+            // top and leave the harmless remainder as deck background instead of
+            // stretching every element vertically.
+            threeDsReferenceTop = layoutViewport.top;
+            threeDsReferenceRight = threeDsReferenceLeft + referenceWidth;
+            threeDsReferenceBottom = threeDsReferenceTop + referenceHeight;
+        } else {
+            threeDsReferenceScale = 1f;
+            threeDsReferenceLeft = layoutViewport.left;
+            threeDsReferenceTop = layoutViewport.top;
+            threeDsReferenceRight = layoutViewport.right;
+            threeDsReferenceBottom = layoutViewport.bottom;
+        }
+
         float d = getResources().getDisplayMetrics().density;
-        float pad = Math.max(10f * d, Math.min(width, height) * 0.025f);
-        float gap = Math.max(8f * d, pad * 0.65f);
-        // Compact DS controller layout: keep the title small, remove the large duplicate
-        // status/HUD panel, and reserve the bottom for a Minecraft-like HUD row above
-        // a smaller vanilla hotbar.
+        float pad = Math.max(10f * d, Math.min(viewportWidth, viewportHeight) * 0.025f);
+
         float titleHeight = 0f;
         float statusHeight = 0f;
+        titleRect.set(layoutViewport.left + pad, layoutViewport.top + pad,
+                layoutViewport.right - pad, layoutViewport.top + pad + titleHeight);
+        statusRect.set(layoutViewport.left + pad, layoutViewport.top + pad,
+                layoutViewport.right - pad, layoutViewport.top + pad + statusHeight);
 
-        titleRect.set(pad, pad, width - pad, pad);
-        statusRect.set(pad, pad, width - pad, pad);
-
-        // Match vanilla's 182x22 hotbar geometry instead of stretching the texture to
-        // an arbitrary nine-slot rectangle. This makes each 20x20 slot square and keeps
-        // exported/cached Minecraft item icons at their intended aspect ratio.
-        float hotbarHeight = Math.max(44f * d, Math.min(78f * d, height * 0.090f));
+        // Keep vanilla 182x22 geometry so hotbar art and icons stay square. The 3DS
+        // reference uses the hotbar across the full 640px authored width, so derive its
+        // height from that width instead of from display density/height. This is what
+        // prevents the hotbar and everything below it from becoming vertically stretched.
         float vanillaAspect = 182f / 22f;
-        float hotbarWidth = hotbarHeight * vanillaAspect;
-        float availableWidth = width - (pad * 2f);
-        if (hotbarWidth > availableWidth) {
-            hotbarWidth = availableWidth;
+        float hotbarWidth;
+        float hotbarHeight;
+        float hotbarHorizontalInset;
+        if (threeDsHudLayout) {
+            hotbarWidth = Math.max(1f, threeDsReferenceRight - threeDsReferenceLeft);
             hotbarHeight = hotbarWidth / vanillaAspect;
+            hotbarHorizontalInset = 0f;
+        } else {
+            float hotbarFraction = legacyHudLayout ? 0.108f : 0.094f;
+            float hotbarMaxDp = legacyHudLayout ? 88f : 82f;
+            hotbarHeight = Math.max(44f * d,
+                    Math.min(hotbarMaxDp * d, viewportHeight * hotbarFraction));
+            hotbarWidth = hotbarHeight * vanillaAspect;
+            hotbarHorizontalInset = pad;
+            float availableWidth = viewportWidth - (hotbarHorizontalInset * 2f);
+            if (hotbarWidth > availableWidth) {
+                hotbarWidth = availableWidth;
+                hotbarHeight = hotbarWidth / vanillaAspect;
+            }
         }
-        float hotbarLeft = (width - hotbarWidth) / 2f;
-        float hotbarTop = height - pad - hotbarHeight;
-        hotbarOuter.set(hotbarLeft, hotbarTop, hotbarLeft + hotbarWidth, hotbarTop + hotbarHeight);
+
+        // Keep the whole hotbar + offhand group visually centered. This was part of the
+        // post-v7 ControlsView and must not be lost when changing only the map cursor.
+        float previewScale = hotbarHeight / 22f;
+        float previewSlotSide = 20f * previewScale;
+        float previewOffhandGap = Math.max(dp(5f), previewSlotSide * 0.18f);
+        boolean reserveOffhandSpace = hudState != null
+                && hudState.offhand != null && !hudState.offhand.isEmpty();
+        boolean mainArmLeft = hudState != null
+                && hudState.mainArm != null
+                && hudState.mainArm.toLowerCase(Locale.ROOT).contains("left");
+        float hotbarVisualOffset = 0f;
+        if (reserveOffhandSpace) {
+            float offhandVisualWidth = previewSlotSide + previewOffhandGap;
+            hotbarVisualOffset = mainArmLeft
+                    ? (-offhandVisualWidth * 0.5f) : (offhandVisualWidth * 0.5f);
+        }
+
+        float hotbarLeft;
+        if (threeDsHudLayout) {
+            // Do not compensate for offhand width in this layout: the reference hotbar is
+            // a fixed top rail spanning the authored canvas.
+            hotbarLeft = threeDsReferenceLeft;
+        } else {
+            hotbarLeft = layoutViewport.centerX() - hotbarWidth * 0.5f + hotbarVisualOffset;
+            hotbarLeft = Math.max(layoutViewport.left + hotbarHorizontalInset,
+                    Math.min(hotbarLeft, layoutViewport.right - hotbarHorizontalInset - hotbarWidth));
+        }
+        float hotbarTop;
+        if (threeDsHudLayout) {
+            hotbarTop = threeDsReferenceTop;
+        } else if (legacyHudLayout) {
+            // Restored tighter top reserve from the tuned layout.
+            float legacyHudReserve = Math.max(dp(44f),
+                    Math.min(viewportHeight * 0.078f, dp(82f)));
+            hotbarTop = layoutViewport.top + pad + legacyHudReserve;
+        } else {
+            hotbarTop = layoutViewport.bottom - pad - hotbarHeight
+                    - Math.max(dp(4f), viewportHeight * 0.010f);
+        }
+        hotbarOuter.set(hotbarLeft, hotbarTop,
+                hotbarLeft + hotbarWidth, hotbarTop + hotbarHeight);
+
         float vanillaScale = hotbarHeight / 22f;
         float slotSide = 20f * vanillaScale;
         for (int i = 0; i < SLOT_COUNT; i++) {
@@ -248,18 +772,49 @@ final class DualScreenControlsView extends View {
             );
         }
 
-        // The optional exploration map lives in the visual center of the controls display,
-        // leaving the vanilla HUD/hotbar area clear at the bottom.
-        float mapSide = Math.min(width * 0.38f, height * 0.39f);
-        mapSide = Math.max(Math.min(width, height) * 0.24f, mapSide);
-        float mapCx = width * 0.5f;
-        float mapCy = height * 0.43f;
-        mapRect.set(mapCx - mapSide * 0.5f, mapCy - mapSide * 0.5f,
-                mapCx + mapSide * 0.5f, mapCy + mapSide * 0.5f);
+        if (threeDsHudLayout) {
+            // Exact authored positions from the 640x480 inner reference canvas:
+            // map = x64, y156, 288x288. The 20px upward shift preserves the reference look while
+            // making enough room below it for the optional readable FPS counter. Using one uniform scale is the important part;
+            // the previous percentage layout preserved width reasonably well but placed
+            // the map far too low on Thor because vertical spacing was based on 1080px.
+            float s3 = threeDsReferenceScale;
+            // Keep some air below the coordinate strip and restore a less dominant map.
+            // The previous FPS pass moved the 288x288 map up to y=156, which made it look
+            // larger even though its raw size had not changed. Center a 272x272 map on
+            // the same horizontal axis and move it down to y=174 instead.
+            float mapLeft = threeDsReferenceLeft + 72f * s3;
+            float mapTop = threeDsReferenceTop + 174f * s3;
+            float mapSide = 272f * s3;
+            mapRect.set(mapLeft, mapTop, mapLeft + mapSide, mapTop + mapSide);
+        } else if (legacyHudLayout) {
+            // Restored tuned Legacy map size. The stale cursor patch had rolled this back
+            // to 52% x 60% of the entire display, which made the map huge.
+            float coordStripGap = Math.max(dp(6f), hotbarOuter.height() * 0.06f);
+            float coordStripHeight = Math.max(dp(34f), hotbarOuter.height() * 1.55f);
+            float lowerAreaTop = hotbarOuter.bottom + coordStripGap + coordStripHeight
+                    + Math.max(dp(10f), viewportHeight * 0.018f);
+            float lowerAreaBottom = layoutViewport.bottom - pad;
+            float lowerAreaHeight = Math.max(1f, lowerAreaBottom - lowerAreaTop);
+            float mapSide = Math.min(viewportWidth * 0.44f, lowerAreaHeight * 0.86f);
+            mapSide = Math.max(Math.min(viewportWidth, lowerAreaHeight) * 0.34f, mapSide);
+            float mapLeft = layoutViewport.left + pad + Math.max(0f, viewportWidth * 0.010f);
+            float mapTop = lowerAreaTop + Math.max(0f, (lowerAreaHeight - mapSide) * 0.58f);
+            mapRect.set(mapLeft, mapTop, mapLeft + mapSide, mapTop + mapSide);
+        } else {
+            float mapSide = Math.min(viewportWidth * 0.38f, viewportHeight * 0.39f);
+            mapSide = Math.max(Math.min(viewportWidth, viewportHeight) * 0.24f, mapSide);
+            float mapCx = layoutViewport.centerX();
+            float mapCy = layoutViewport.top + viewportHeight * 0.50f;
+            mapRect.set(mapCx - mapSide * 0.5f, mapCy - mapSide * 0.5f,
+                    mapCx + mapSide * 0.5f, mapCy + mapSide * 0.5f);
+        }
 
-        // No built-in fixed buttons here. In dual-screen mode the user's normal
-        // TouchControlsOverlay layout is rendered over this view, so the bottom
-        // screen behaves like the same configurable controller used in single-screen mode.
+        // Map/coordinate visibility belongs to Minecraft mod settings.
+        dualSettingsGearRect.setEmpty();
+        dualSettingsMapRect.setEmpty();
+        dualSettingsCoordsRect.setEmpty();
+        dualSettingsOpen = false;
     }
 
     private void addButton(float left, float top, float width, float height,
@@ -271,15 +826,27 @@ final class DualScreenControlsView extends View {
     @Override
     protected void onDraw(@NonNull Canvas canvas) {
         super.onDraw(canvas);
+        if (topLegacyOverlayMode) {
+            drawTopLegacyHudOverlay(canvas);
+            return;
+        }
+        String requestedHudLayout = LauncherPreferences.getDualScreenHudLayout(getContext());
+        boolean requestedLegacy = LauncherPreferences.DUAL_SCREEN_HUD_LAYOUT_LEGACY.equals(requestedHudLayout);
+        boolean requestedThreeDs = LauncherPreferences.DUAL_SCREEN_HUD_LAYOUT_3DS.equals(requestedHudLayout);
+        boolean requestedFourThree = LauncherPreferences.isDualScreenFourThreeLayout(getContext());
+        if ((requestedLegacy != legacyHudLayout || requestedThreeDs != threeDsHudLayout
+                || requestedFourThree != fourThreeLayout)
+                && getWidth() > 0 && getHeight() > 0) {
+            rebuildLayout(getWidth(), getHeight());
+        }
         drawBackground(canvas);
-        // 1.0.115: keep the bottom touch overlay available on menus/title screens,
-        // but hide the Minecraft HUD mirror until the state writer reports a real
-        // in-world player HUD. This prevents old hotbar data from staying visible
-        // while the player is at the main menu or another full-screen Minecraft UI.
-        if (!shouldDrawCompactGameHud()) return;
-        drawCenterMap(canvas);
-        drawCoordinates(canvas);
-        drawHotbar(canvas);
+        // Keep the bottom touch overlay available on menus/title screens, but hide the
+        // Minecraft HUD mirror until the state writer reports a real in-world HUD.
+        if (shouldDrawCompactGameHud()) {
+            drawCenterMap(canvas);
+            drawCoordinates(canvas);
+            drawHotbar(canvas);
+        }
     }
 
     private boolean shouldDrawCompactGameHud() {
@@ -349,7 +916,7 @@ final class DualScreenControlsView extends View {
 
         drawHearts(canvas, left, row1, state.health, state.maxHealth, state.absorption);
         drawFood(canvas, right - dp(186), row1, state.food);
-        drawArmor(canvas, left, row2, state.armor);
+        if (state.armor > 0) drawArmor(canvas, left, row2, state.armor);
         drawAir(canvas, right - dp(186), row2, state.air, state.maxAir);
         drawXp(canvas, left, row3, right, row3 + Math.max(dp(12), pip * 0.62f), state.experienceProgress, state.experienceLevel);
 
@@ -523,20 +1090,185 @@ final class DualScreenControlsView extends View {
         String clean = name.endsWith(".png") ? name : name + ".png";
         Bitmap cached = hudAssetCache.get(clean);
         if (cached != null && !cached.isRecycled()) return cached;
-        File file = resolveHudAssetFile(clean);
-        if (file == null || !file.isFile() || file.length() <= 0L) return null;
-        try {
-            BitmapFactory.Options options = new BitmapFactory.Options();
-            options.inScaled = false;
-            Bitmap bitmap = BitmapFactory.decodeFile(file.getAbsolutePath(), options);
-            if (bitmap != null) {
-                hudAssetCache.put(clean, bitmap);
-                return bitmap;
+
+        // Minecraft 1.12.2 and 1.16.5 both predate the split textures/gui/sprites/hud
+        // files used by modern versions. Their status icons live in icons.png and their
+        // hotbar chrome lives in widgets.png. Resolve the exact legacy client version
+        // instead of hard-coding 1.16.5; otherwise 1.12.2 falls through to the generic
+        // Android fallback and loses hearts/hunger/hotbar chrome entirely.
+        String legacyHudVersion = legacyHudAtlasVersion();
+        if (legacyHudVersion != null) {
+            Bitmap legacy = loadLegacyHudSprite(clean, legacyHudVersion);
+            if (legacy != null && !legacy.isRecycled()) {
+                hudAssetCache.put(clean, legacy);
+                return legacy;
             }
-        } catch (Throwable throwable) {
-            Logging.e(TAG, "Unable to load dual-screen HUD asset " + clean, throwable);
         }
+
+        File file = resolveHudAssetFile(clean);
+        if ((file == null || !file.isFile()) && clean.startsWith("experience_bar")) {
+            String[] resourceCandidates;
+            if ("experience_bar_progress.png".equals(clean) || "experience_bar_full.png".equals(clean)) {
+                resourceCandidates = new String[] {
+                        "assets/minecraft/textures/gui/sprites/hud/experience_bar_progress.png",
+                        "assets/minecraft/textures/gui/sprites/hud/experience_bar/progress.png",
+                        "assets/minecraft/textures/gui/sprites/hud/experience_bar_full.png"
+                };
+            } else {
+                resourceCandidates = new String[] {
+                        "assets/minecraft/textures/gui/sprites/hud/experience_bar_background.png",
+                        "assets/minecraft/textures/gui/sprites/hud/experience_bar/empty.png",
+                        "assets/minecraft/textures/gui/sprites/hud/experience_bar.png"
+                };
+            }
+            for (String resource : resourceCandidates) {
+                File extracted = extractInstalledHudAssetFromJars(resource);
+                if (extracted != null && extracted.isFile() && extracted.length() > 0L) {
+                    file = extracted;
+                    break;
+                }
+            }
+        }
+        if (file != null && file.isFile() && file.length() > 0L) {
+            try {
+                BitmapFactory.Options options = new BitmapFactory.Options();
+                options.inScaled = false;
+                Bitmap bitmap = BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+                if (bitmap != null) {
+                    hudAssetCache.put(clean, bitmap);
+                    return bitmap;
+                }
+            } catch (Throwable throwable) {
+                Logging.e(TAG, "Unable to load dual-screen HUD asset " + clean, throwable);
+            }
+        }
+
         return null;
+    }
+
+    @Nullable
+    private Bitmap loadLegacyHudSprite(@NonNull String name, @NonNull String version) {
+        try {
+            String n = name.toLowerCase(Locale.ROOT);
+
+            // Minecraft 1.16.5 keeps the hotbar frame and selector in widgets.png rather
+            // than the newer split textures/gui/sprites/hud assets.  Use the exact vanilla
+            // regions so the bottom screen gets the same 182x22 bar and 24x24 selector.
+            if ("hotbar.png".equals(n) || "hud_hotbar.png".equals(n) || "hotbar_background.png".equals(n)
+                    || "hotbar_selection.png".equals(n) || "hotbar_selected.png".equals(n)
+                    || "selected_hotbar_slot.png".equals(n)) {
+                String atlasKey = "__mc_" + version.replace('.', '_') + "_widgets_atlas.png";
+                Bitmap widgets = hudAssetCache.get(atlasKey);
+                if (widgets == null || widgets.isRecycled()) {
+                    File widgetsFile = extractInstalledAssetFromExactVersion(version, "assets/minecraft/textures/gui/widgets.png");
+                    if (widgetsFile == null || !widgetsFile.isFile()) {
+                        widgetsFile = extractInstalledAssetFromJars("assets/minecraft/textures/gui/widgets.png");
+                    }
+                    if (widgetsFile == null || !widgetsFile.isFile()) return null;
+                    BitmapFactory.Options options = new BitmapFactory.Options();
+                    options.inScaled = false;
+                    widgets = BitmapFactory.decodeFile(widgetsFile.getAbsolutePath(), options);
+                    if (widgets == null || widgets.getWidth() < 182 || widgets.getHeight() < 46) return null;
+                    hudAssetCache.put(atlasKey, widgets);
+                }
+                if ("hotbar_selection.png".equals(n) || "hotbar_selected.png".equals(n)
+                        || "selected_hotbar_slot.png".equals(n)) {
+                    return Bitmap.createBitmap(widgets, 0, 22, 24, 24);
+                }
+                return Bitmap.createBitmap(widgets, 0, 0, 182, 22);
+            }
+
+            // Vanilla 1.12.2/1.16.5 experience bar lives in icons.png as two 182x5
+            // strips. Crop the exact sprites so both bottom layouts and the optional
+            // top Legacy HUD use Minecraft's real bar instead of a launcher-drawn rectangle.
+            if ("experience_bar_background.png".equals(n) || "experience_bar_empty.png".equals(n)
+                    || "experience_bar.png".equals(n) || "experience_bar_progress.png".equals(n)
+                    || "experience_bar_full.png".equals(n)) {
+                String atlasKey = "__mc_" + version.replace('.', '_') + "_icons_atlas.png";
+                Bitmap atlas = hudAssetCache.get(atlasKey);
+                if (atlas == null || atlas.isRecycled()) {
+                    File atlasFile = extractInstalledAssetFromExactVersion(version, "assets/minecraft/textures/gui/icons.png");
+                    if (atlasFile == null || !atlasFile.isFile()) {
+                        atlasFile = extractInstalledAssetFromJars("assets/minecraft/textures/gui/icons.png");
+                    }
+                    if (atlasFile == null || !atlasFile.isFile()) return null;
+                    BitmapFactory.Options options = new BitmapFactory.Options();
+                    options.inScaled = false;
+                    atlas = BitmapFactory.decodeFile(atlasFile.getAbsolutePath(), options);
+                    if (atlas == null || atlas.getWidth() < 182 || atlas.getHeight() < 74) return null;
+                    hudAssetCache.put(atlasKey, atlas);
+                }
+                int v = ("experience_bar_progress.png".equals(n) || "experience_bar_full.png".equals(n)) ? 69 : 64;
+                return Bitmap.createBitmap(atlas, 0, v, 182, 5);
+            }
+
+            // Vanilla 1.12.2/1.16.5 icons.png coordinates (9x9 status sprites).
+            int u = -1, v = -1;
+            if ("heart_container.png".equals(n)) { u = 16; v = 0; }
+            else if ("heart_full.png".equals(n)) { u = 52; v = 0; }
+            else if ("heart_half.png".equals(n)) { u = 61; v = 0; }
+            else if ("armor_empty.png".equals(n) || "armor/container.png".equals(n)) { u = 16; v = 9; }
+            else if ("armor_half.png".equals(n) || "armor/half.png".equals(n)) { u = 25; v = 9; }
+            else if ("armor_full.png".equals(n) || "armor/full.png".equals(n)) { u = 34; v = 9; }
+            else if ("air_full.png".equals(n) || "air.png".equals(n) || "bubble_full.png".equals(n) || "bubble.png".equals(n)) { u = 16; v = 18; }
+            else if ("air_half.png".equals(n) || "air_bursting.png".equals(n) || "bubble_half.png".equals(n) || "bubble_bursting.png".equals(n)) { u = 25; v = 18; }
+            else if ("food_empty.png".equals(n)) { u = 16; v = 27; }
+            else if ("food_full.png".equals(n)) { u = 52; v = 27; }
+            else if ("food_half.png".equals(n)) { u = 61; v = 27; }
+            if (u < 0 || v < 0) return null;
+
+            String atlasKey = "__mc_" + version.replace('.', '_') + "_icons_atlas.png";
+            Bitmap atlas = hudAssetCache.get(atlasKey);
+            if (atlas == null || atlas.isRecycled()) {
+                // The 9x9 crop coordinates below are shared by the 1.12.2 and 1.16.5
+                // legacy HUD atlases. Never take icons.png from an unrelated newer version
+                // just because that client jar has a newer mtime.
+                File atlasFile = extractInstalledAssetFromExactVersion(version, "assets/minecraft/textures/gui/icons.png");
+                if (atlasFile == null || !atlasFile.isFile()) {
+                    atlasFile = extractInstalledAssetFromJars("assets/minecraft/textures/gui/icons.png");
+                }
+                if (atlasFile == null || !atlasFile.isFile()) return null;
+                BitmapFactory.Options options = new BitmapFactory.Options();
+                options.inScaled = false;
+                atlas = BitmapFactory.decodeFile(atlasFile.getAbsolutePath(), options);
+                if (atlas == null || atlas.getWidth() < u + 9 || atlas.getHeight() < v + 9) return null;
+                hudAssetCache.put(atlasKey, atlas);
+            }
+            if (atlas.getWidth() < u + 9 || atlas.getHeight() < v + 9) return null;
+            return Bitmap.createBitmap(atlas, u, v, 9, 9);
+        } catch (Throwable throwable) {
+            Logging.e(TAG, "Unable to crop Minecraft " + version + " HUD sprite " + name, throwable);
+            return null;
+        }
+    }
+
+    @Nullable
+    private String legacyHudAtlasVersion() {
+        HudState state = hudState;
+        if (state != null && state.compatProfile != null) {
+            if ("mc-1.12.2".equalsIgnoreCase(state.compatProfile)) return "1.12.2";
+            if ("mc-1.16.5".equalsIgnoreCase(state.compatProfile)) return "1.16.5";
+        }
+        // Startup fallback before the first state JSON arrives. Keep this exact-version
+        // detection separate from isMc116Compat(): 1.16.5 has additional map/model
+        // compatibility behavior that must not be enabled for 1.12.2.
+        String path = hudStateFile.getAbsolutePath().toLowerCase(Locale.ROOT);
+        if (path.contains("1.12.2")) return "1.12.2";
+        if (path.contains("1.16.5")) return "1.16.5";
+        return null;
+    }
+
+    private boolean isLegacyLiveItemFallbackCompat() {
+        return legacyHudAtlasVersion() != null;
+    }
+
+    private boolean isMc116Compat() {
+        HudState state = hudState;
+        if (state != null && "mc-1.16.5".equalsIgnoreCase(state.compatProfile)) return true;
+        // Startup fallback before the first state JSON arrives. The dedicated instance path
+        // contains the version and keeps this behavior isolated from 1.21.6+/26.2.
+        String path = hudStateFile.getAbsolutePath().toLowerCase(Locale.ROOT);
+        return path.contains("1.16.5");
     }
 
     @Nullable
@@ -629,6 +1361,92 @@ final class DualScreenControlsView extends View {
         return Color.rgb((int) (ar + (br - ar) * t), (int) (ag + (bg - ag) * t), (int) (ab + (bb - ab) * t));
     }
 
+    private void drawDualScreenSettingsControls(@NonNull Canvas canvas) {
+        if (dualSettingsGearRect.isEmpty()) return;
+
+        drawRoundRect(canvas, dualSettingsGearRect, Color.argb(228, 20, 25, 34),
+                dualSettingsOpen ? Color.rgb(124, 190, 255) : Color.rgb(118, 126, 143), 12f);
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setFakeBoldText(false);
+        text.setColor(Color.WHITE);
+        text.setTextSize(sp(22));
+        canvas.drawText("⚙", dualSettingsGearRect.centerX(), dualSettingsGearRect.centerY() + dp(7), text);
+
+        if (!dualSettingsOpen) return;
+        boolean mapEnabled = readDualScreenProperty("droidbridge_dualscreen_map.properties", "mapEnabled", false);
+        boolean coordinatesEnabled = readDualScreenProperty("droidbridge_dualscreen_coordinates.properties", "coordinatesEnabled", false);
+        drawDualScreenSettingRow(canvas, dualSettingsMapRect, "Map", mapEnabled);
+        drawDualScreenSettingRow(canvas, dualSettingsCoordsRect, "Coordinates", coordinatesEnabled);
+    }
+
+    private void drawDualScreenSettingRow(@NonNull Canvas canvas, @NonNull RectF bounds,
+                                          @NonNull String label, boolean enabled) {
+        if (bounds.isEmpty()) return;
+        int border = enabled ? Color.rgb(106, 207, 134) : Color.rgb(94, 103, 119);
+        drawRoundRect(canvas, bounds, Color.argb(238, 20, 25, 34), border, 10f);
+        text.setTextAlign(Paint.Align.LEFT);
+        text.setFakeBoldText(true);
+        text.setColor(Color.WHITE);
+        text.setTextSize(sp(12));
+        canvas.drawText(label, bounds.left + dp(12), bounds.centerY() + dp(4), text);
+        text.setTextAlign(Paint.Align.RIGHT);
+        text.setColor(enabled ? Color.rgb(123, 232, 150) : Color.rgb(184, 190, 202));
+        canvas.drawText(enabled ? "ON" : "OFF", bounds.right - dp(12), bounds.centerY() + dp(4), text);
+        text.setFakeBoldText(false);
+    }
+
+    private boolean readDualScreenProperty(@NonNull String fileName, @NonNull String key, boolean fallback) {
+        File file = dualScreenConfigFile(fileName);
+        if (!file.isFile()) return fallback;
+        Properties properties = new Properties();
+        try (FileInputStream input = new FileInputStream(file)) {
+            properties.load(input);
+            String raw = properties.getProperty(key);
+            if (raw == null) return fallback;
+            String value = raw.trim();
+            if ("true".equalsIgnoreCase(value) || "1".equals(value) || "yes".equalsIgnoreCase(value) || "on".equalsIgnoreCase(value)) return true;
+            if ("false".equalsIgnoreCase(value) || "0".equals(value) || "no".equalsIgnoreCase(value) || "off".equalsIgnoreCase(value)) return false;
+        } catch (Throwable throwable) {
+            Logging.e(TAG, "Unable to read dual-screen HUD option " + fileName, throwable);
+        }
+        return fallback;
+    }
+
+    /**
+     * Called by DualScreenDeckView's dedicated map button.
+     *
+     * Keep the deck button on the same property-backed path used by the older
+     * in-view map toggle so there is only one source of truth for map visibility.
+     */
+    void toggleMapFromDeckButton() {
+        toggleDualScreenProperty("droidbridge_dualscreen_map.properties", "mapEnabled");
+    }
+
+    private void toggleDualScreenProperty(@NonNull String fileName, @NonNull String key) {
+        File file = dualScreenConfigFile(fileName);
+        File parent = file.getParentFile();
+        if (parent != null && !parent.isDirectory()) parent.mkdirs();
+        boolean next = !readDualScreenProperty(fileName, key, false);
+        Properties properties = new Properties();
+        properties.setProperty(key, Boolean.toString(next));
+        properties.setProperty("note", "Written by DroidBridge dual-screen HUD settings overlay.");
+        try (FileOutputStream output = new FileOutputStream(file)) {
+            properties.store(output, "DroidBridge Dual Screen HUD");
+        } catch (Throwable throwable) {
+            Logging.e(TAG, "Unable to write dual-screen HUD option " + fileName, throwable);
+        }
+        // The Fabric config readers recheck these properties on a short interval; also
+        // invalidate immediately so the toggle state itself updates without waiting.
+        invalidate();
+    }
+
+    @NonNull
+    private File dualScreenConfigFile(@NonNull String fileName) {
+        File gameDir = hudStateFile.getParentFile();
+        if (gameDir == null) gameDir = new File(System.getProperty("user.dir", "."));
+        return new File(new File(gameDir, "config"), fileName);
+    }
+
     private void drawButtons(@NonNull Canvas canvas) {
         for (ButtonRegion button : buttons) {
             boolean pressed = isActionPressed(button.action);
@@ -647,46 +1465,304 @@ final class DualScreenControlsView extends View {
         }
     }
 
+    @NonNull
+    private LegacyHudOptions readLegacyHudOptions() {
+        long now = SystemClock.uptimeMillis();
+        if (now < legacyHudConfigNextReadMs) return legacyHudOptions;
+        legacyHudConfigNextReadMs = now + LEGACY_HUD_CONFIG_POLL_MS;
+
+        File file = dualScreenConfigFile("droidbridge_dualscreen.properties");
+        long stamp = fileStamp(file);
+        if (stamp == legacyHudConfigLastModified) return legacyHudOptions;
+
+        LegacyHudOptions next = LegacyHudOptions.defaults();
+        if (file.isFile()) {
+            Properties properties = new Properties();
+            try (FileInputStream input = new FileInputStream(file)) {
+                properties.load(input);
+                next = new LegacyHudOptions(
+                        parseHudBoolean(properties.getProperty("legacyHud"), false),
+                        parseHudBoolean(properties.getProperty("showHealth"), true),
+                        parseHudBoolean(properties.getProperty("showHunger"), true),
+                        parseHudBoolean(properties.getProperty("showArmor"), true),
+                        parseHudBoolean(properties.getProperty("showAir"), true)
+                );
+            } catch (Throwable throwable) {
+                Logging.e(TAG, "Unable to read Legacy HUD settings from " + file.getAbsolutePath(), throwable);
+            }
+        }
+        legacyHudOptions = next;
+        legacyHudConfigLastModified = stamp;
+        return next;
+    }
+
+    private static boolean sameLegacyHudOptions(
+            @NonNull LegacyHudOptions first,
+            @NonNull LegacyHudOptions second
+    ) {
+        return first.legacyHudEnabled == second.legacyHudEnabled
+                && first.showHealth == second.showHealth
+                && first.showHunger == second.showHunger
+                && first.showArmor == second.showArmor
+                && first.showAir == second.showAir;
+    }
+
+    private static boolean parseHudBoolean(@Nullable String raw, boolean fallback) {
+        if (raw == null) return fallback;
+        String value = raw.trim();
+        if ("true".equalsIgnoreCase(value) || "1".equals(value)
+                || "yes".equalsIgnoreCase(value) || "on".equalsIgnoreCase(value)) return true;
+        if ("false".equalsIgnoreCase(value) || "0".equals(value)
+                || "no".equalsIgnoreCase(value) || "off".equalsIgnoreCase(value)) return false;
+        return fallback;
+    }
+
+    /**
+     * Optional old-console-style HUD drawn over the Minecraft display itself. Geometry is
+     * authored against the supplied 400x225 reference image and uniformly scaled to the
+     * active game panel, keeping health/hunger at the top, armor/air at the bottom, and the
+     * vanilla XP bar/level centered across the top edge.
+     */
+    private void drawTopLegacyHudOverlay(@NonNull Canvas canvas) {
+        LegacyHudOptions options = readLegacyHudOptions();
+        if (!options.legacyHudEnabled) return;
+        HudState state = hudState;
+        if (state == null || !state.shouldDrawLiveHud()) return;
+
+        float width = Math.max(1f, getWidth());
+        float height = Math.max(1f, getHeight());
+        float scale = Math.min(width / 400f, height / 225f);
+        float designW = 400f * scale;
+        float designH = 225f * scale;
+        float ox = (width - designW) * 0.5f;
+        float oy = (height - designH) * 0.5f;
+
+        float pip = Math.max(1f, 13f * scale);
+        float gap = Math.max(1f, 2f * scale);
+        float leftX = ox + 19f * scale;
+        // Mirror the right-side hunger/air row against the same 19px design margin
+        // used by the heart/armor row. Ten 13px pips + nine 2px gaps = 148px,
+        // so the symmetric right-row origin is 400 - 19 - 148 = 233.
+        float rightX = ox + 233f * scale;
+        float topY = oy + 14f * scale;
+        float bottomY = oy + 221f * scale - pip;
+
+        float xpLeft = ox + 20f * scale;
+        float xpRight = ox + 382f * scale;
+        float xpTop = oy + 2f * scale;
+        float xpHeight = Math.max(3f * scale, (xpRight - xpLeft) * (5f / 182f));
+        drawMinecraftExperienceBar(canvas, xpLeft, xpTop, xpRight, xpTop + xpHeight,
+                state.experienceProgress);
+        if (state.experienceLevel >= 0) {
+            drawTopLegacyXpLevel(canvas, state.experienceLevel, ox + 200f * scale,
+                    oy + 18f * scale, scale);
+        }
+
+        if (options.showHealth) {
+            drawCompactHudSpritePips(canvas, leftX, topY, 10,
+                    Math.max(0f, state.health) / 2f,
+                    new String[] { "heart_full" },
+                    new String[] { "heart_half" },
+                    new String[] { "heart_container" }, pip, gap, 255);
+        }
+        if (options.showHunger) {
+            drawCompactHudSpritePips(canvas, rightX, topY, 10,
+                    Math.max(0, state.food) / 2f,
+                    new String[] { "food_full" },
+                    new String[] { "food_half" },
+                    new String[] { "food_empty" }, pip, gap, 255);
+        }
+        if (options.showArmor && state.armor > 0) {
+            drawCompactHudSpritePips(canvas, leftX, bottomY, 10, state.armor / 2f,
+                    new String[] { "armor_full", "armor/full" },
+                    new String[] { "armor_half", "armor/half" },
+                    new String[] { "armor_empty", "armor/container" }, pip, gap, 255);
+        }
+        boolean fullAir = state.air < 0 || state.maxAir <= 0 || state.air >= state.maxAir;
+        if (options.showAir && !fullAir) {
+            float airValue = Math.max(0f, Math.min(10f,
+                    (state.air / (float) Math.max(1, state.maxAir)) * 10f));
+            drawCompactAirPips(canvas, rightX, bottomY, 10, airValue, pip, gap, 255);
+        }
+    }
+
+    private void drawTopLegacyXpLevel(@NonNull Canvas canvas, int level, float centerX,
+                                      float centerY, float scale) {
+        String value = String.valueOf(Math.max(0, level));
+        float pixel = Math.max(1f, 2.55f * scale);
+        float glyphWidth = 5f * pixel;
+        float gap = pixel * 1.50f;
+        float totalWidth = value.length() * glyphWidth
+                + Math.max(0, value.length() - 1) * gap;
+        float left = centerX - totalWidth * 0.5f;
+        float top = centerY - (7f * pixel) * 0.5f;
+        drawXpPixelDigits(canvas, value, left + pixel, top + pixel, pixel, Color.rgb(28, 64, 8));
+        drawXpPixelDigits(canvas, value, left, top, pixel, Color.rgb(128, 255, 32));
+    }
+
     private void drawCompactMinecraftHudAboveHotbar(@NonNull Canvas canvas) {
+        logMc116AirStateOnce(hudState);
+        if (legacyHudLayout) {
+            drawLegacyMinecraftHudAboveHotbar(canvas);
+        } else {
+            drawModernMinecraftHudAboveHotbar(canvas);
+        }
+    }
+
+    private void logMc116AirStateOnce(@Nullable HudState state) {
+        if (!isMc116Compat() || state == null || !state.isFresh()) return;
+        if ((state.air < 0 || state.maxAir <= 0) && !loggedMc116MissingAirState) {
+            loggedMc116MissingAirState = true;
+            System.out.println("[DroidBridgeDualScreen] Launcher 1.16.5 air state missing: air="
+                    + state.air + " maxAir=" + state.maxAir + "; bubble row remains gated until live air arrives");
+            return;
+        }
+        if (state.air >= 0 && state.maxAir > 0 && state.air < state.maxAir && !loggedMc116LiveAirState) {
+            loggedMc116LiveAirState = true;
+            System.out.println("[DroidBridgeDualScreen] Launcher 1.16.5 live air received: air="
+                    + state.air + " maxAir=" + state.maxAir + "; drawing bubble row");
+        }
+    }
+
+    private void drawModernMinecraftHudAboveHotbar(@NonNull Canvas canvas) {
         HudState state = hudState.isFresh() ? hudState : HudState.fallback();
-        float pip = Math.max(dp(11), Math.min(dp(17), hotbarOuter.height() * 0.26f));
-        float gap = Math.max(dp(1.5f), pip * 0.18f);
-        float rowGap = Math.max(dp(2), pip * 0.30f);
+        LegacyHudOptions options = readLegacyHudOptions();
+
+        // Restored tuned Modern HUD: larger pips, protected center lane for XP,
+        // and health/hunger lifted away from the XP bar.
+        float centerReserve = Math.max(dp(96f), hotbarOuter.width() * 0.20f);
+        float sideRoom = Math.max(dp(128f),
+                (layoutViewport.width() - centerReserve) * 0.5f - dp(12f));
+        float desiredPip = Math.max(dp(17f),
+                Math.min(dp(27f), hotbarOuter.height() * 0.41f));
+        float pip = Math.max(dp(14f),
+                Math.min(desiredPip, sideRoom / (10f + 9f * 0.16f)));
+        float gap = Math.max(dp(1.5f), pip * 0.16f);
+        float rowGap = Math.max(dp(2f), pip * 0.28f);
         float hudWidth = (pip * 10f) + (gap * 9f);
-        float leftX = hotbarOuter.left + dp(7);
-        float rightX = hotbarOuter.right - dp(7) - hudWidth;
+        // Keep the survival HUD fixed on the lower-screen viewport. hotbarOuter is
+        // intentionally shifted when an offhand slot is present, but hearts/armor/
+        // hunger/air must not inherit that horizontal offset.
+        float centerX = layoutViewport.centerX();
+        float leftX = centerX - centerReserve * 0.5f - hudWidth;
+        float rightX = centerX + centerReserve * 0.5f;
+        float minLeft = layoutViewport.left + dp(8f);
+        float maxRight = layoutViewport.right - dp(8f) - hudWidth;
+        leftX = Math.max(minLeft, leftX);
+        rightX = Math.min(maxRight, rightX);
         float baseY = hotbarOuter.top - (pip * 2f) - rowGap - dp(5);
         if (baseY < titleRect.bottom + dp(4)) baseY = hotbarOuter.top - pip - dp(4);
 
-        // Minecraft-style placement above the hotbar:
-        // left = armor row over health row, right = air row over hunger row.
-        drawCompactHudSpritePips(canvas, leftX, baseY, 10, Math.max(0, state.armor) / 2f,
-                new String[] { "armor_full", "armor/full" },
-                new String[] { "armor_half", "armor/half" },
-                new String[] { "armor_empty", "armor/container" }, pip, gap, 255);
-        drawCompactHudSpritePips(canvas, leftX, baseY + pip + rowGap, 10, Math.max(0f, state.health) / 2f,
+        if (options.showArmor && state.armor > 0) {
+            drawCompactHudSpritePips(canvas, leftX, baseY, 10, state.armor / 2f,
+                    new String[] { "armor_full", "armor/full" },
+                    new String[] { "armor_half", "armor/half" },
+                    new String[] { "armor_empty", "armor/container" }, pip, gap, 255);
+        }
+
+        // This -9dp is the tuned upward shift that was accidentally lost.
+        float lowerHudY = baseY + pip + rowGap - dp(9f);
+        if (options.showHealth) drawCompactHudSpritePips(canvas, leftX, lowerHudY, 10,
+                Math.max(0f, state.health) / 2f,
                 new String[] { "heart_full" },
                 new String[] { "heart_half" },
                 new String[] { "heart_container" }, pip, gap, 255);
 
         boolean fullAir = state.air < 0 || state.maxAir <= 0 || state.air >= state.maxAir;
-        if (!fullAir) {
-            float airValue = Math.max(0f, Math.min(10f, (state.air / (float) Math.max(1, state.maxAir)) * 10f));
-            drawCompactHudSpritePips(canvas, rightX, baseY, 10, airValue,
-                    new String[] { "air_full", "air", "bubble_full", "bubble" },
-                    new String[] { "air_half", "air_bursting", "bubble_half", "bubble_bursting" },
-                    new String[] { "air_empty", "bubble_empty" }, pip, gap, 255);
+        if (options.showAir && !fullAir) {
+            float airValue = Math.max(0f, Math.min(10f,
+                    (state.air / (float) Math.max(1, state.maxAir)) * 10f));
+            // Keep breathing bubbles clearly separated from the hunger row. Air uses its
+            // own renderer because vanilla consumes the LEFT-most bubble first and a fully
+            // depleted bubble disappears instead of leaving an empty/container sprite.
+            float airY = Math.max(layoutViewport.top + dp(4f),
+                    baseY - Math.max(dp(4f), pip * 0.18f));
+            drawCompactAirPips(canvas, rightX, airY, 10, airValue, pip, gap, 255);
         }
-        drawCompactHudSpritePips(canvas, rightX, baseY + pip + rowGap, 10, Math.max(0, state.food) / 2f,
+        if (options.showHunger) drawCompactHudSpritePips(canvas, rightX, lowerHudY, 10,
+                Math.max(0, state.food) / 2f,
                 new String[] { "food_full" },
                 new String[] { "food_half" },
                 new String[] { "food_empty" }, pip, gap, 255);
 
-        // XP directly above the vanilla hotbar, matching the normal HUD stack.
-        float xpH = Math.max(dp(4), pip * 0.34f);
+        float statusHotbarLeft = layoutViewport.centerX() - hotbarOuter.width() * 0.5f;
+        float statusHotbarRight = statusHotbarLeft + hotbarOuter.width();
+        float xpInnerWidth = Math.max(1f, statusHotbarRight - statusHotbarLeft - dp(8f));
+        float xpH = Math.max(dp(5f), xpInnerWidth * (5f / 182f));
         float xpTop = hotbarOuter.top - xpH - dp(2);
-        drawCompactXpBar(canvas, hotbarOuter.left + dp(4), xpTop, hotbarOuter.right - dp(4), xpTop + xpH,
-                state.experienceProgress, state.experienceLevel);
+        drawCompactXpBar(canvas, statusHotbarLeft + dp(4), xpTop,
+                statusHotbarRight - dp(4), xpTop + xpH,
+                state.experienceProgress, state.experienceLevel,
+                lowerHudY + pip * 0.5f);
+    }
+
+    private void drawLegacyMinecraftHudAboveHotbar(@NonNull Canvas canvas) {
+        HudState state = hudState.isFresh() ? hudState : HudState.fallback();
+        LegacyHudOptions options = readLegacyHudOptions();
+
+        // Restored tuned Legacy HUD. Hearts sit left of XP and hunger right of XP,
+        // with larger pips and the lower row lifted clear of the XP bar.
+        float centerReserve = Math.max(dp(104f), hotbarOuter.width() * 0.22f);
+        float sideRoom = Math.max(dp(128f),
+                (layoutViewport.width() - centerReserve) * 0.5f - dp(12f));
+        float desiredPip = Math.max(dp(18f),
+                Math.min(dp(28f), hotbarOuter.height() * 0.40f));
+        float pip = Math.max(dp(15f),
+                Math.min(desiredPip, sideRoom / (10f + 9f * 0.13f)));
+        float gap = Math.max(dp(1.5f), pip * 0.13f);
+        float rowGap = Math.max(dp(2.5f), pip * 0.18f);
+        float hudWidth = (pip * 10f) + (gap * 9f);
+        // Keep the survival HUD fixed on the lower-screen viewport. hotbarOuter is
+        // intentionally shifted when an offhand slot is present, but hearts/armor/
+        // hunger/air must not inherit that horizontal offset.
+        float centerX = layoutViewport.centerX();
+        float leftX = centerX - centerReserve * 0.5f - hudWidth;
+        float rightX = centerX + centerReserve * 0.5f;
+        float minLeft = layoutViewport.left + dp(8f);
+        float maxRight = layoutViewport.right - dp(8f) - hudWidth;
+        leftX = Math.max(minLeft, leftX);
+        rightX = Math.min(maxRight, rightX);
+        float upperY = Math.max(layoutViewport.top + dp(6f),
+                hotbarOuter.top - (pip * 2f) - rowGap - dp(8f));
+        float lowerY = upperY + pip + rowGap - dp(9f);
+
+        if (options.showArmor && state.armor > 0) {
+            drawCompactHudSpritePips(canvas, leftX, upperY, 10, state.armor / 2f,
+                    new String[] { "armor_full", "armor/full" },
+                    new String[] { "armor_half", "armor/half" },
+                    new String[] { "armor_empty", "armor/container" }, pip, gap, 255);
+        }
+
+        if (options.showHealth) drawCompactHudSpritePips(canvas, leftX, lowerY, 10,
+                Math.max(0f, state.health) / 2f,
+                new String[] { "heart_full" },
+                new String[] { "heart_half" },
+                new String[] { "heart_container" }, pip, gap, 255);
+
+        boolean fullAir = state.air < 0 || state.maxAir <= 0 || state.air >= state.maxAir;
+        if (options.showAir && !fullAir) {
+            float airValue = Math.max(0f, Math.min(10f,
+                    (state.air / (float) Math.max(1, state.maxAir)) * 10f));
+            float airY = Math.max(layoutViewport.top + dp(4f),
+                    upperY - Math.max(dp(4f), pip * 0.18f));
+            drawCompactAirPips(canvas, rightX, airY, 10, airValue, pip, gap, 255);
+        }
+
+        if (options.showHunger) drawCompactHudSpritePips(canvas, rightX, lowerY, 10,
+                Math.max(0, state.food) / 2f,
+                new String[] { "food_full" },
+                new String[] { "food_half" },
+                new String[] { "food_empty" }, pip, gap, 255);
+
+        float statusHotbarLeft = layoutViewport.centerX() - hotbarOuter.width() * 0.5f;
+        float statusHotbarRight = statusHotbarLeft + hotbarOuter.width();
+        float xpInnerWidth = Math.max(1f, statusHotbarRight - statusHotbarLeft - dp(8f));
+        float xpH = Math.max(dp(5f), xpInnerWidth * (5f / 182f));
+        float xpTop = hotbarOuter.top - xpH - dp(3f);
+        drawCompactXpBar(canvas, statusHotbarLeft + dp(4f), xpTop,
+                statusHotbarRight - dp(4f), xpTop + xpH,
+                state.experienceProgress, state.experienceLevel,
+                lowerY + pip * 0.5f);
     }
 
     private boolean drawCompactHudSpritePips(@NonNull Canvas canvas, float x, float y, int count, float filled,
@@ -706,7 +1782,12 @@ final class DualScreenControlsView extends View {
                 fill.setAlpha(Math.max(25, Math.min(255, alpha)));
                 canvas.drawBitmap(empty, null, scratch, fill);
             }
-            float v = filled - i;
+            boolean reverseFood = fullNames.length > 0 && fullNames[0] != null
+                    && fullNames[0].toLowerCase(Locale.ROOT).contains("food");
+            // Hunger is anchored on the right side of the HUD on every supported Minecraft
+            // version. As food is lost, remove the LEFT-most filled drumstick first so the
+            // visible filled icons deplete left-to-right, matching the bubble row.
+            float v = reverseFood ? filled - (Math.min(10, Math.max(0, count)) - 1 - i) : filled - i;
             Bitmap overlay = v >= 1f ? full : (v > 0f && half != null ? half : null);
             if (overlay != null) {
                 fill.setAlpha(Math.max(0, Math.min(255, alpha)));
@@ -717,16 +1798,171 @@ final class DualScreenControlsView extends View {
         return true;
     }
 
-    private void drawCompactXpBar(@NonNull Canvas canvas, float left, float top, float right, float bottom, float progress, int level) {
-        float p = clamp01(progress);
-        fill.setStyle(Paint.Style.FILL);
-        fill.setColor(Color.rgb(31, 43, 32));
-        canvas.drawRect(left, top, right, bottom, fill);
-        fill.setColor(Color.rgb(93, 212, 79));
-        canvas.drawRect(left, top, left + (right - left) * p, bottom, fill);
-        if (level >= 0) {
-            drawMinecraftStyleXpLevel(canvas, level, (left + right) * 0.5f, top - dp(1));
+    /**
+     * Compact breathing bubbles intentionally differ from the generic pip renderer:
+     * - depleted bubbles disappear completely (no empty/container sprite);
+     * - depletion proceeds left-to-right while the remaining bubbles stay anchored right;
+     * - the half/bursting sprite is used only for the one partially remaining bubble.
+     */
+    private boolean drawCompactAirPips(@NonNull Canvas canvas, float x, float y, int count, float filled,
+                                       float size, float gap, int alpha) {
+        Bitmap full = loadFirstHudAsset(new String[] {
+                "air_full", "air", "bubble_full", "bubble"
+        });
+        Bitmap half = loadFirstHudAsset(new String[] {
+                "air_half", "air_bursting", "bubble_half", "bubble_bursting"
+        });
+
+        // 1.16.5 is different from the Forge 1.20.1 path: its bubbles are not separate
+        // HUD sprite files, they are 9x9 regions in textures/gui/icons.png.  Hearts and
+        // hunger already prove that atlas can be present while the generic air lookup can
+        // still hand us no usable bitmap.  Resolve the exact vanilla legacy regions again
+        // here and reject an accidentally blank crop instead of silently drawing nothing.
+        if (isMc116Compat()) {
+            if (full == null || full.isRecycled() || isBitmapEffectivelyBlank(full)) {
+                Bitmap legacyFull = loadLegacyHudSprite("air_full.png", "1.16.5");
+                if (legacyFull != null && !legacyFull.isRecycled()
+                        && !isBitmapEffectivelyBlank(legacyFull)) {
+                    full = legacyFull;
+                    hudAssetCache.put("air_full.png", legacyFull);
+                }
+            }
+            if (half == null || half.isRecycled() || isBitmapEffectivelyBlank(half)) {
+                Bitmap legacyHalf = loadLegacyHudSprite("air_half.png", "1.16.5");
+                if (legacyHalf != null && !legacyHalf.isRecycled()
+                        && !isBitmapEffectivelyBlank(legacyHalf)) {
+                    half = legacyHalf;
+                    hudAssetCache.put("air_half.png", legacyHalf);
+                }
+            }
         }
+
+        if (full != null && (full.isRecycled() || isBitmapEffectivelyBlank(full))) full = null;
+        if (half != null && (half.isRecycled() || isBitmapEffectivelyBlank(half))) half = null;
+        if (full == null && half == null) {
+            // Never let the compact renderer fail silently.  This fallback is intentionally
+            // only reached when the real Minecraft bubble atlas cannot be decoded.
+            if (isMc116Compat() && !loggedMc116AirSpriteFallback) {
+                loggedMc116AirSpriteFallback = true;
+                System.out.println("[DroidBridgeDualScreen] Minecraft 1.16.5 bubble atlas unavailable/blank; using launcher bubble fallback");
+            }
+            return drawCompactAirFallbackPips(canvas, x, y, count, filled, size, gap, alpha);
+        }
+        if (full == null) full = half;
+
+        int limit = Math.min(10, Math.max(0, count));
+        int oldAlpha = fill.getAlpha();
+        fill.setFilterBitmap(false);
+        fill.setDither(false);
+        fill.setAlpha(Math.max(0, Math.min(255, alpha)));
+
+        for (int i = 0; i < limit; i++) {
+            // Reverse the fill index so lost air removes the left-most bubble first.
+            float v = filled - (limit - 1 - i);
+            if (v <= 0f) continue;
+
+            Bitmap sprite = v >= 1f ? full : (half != null ? half : full);
+            if (sprite == null) continue;
+            scratch.set(x + i * (size + gap), y,
+                    x + i * (size + gap) + size, y + size);
+            canvas.drawBitmap(sprite, null, scratch, fill);
+        }
+
+        fill.setAlpha(oldAlpha);
+        return true;
+    }
+
+    /**
+     * Last-resort compact air renderer used only when the exact legacy/modern Minecraft
+     * bubble sprites cannot be decoded. It keeps the same left-to-right depletion behavior
+     * and, unlike the previous code, guarantees that a valid air state is still visible.
+     */
+    private boolean drawCompactAirFallbackPips(@NonNull Canvas canvas, float x, float y, int count, float filled,
+                                               float size, float gap, int alpha) {
+        int limit = Math.min(10, Math.max(0, count));
+        int oldAlpha = fill.getAlpha();
+        Paint.Style oldFillStyle = fill.getStyle();
+        Paint.Style oldStrokeStyle = stroke.getStyle();
+        float oldStrokeWidth = stroke.getStrokeWidth();
+        int oldStrokeAlpha = stroke.getAlpha();
+
+        fill.setStyle(Paint.Style.FILL);
+        stroke.setStyle(Paint.Style.STROKE);
+        stroke.setStrokeWidth(Math.max(1f, size * 0.10f));
+        fill.setAlpha(Math.max(0, Math.min(255, alpha)));
+        stroke.setAlpha(Math.max(0, Math.min(255, alpha)));
+
+        for (int i = 0; i < limit; i++) {
+            float v = filled - (limit - 1 - i);
+            if (v <= 0f) continue;
+            float left = x + i * (size + gap);
+            scratch.set(left + size * 0.08f, y + size * 0.08f,
+                    left + size * 0.92f, y + size * 0.92f);
+            fill.setColor(Color.rgb(186, 229, 255));
+            stroke.setColor(Color.rgb(53, 109, 150));
+            canvas.drawOval(scratch, fill);
+            canvas.drawOval(scratch, stroke);
+            if (v < 1f) {
+                scratch2.set(scratch.centerX(), scratch.top, scratch.right, scratch.centerY());
+                fill.setColor(Color.argb(Math.max(0, Math.min(255, alpha)), 42, 77, 102));
+                canvas.drawOval(scratch2, fill);
+            }
+        }
+
+        fill.setAlpha(oldAlpha);
+        fill.setStyle(oldFillStyle);
+        stroke.setStyle(oldStrokeStyle);
+        stroke.setStrokeWidth(oldStrokeWidth);
+        stroke.setAlpha(oldStrokeAlpha);
+        return true;
+    }
+
+    private void drawCompactXpBar(@NonNull Canvas canvas, float left, float top, float right, float bottom,
+                                  float progress, int level, float levelCenterY) {
+        boolean drewVanillaBar = drawMinecraftExperienceBar(canvas, left, top, right, bottom, progress);
+        if (!drewVanillaBar) {
+            // Last-resort compatibility fallback only. Supported versions should resolve the
+            // real vanilla experience sprites (or the legacy icons.png crops) below.
+            float p = clamp01(progress);
+            fill.setStyle(Paint.Style.FILL);
+            fill.setColor(Color.rgb(31, 43, 32));
+            canvas.drawRect(left, top, right, bottom, fill);
+            fill.setColor(Color.rgb(93, 212, 79));
+            canvas.drawRect(left, top, left + (right - left) * p, bottom, fill);
+        }
+        if (level >= 0) {
+            drawMinecraftStyleXpLevelCentered(canvas, level, (left + right) * 0.5f,
+                    levelCenterY - dp(4f));
+        }
+    }
+
+    private boolean drawMinecraftExperienceBar(@NonNull Canvas canvas, float left, float top,
+                                               float right, float bottom, float progress) {
+        Bitmap background = loadFirstHudAsset(new String[] {
+                "experience_bar_background", "experience_bar_empty", "experience_bar"
+        });
+        Bitmap filled = loadFirstHudAsset(new String[] {
+                "experience_bar_progress", "experience_bar_full"
+        });
+        if (background == null || background.isRecycled()) return false;
+
+        boolean oldFilter = fill.isFilterBitmap();
+        boolean oldDither = fill.isDither();
+        fill.setFilterBitmap(false);
+        fill.setDither(false);
+        scratch.set(left, top, right, bottom);
+        canvas.drawBitmap(background, null, scratch, fill);
+
+        float p = clamp01(progress);
+        if (filled != null && !filled.isRecycled() && p > 0f) {
+            int save = canvas.save();
+            canvas.clipRect(left, top, left + (right - left) * p, bottom);
+            canvas.drawBitmap(filled, null, scratch, fill);
+            canvas.restoreToCount(save);
+        }
+        fill.setFilterBitmap(oldFilter);
+        fill.setDither(oldDither);
+        return true;
     }
 
     // Small 5x7 pixel numeral set. This intentionally uses a Minecraft-like bitmap
@@ -748,15 +1984,40 @@ final class DualScreenControlsView extends View {
 
     private void drawMinecraftStyleXpLevel(@NonNull Canvas canvas, int level, float centerX, float bottomY) {
         String value = String.valueOf(Math.max(0, level));
-        float pixel = Math.max(1f, dp(1.15f));
+        float pixel = xpLevelPixelSize();
         float glyphWidth = 5f * pixel;
-        float gap = pixel;
-        float totalWidth = value.length() * glyphWidth + Math.max(0, value.length() - 1) * gap;
+        float gap = pixel * 1.50f;
+        float totalWidth = value.length() * glyphWidth
+                + Math.max(0, value.length() - 1) * gap;
         float left = centerX - totalWidth * 0.5f;
         float top = bottomY - 7f * pixel;
 
-        drawXpPixelDigits(canvas, value, left + pixel, top + pixel, pixel, Color.rgb(28, 64, 8));
-        drawXpPixelDigits(canvas, value, left, top, pixel, Color.rgb(128, 255, 32));
+        drawXpPixelDigits(canvas, value, left + pixel, top + pixel, pixel,
+                Color.rgb(28, 64, 8));
+        drawXpPixelDigits(canvas, value, left, top, pixel,
+                Color.rgb(128, 255, 32));
+    }
+
+    private void drawMinecraftStyleXpLevelCentered(@NonNull Canvas canvas, int level,
+                                                   float centerX, float centerY) {
+        String value = String.valueOf(Math.max(0, level));
+        float pixel = xpLevelPixelSize();
+        float glyphWidth = 5f * pixel;
+        float gap = pixel * 1.50f;
+        float totalWidth = value.length() * glyphWidth
+                + Math.max(0, value.length() - 1) * gap;
+        float left = centerX - totalWidth * 0.5f;
+        float top = centerY - (7f * pixel) * 0.5f;
+
+        drawXpPixelDigits(canvas, value, left + pixel, top + pixel, pixel,
+                Color.rgb(28, 64, 8));
+        drawXpPixelDigits(canvas, value, left, top, pixel,
+                Color.rgb(128, 255, 32));
+    }
+
+    private float xpLevelPixelSize() {
+        // Final tuned size from before the player-marker-only change.
+        return Math.max(1f, dp(legacyHudLayout ? 2.31f : 2.61f));
     }
 
     private void drawXpPixelDigits(@NonNull Canvas canvas, @NonNull String value, float left, float top, float pixel, int color) {
@@ -776,7 +2037,7 @@ final class DualScreenControlsView extends View {
                     canvas.drawRect(px, py, px + pixel, py + pixel, fill);
                 }
             }
-            x += 6f * pixel;
+            x += 6.5f * pixel;
         }
     }
 
@@ -840,31 +2101,76 @@ final class DualScreenControlsView extends View {
             scratch2.inset(innerPad, innerPad);
         }
 
+        // Render the complete fixed map page. Like a vanilla map, terrain must stay anchored
+        // while the player marker moves across it; centering this bitmap on every state update
+        // made the terrain appear to follow the player and hid page-boundary updates.
         canvas.drawBitmap(bitmap, null, scratch2, fill);
 
-        // Vanilla-like player marker. It tracks position inside the fixed 128x128 map
-        // and rotates with player yaw; outside-map positions clamp to the edge.
-        float px = clamp(state.mapPlayerX / Math.max(1f, state.mapSize), 0f, 1f);
-        float py = clamp(state.mapPlayerY / Math.max(1f, state.mapSize), 0f, 1f);
+        float mapSize = Math.max(1f, state.mapSize);
+        float px = clamp(state.mapPlayerX / mapSize, 0f, 1f);
+        float py = clamp(state.mapPlayerY / mapSize, 0f, 1f);
         float cx = scratch2.left + px * scratch2.width();
         float cy = scratch2.top + py * scratch2.height();
-        float marker = Math.max(dp(5f), scratch2.width() * 0.026f);
-        shapePath.reset();
-        shapePath.moveTo(0f, -marker);
-        shapePath.lineTo(marker * 0.72f, marker * 0.82f);
-        shapePath.lineTo(0f, marker * 0.46f);
-        shapePath.lineTo(-marker * 0.72f, marker * 0.82f);
-        shapePath.close();
+        drawMinecraftMapPlayerMarker(canvas, cx, cy, scratch2.width(), state.mapRotation);
+    }
+
+    /**
+     * Minecraft-style pixel map cursor.  This deliberately avoids Android Path
+     * anti-aliasing: every source pixel stays square and the heading is quantized
+     * to the same 16 directional steps used by the vanilla map decoration.
+     */
+    private void drawMinecraftMapPlayerMarker(@NonNull Canvas canvas, float cx, float cy,
+                                              float renderedMapWidth, float rotationDegrees) {
+        final String[] pixels = new String[] {
+                "..#..",
+                ".#g#.",
+                "#glg#",
+                "#lWl#",
+                "#lWl#",
+                "#glg#",
+                ".###."
+        };
+
+        // Keep each source pixel at an integer-like rendered size so it remains
+        // visibly pixelated even when the lower display is scaled.
+        float sourcePixel = Math.max(2f, (float) Math.floor(renderedMapWidth / MAP_PIXEL_SIZE));
+        float spriteWidth = 5f * sourcePixel;
+        float spriteHeight = 7f * sourcePixel;
+        float left = -spriteWidth * 0.5f;
+        float top = -spriteHeight * 0.5f;
+
+        // Vanilla map cursors use 16 discrete headings.
+        float snappedRotation = Math.round((rotationDegrees + 180f) / 22.5f) * 22.5f;
+
         canvas.save();
-        canvas.translate(cx, cy);
-        canvas.rotate(state.mapRotation);
+        canvas.translate(Math.round(cx), Math.round(cy));
+        canvas.rotate(snappedRotation);
+
+        boolean oldAntiAlias = fill.isAntiAlias();
+        boolean oldFilter = fill.isFilterBitmap();
+        fill.setAntiAlias(false);
+        fill.setFilterBitmap(false);
         fill.setStyle(Paint.Style.FILL);
-        fill.setColor(Color.WHITE);
-        canvas.drawPath(shapePath, fill);
-        stroke.setStyle(Paint.Style.STROKE);
-        stroke.setStrokeWidth(Math.max(dp(1f), marker * 0.15f));
-        stroke.setColor(Color.rgb(55, 45, 35));
-        canvas.drawPath(shapePath, stroke);
+
+        for (int row = 0; row < pixels.length; row++) {
+            String line = pixels[row];
+            for (int col = 0; col < line.length(); col++) {
+                char value = line.charAt(col);
+                if (value == '.') continue;
+
+                if (value == '#') fill.setColor(Color.rgb(0, 0, 0));
+                else if (value == 'g') fill.setColor(Color.rgb(150, 150, 150));
+                else if (value == 'l') fill.setColor(Color.rgb(210, 210, 210));
+                else fill.setColor(Color.WHITE);
+
+                float x = left + col * sourcePixel;
+                float y = top + row * sourcePixel;
+                canvas.drawRect(x, y, x + sourcePixel, y + sourcePixel, fill);
+            }
+        }
+
+        fill.setFilterBitmap(oldFilter);
+        fill.setAntiAlias(oldAntiAlias);
         canvas.restore();
     }
 
@@ -875,13 +2181,91 @@ final class DualScreenControlsView extends View {
         CoordinateState state = coordinateState;
         if (state == null || !state.enabled || !state.isFresh()) return;
 
-        String value = String.format(Locale.US, "X %d  Y %d  Z %d", state.x, state.y, state.z);
-        float pixel = Math.max(1f, Math.min(dp(1.9f), getWidth() / Math.max(120f, value.length() * 6.5f)));
+        String value = threeDsHudLayout
+                ? String.format(Locale.US, "X: %d, Y: %d, Z: %d", state.x, state.y, state.z)
+                : String.format(Locale.US, "X %d  Y %d  Z %d", state.x, state.y, state.z);
+        float pixel;
+        if (threeDsHudLayout) {
+            pixel = Math.max(1f, 3f * threeDsReferenceScale);
+            float maxTextWidth = Math.max(1f, (threeDsReferenceRight - threeDsReferenceLeft) * 0.90f);
+            float measured = measurePixelText(value, pixel);
+            if (measured > maxTextWidth) pixel *= maxTextWidth / measured;
+        } else {
+            pixel = Math.max(1f, Math.min(dp(1.9f),
+                    layoutViewport.width() / Math.max(120f, value.length() * 6.5f)));
+        }
         float width = measurePixelText(value, pixel);
-        float left = (getWidth() - width) * 0.5f;
-        float top = Math.max(dp(10f), mapRect.top - (8f * pixel) - dp(8f));
+        float left = threeDsHudLayout
+                ? (threeDsReferenceLeft + (threeDsReferenceRight - threeDsReferenceLeft - width) * 0.5f)
+                : (layoutViewport.centerX() - width * 0.5f);
 
-        drawPixelText(canvas, value, left + pixel, top + pixel, pixel, Color.argb(220, 20, 20, 20));
+        if (threeDsHudLayout || legacyHudLayout) {
+            float stripTop;
+            float stripHeight;
+            float stripLeft;
+            float stripRight;
+            if (threeDsHudLayout) {
+                float s3 = threeDsReferenceScale;
+                // Reference: hotbar ends at ~80, separator band runs to y108, then
+                // the coordinate strip occupies y108..160.
+                stripTop = threeDsReferenceTop + 108f * s3;
+                stripHeight = 52f * s3;
+                stripLeft = threeDsReferenceLeft;
+                stripRight = threeDsReferenceRight;
+
+                // Two-pixel-ish highlight at the bottom of the light separator band.
+                fill.setStyle(Paint.Style.FILL);
+                fill.setColor(Color.rgb(180, 178, 179));
+                canvas.drawRect(stripLeft, stripTop - 4f * s3, stripRight, stripTop - 2f * s3, fill);
+                fill.setColor(Color.rgb(145, 143, 144));
+                canvas.drawRect(stripLeft, stripTop - 2f * s3, stripRight, stripTop, fill);
+            } else {
+                stripTop = hotbarOuter.bottom + Math.max(dp(6f), hotbarOuter.height() * 0.06f);
+                stripHeight = Math.max(dp(34f), 7f * pixel + dp(18f));
+                stripLeft = layoutViewport.left;
+                stripRight = layoutViewport.right;
+            }
+            float stripBottom = stripTop + stripHeight;
+
+            fill.setStyle(Paint.Style.FILL);
+            fill.setColor(threeDsHudLayout ? Color.rgb(56, 56, 56) : Color.argb(188, 67, 67, 67));
+            canvas.drawRect(stripLeft, stripTop, stripRight, stripBottom, fill);
+
+            if (threeDsHudLayout) {
+                // The reference strip has a subtle lighter lower edge rather than a heavy
+                // black border. Keep that edge proportional to the authored image.
+                fill.setColor(Color.rgb(114, 114, 114));
+                canvas.drawRect(stripLeft, stripBottom - Math.max(1f, 2f * threeDsReferenceScale),
+                        stripRight, stripBottom, fill);
+            } else {
+                fill.setColor(Color.argb(205, 180, 180, 180));
+                canvas.drawRect(stripLeft, stripTop, stripRight, stripTop + Math.max(1f, dp(1f)), fill);
+                fill.setColor(Color.argb(205, 25, 25, 25));
+                canvas.drawRect(stripLeft, stripBottom - Math.max(1f, dp(2f)), stripRight, stripBottom, fill);
+            }
+
+            float top = stripTop + (stripHeight - 7f * pixel) * 0.5f;
+            drawPixelText(canvas, value, left + pixel, top + pixel, pixel,
+                    Color.argb(220, 20, 20, 20));
+            drawPixelText(canvas, value, left, top, pixel, Color.WHITE);
+            return;
+        }
+
+        float top = Math.max(dp(10f), mapRect.top - (8f * pixel) - dp(8f));
+        float platePadX = Math.max(dp(8f), pixel * 4f);
+        float platePadY = Math.max(dp(5f), pixel * 2.5f);
+        scratch.set(left - platePadX, top - platePadY,
+                left + width + platePadX, top + 7f * pixel + platePadY);
+        fill.setStyle(Paint.Style.FILL);
+        fill.setColor(Color.argb(112, 8, 12, 18));
+        canvas.drawRoundRect(scratch, dp(4f), dp(4f), fill);
+        stroke.setStyle(Paint.Style.STROKE);
+        stroke.setStrokeWidth(Math.max(1f, dp(1f)));
+        stroke.setColor(Color.argb(90, 255, 255, 255));
+        canvas.drawRoundRect(scratch, dp(4f), dp(4f), stroke);
+
+        drawPixelText(canvas, value, left + pixel, top + pixel, pixel,
+                Color.argb(220, 20, 20, 20));
         drawPixelText(canvas, value, left, top, pixel, Color.WHITE);
     }
 
@@ -931,6 +2315,8 @@ final class DualScreenControlsView extends View {
             case 'Y': return new String[]{"10001","10001","01010","00100","00100","00100","00100"};
             case 'Z': return new String[]{"11111","00001","00010","00100","01000","10000","11111"};
             case '-': return new String[]{"00000","00000","00000","11111","00000","00000","00000"};
+            case ':': return new String[]{"00000","00100","00100","00000","00100","00100","00000"};
+            case ',': return new String[]{"00000","00000","00000","00000","00100","00100","01000"};
             default: return null;
         }
     }
@@ -979,8 +2365,14 @@ final class DualScreenControlsView extends View {
 
     @Nullable
     private Bitmap obtainMapBitmap(@NonNull HudState state) {
-        String key = state.mapSize + ":" + state.mapData.hashCode();
+        String pageIdentity = state.mapDimension + ":" + state.mapCenterX + ":" + state.mapCenterZ;
+        String key = state.mapSize + ":" + pageIdentity + ":" + state.mapData.hashCode();
         if (key.equals(mapBitmapKey) && mapBitmap != null && !mapBitmap.isRecycled()) return mapBitmap;
+        long now = SystemClock.uptimeMillis();
+        if (mapBitmap != null && !mapBitmap.isRecycled()
+                && now - lastMapDecodeAtMs < MAP_DECODE_MIN_MS) {
+            return mapBitmap;
+        }
         try {
             byte[] compressed = Base64.decode(state.mapData, Base64.DEFAULT);
             int size = state.mapSize > 0 ? state.mapSize : MAP_PIXEL_SIZE;
@@ -1006,14 +2398,70 @@ final class DualScreenControlsView extends View {
                 pixels[i] = Color.argb(a, r, g, b);
             }
             Bitmap decoded = Bitmap.createBitmap(pixels, size, size, Bitmap.Config.ARGB_8888);
-            if (mapBitmap != null && !mapBitmap.isRecycled()) mapBitmap.recycle();
+            if (isMc116Compat()) {
+                decoded = mergeAndPersistMc116MapPage(state, decoded);
+            }
+            if (mapBitmap != null && !mapBitmap.isRecycled() && mapBitmap != decoded) mapBitmap.recycle();
             mapBitmap = decoded;
             mapBitmapKey = key;
+            lastMapDecodeAtMs = now;
             return decoded;
         } catch (Throwable throwable) {
             Logging.e(TAG, "Unable to decode dual-screen exploration map", throwable);
             return null;
         }
+    }
+
+    @NonNull
+    private Bitmap mergeAndPersistMc116MapPage(@NonNull HudState state, @NonNull Bitmap incoming) {
+        File parent = hudStateFile.getParentFile();
+        if (parent == null) return incoming;
+        File dir = new File(parent, "droidbridge_dual_screen_map_pages");
+        if (!dir.isDirectory() && !dir.mkdirs()) return incoming;
+        String dim = state.mapDimension == null ? "unknown" : state.mapDimension.replaceAll("[^A-Za-z0-9._-]", "_");
+        File page = new File(dir, dim + "_" + state.mapCenterX + "_" + state.mapCenterZ + ".png");
+        Bitmap base = null;
+        try {
+            if (page.isFile() && page.length() > 0L) {
+                BitmapFactory.Options options = new BitmapFactory.Options();
+                options.inScaled = false;
+                base = BitmapFactory.decodeFile(page.getAbsolutePath(), options);
+            }
+            if (base != null && !base.isRecycled()
+                    && base.getWidth() == incoming.getWidth() && base.getHeight() == incoming.getHeight()) {
+                int w = incoming.getWidth();
+                int h = incoming.getHeight();
+                int[] oldPixels = new int[w * h];
+                int[] newPixels = new int[w * h];
+                base.getPixels(oldPixels, 0, w, 0, 0, w, h);
+                incoming.getPixels(newPixels, 0, w, 0, 0, w, h);
+                boolean changed = false;
+                for (int i = 0; i < newPixels.length; i++) {
+                    if (Color.alpha(newPixels[i]) > 0) {
+                        if (oldPixels[i] != newPixels[i]) changed = true;
+                        oldPixels[i] = newPixels[i];
+                    }
+                }
+                Bitmap merged = Bitmap.createBitmap(oldPixels, w, h, Bitmap.Config.ARGB_8888);
+                incoming.recycle();
+                incoming = merged;
+                if (base != null && !base.isRecycled()) base.recycle();
+                base = null;
+                if (!changed && page.isFile()) return incoming;
+            }
+            FileOutputStream out = new FileOutputStream(page);
+            try {
+                incoming.compress(Bitmap.CompressFormat.PNG, 100, out);
+                out.flush();
+            } finally {
+                try { out.close(); } catch (Throwable ignored) {}
+            }
+        } catch (Throwable throwable) {
+            Logging.e(TAG, "Unable to persist Minecraft 1.16.5 map page " + page.getAbsolutePath(), throwable);
+        } finally {
+            if (base != null && !base.isRecycled()) base.recycle();
+        }
+        return incoming;
     }
 
     private static float clamp(float value, float min, float max) {
@@ -1027,22 +2475,31 @@ final class DualScreenControlsView extends View {
         // Earlier builds only synced this in drawStatus(), but drawStatus() is no longer
         // called in the compact HUD, leaving the bottom selector stuck on the old slot.
         syncSelectedSlotFromHudState();
-        drawCompactMinecraftHudAboveHotbar(canvas);
+        // The 3DS layout intentionally keeps survival status on the top Minecraft display.
+        // Bottom screen only mirrors the hotbar/map/coordinates, matching the reference UI.
+        if (!threeDsHudLayout) {
+            drawCompactMinecraftHudAboveHotbar(canvas);
+        }
         boolean vanillaChrome = drawMinecraftHotbarChrome(canvas);
         if (!vanillaChrome) {
-            drawRoundRect(canvas, hotbarOuter, Color.rgb(11, 12, 15), Color.rgb(84, 84, 92), 10f);
+            // Pixel/square emergency fallback only. Rounded Android cards behind Minecraft
+            // items look foreign and also force extra overdraw on the second display.
+            fill.setStyle(Paint.Style.FILL);
+            fill.setColor(Color.argb(205, 12, 12, 12));
+            canvas.drawRect(hotbarOuter, fill);
+            stroke.setStyle(Paint.Style.STROKE);
+            stroke.setStrokeWidth(Math.max(1f, dp(1f)));
+            stroke.setColor(Color.rgb(120, 120, 120));
+            canvas.drawRect(hotbarOuter, stroke);
         }
         for (int i = 0; i < SLOT_COUNT; i++) {
             RectF slot = hotbarSlots[i];
             boolean selected = i == selectedSlot;
-            if (!vanillaChrome) {
-                drawRoundRect(
-                        canvas,
-                        slot,
-                        selected ? Color.rgb(61, 61, 66) : Color.rgb(27, 28, 34),
-                        selected ? Color.rgb(245, 245, 245) : Color.rgb(88, 88, 98),
-                        selected ? 8f : 5f
-                );
+            if (!vanillaChrome && selected) {
+                stroke.setStyle(Paint.Style.STROKE);
+                stroke.setStrokeWidth(Math.max(1f, dp(1.5f)));
+                stroke.setColor(Color.WHITE);
+                canvas.drawRect(slot, stroke);
             }
 
             HudItem item = hudState.item(i);
@@ -1056,15 +2513,11 @@ final class DualScreenControlsView extends View {
             float iconSide = Math.max(1f, slotSide - iconPad * 2f);
             icon.set(slot.centerX() - iconSide * 0.5f, slot.centerY() - iconSide * 0.5f,
                     slot.centerX() + iconSide * 0.5f, slot.centerY() + iconSide * 0.5f);
-            drawItemGlyph(canvas, icon, item, selected, !vanillaChrome);
+            drawItemGlyph(canvas, icon, item, selected, false);
 
             if (item.count > 1) {
-                text.setTextAlign(Paint.Align.RIGHT);
-                text.setFakeBoldText(true);
-                text.setTextSize(sp(11));
-                text.setColor(Color.WHITE);
-                canvas.drawText(String.valueOf(item.count), slot.right - dp(4), slot.bottom - dp(5), text);
-                text.setFakeBoldText(false);
+                drawMinecraftItemCount(canvas, String.valueOf(item.count),
+                        slot.right - dp(3), slot.bottom - dp(3), Math.max(dp(1f), slot.width() / 22f));
             }
 
             if (item.maxDamage > 0 && item.damage >= 0) {
@@ -1090,6 +2543,23 @@ final class DualScreenControlsView extends View {
         // with a foreign-looking border before the vanilla selector caught up.
     }
 
+    private boolean drawMinecraftOffhandChrome(@NonNull Canvas canvas) {
+        boolean mainArmLeft = hudState != null
+                && hudState.mainArm != null
+                && hudState.mainArm.toLowerCase(Locale.ROOT).contains("left");
+        Bitmap offhand = loadFirstHudAsset(mainArmLeft
+                ? new String[] { "hotbar_offhand_right", "offhand_slot_right", "offhand_right" }
+                : new String[] { "hotbar_offhand_left", "offhand_slot_left", "offhand_left" });
+        if (offhand == null || offhand.isRecycled()
+                || offhand.getWidth() <= 0 || offhand.getHeight() <= 0) {
+            return false;
+        }
+        fill.setFilterBitmap(false);
+        fill.setDither(false);
+        canvas.drawBitmap(offhand, null, offhandSlot, fill);
+        return true;
+    }
+
     private void drawOffhandSlot(@NonNull Canvas canvas, boolean vanillaChrome) {
         HudItem item = hudState == null ? HudItem.empty() : hudState.offhand;
         if (item == null || item.isEmpty()) {
@@ -1106,16 +2576,16 @@ final class DualScreenControlsView extends View {
         if (left + side > getWidth() - dp(4f)) left = hotbarOuter.left - gap - side;
         offhandSlot.set(left, top, left + side, top + side);
 
-        if (vanillaChrome) {
+        // Use the dedicated vanilla offhand slot sprite when available instead of
+        // cropping the main hotbar. This matches the real HUD shape and orientation.
+        if (!drawMinecraftOffhandChrome(canvas)) {
             fill.setStyle(Paint.Style.FILL);
-            fill.setColor(Color.argb(235, 20, 20, 20));
+            fill.setColor(Color.argb(220, 20, 20, 20));
             canvas.drawRect(offhandSlot, fill);
             stroke.setStyle(Paint.Style.STROKE);
-            stroke.setStrokeWidth(Math.max(dp(1.4f), side * 0.035f));
+            stroke.setStrokeWidth(Math.max(dp(1.2f), side * 0.03f));
             stroke.setColor(Color.rgb(145, 145, 145));
             canvas.drawRect(offhandSlot, stroke);
-        } else {
-            drawRoundRect(canvas, offhandSlot, Color.rgb(27, 28, 34), Color.rgb(88, 88, 98), 5f);
         }
 
         float iconSide = side * 0.76f;
@@ -1125,12 +2595,8 @@ final class DualScreenControlsView extends View {
         drawItemGlyph(canvas, scratch, item, false, false);
 
         if (item.count > 1) {
-            text.setTextAlign(Paint.Align.RIGHT);
-            text.setFakeBoldText(true);
-            text.setTextSize(sp(10));
-            text.setColor(Color.WHITE);
-            canvas.drawText(String.valueOf(item.count), offhandSlot.right - dp(3), offhandSlot.bottom - dp(4), text);
-            text.setFakeBoldText(false);
+            drawMinecraftItemCount(canvas, String.valueOf(item.count),
+                    offhandSlot.right - dp(2), offhandSlot.bottom - dp(3), Math.max(dp(1f), offhandSlot.width() / 22f));
         }
         if (item.maxDamage > 0 && item.damage >= 0) {
             float durability = clamp01(1f - (item.damage / (float) Math.max(1, item.maxDamage)));
@@ -1168,6 +2634,27 @@ final class DualScreenControlsView extends View {
             }
             pendingTouchHotbarSlot = -1;
             pendingTouchHotbarUntilMs = 0L;
+        }
+
+        // Physical shoulder-button navigation is optimistic too. GameActivity sees the
+        // same L1/R1 edge that Minecraft receives, so keep the predicted slot visible until
+        // the Fabric state writer acknowledges it. This removes the visible controller lag
+        // without sending a second key/mouse event into Minecraft.
+        if (pendingControllerHotbarSlot >= 0) {
+            if (live == pendingControllerHotbarSlot) {
+                selectedSlot = live;
+                pendingControllerHotbarSlot = -1;
+                pendingControllerHotbarUntilMs = 0L;
+                touchedHotbarSlot = -1;
+                return;
+            }
+            if (SystemClock.uptimeMillis() < pendingControllerHotbarUntilMs) {
+                selectedSlot = pendingControllerHotbarSlot;
+                return;
+            }
+            pendingControllerHotbarSlot = -1;
+            pendingControllerHotbarUntilMs = 0L;
+            touchedHotbarSlot = -1;
         }
 
         // Keep the current selector stable for the duration of an active drag gesture.
@@ -1283,62 +2770,240 @@ final class DualScreenControlsView extends View {
         if (drawBackplate) drawRoundRect(canvas, icon, Color.rgb(31, 34, 42), border, 8f);
         scratch2.set(icon.left + dp(0.75f), icon.top + dp(0.75f), icon.right - dp(0.75f), icon.bottom - dp(0.75f));
 
-        int requestedIconSize = Math.max(24, Math.min(128, Math.round(Math.min(scratch2.width(), scratch2.height()))));
-        // 1.0.148: do not draw pre-rendered/disk cached icon PNGs before the
-        // Android asset translator.  The old rendered_icons cache is exactly what kept
-        // chests, chest boats, stonecutter, pots, shulkers, etc. looking unchanged after
-        // the 26.x item-definition translator was added.  The correct order is now:
-        // installed assets/item definition -> Android JSON/special model renderer ->
-        // normal flat icon fallback.
+        // live_stack is authoritative for special/entity-style stacks: Minecraft renders it
+        // through its real GUI pipeline, the file bridge transports PNG bytes, Android decodes/caches a Bitmap, and this view draws that Bitmap.
         //
-        // externalRenderedIconCache is kept only as a write-through/debug cache holder for
-        // now; it must not be allowed to win the draw path.
+        // Do NOT fall through to reference PNGs or Android-side model reconstruction when a
+        // live capture is pending. That would hide transport/capture bugs and reintroduce the
+        // exact mismatch this bridge exists to avoid.
+        if (isExactStackItem(item)) {
+            Bitmap liveIcon = obtainLiveItemIcon(item);
+            if (liveIcon != null && !liveIcon.isRecycled() && !isBitmapEffectivelyBlank(liveIcon)) {
+                drawBitmapCenteredPixelPerfect(canvas, liveIcon, scratch2);
+                return;
+            }
+            DualScreenLiveBridge bridge = liveIconBridge;
+            if (bridge != null && bridge.isProtocolReady()) requestLiveIcon(bridge, item);
+            boolean minecraft262Pending = bridge != null && bridge.isMinecraft262Mailbox();
+            if (!isLegacyLiveItemFallbackCompat() && !minecraft262Pending) {
+                drawMissingItemPlaceholder(canvas, scratch2);
+                return;
+            }
+            if (minecraft262Pending && key.contains("shield")) {
+                // Never show the old exported shield material/wood texture while the exact
+                // Minecraft capture is warming up. A neutral shield silhouette is temporary
+                // and is replaced immediately when the v11 live response arrives.
+                RectF pendingShield = new RectF(scratch2);
+                float inset = Math.max(dp(3f), pendingShield.width() * 0.18f);
+                pendingShield.inset(inset, inset * 0.75f);
+                drawShield(canvas, pendingShield, Color.rgb(185, 188, 194), Color.rgb(73, 77, 86));
+                return;
+            }
+            // 1.12.2/1.16.5 and the isolated 26.2 v11 path intentionally continue into the
+            // installed vanilla/model fallback while an exact live capture is pending. This
+            // prevents the Android-dot placeholder from being visible during first-use cache
+            // population; the exact Minecraft-rendered PNG still wins as soon as it arrives.
+        }
 
-        Bitmap flatIcon = loadItemIcon(item.iconPath);
-        Bitmap rendererFlatIcon = flatIcon;
-
-        // 1.0.159: beds were originally fixed by using the finished/private HUD item
-        // path, not by drawing the raw bed entity sheet as a manual crop. Let a verified
-        // Minecraft-captured finished icon win for beds before the special renderer path.
-        // Normal chests are intentionally not included here.
-        if (isBedItem(key) && drawCapturedMinecraftIcon(canvas, scratch2, item, key, flatIcon)) {
+        // Compatibility path for older companion mods that do not mark stacks live_stack.
+        String referenceIcon = referenceIconNameForItem(item, key);
+        if (referenceIcon != null
+                && drawDroidBridgeReferenceItemIcon(canvas, scratch2, referenceIcon)) {
             return;
         }
 
-        // Keep the verified-live-icon-first route only for items that have proven final
-        // Minecraft item captures. Shulkers/dripleaf/pots stay on the shaped Android path.
-        if (shouldPreferLiveVanillaIconForKnownMismatch(key)
+        Bitmap flatIcon = loadItemIcon(item.iconPath);
+
+        // Legacy/fallback path for companion versions that cannot provide a final rendered
+        // ItemStack image.  Do not let this path override a live Minecraft render above.
+        if (drawCachedItemIcon(canvas, scratch2, item, key, flatIcon)) {
+            return;
+        }
+
+        // Legacy captured icons are a final compatibility fallback for generated 2-D items;
+        // they are deliberately no longer allowed to bypass assets/<namespace>/items/*.json.
+        if (!isMinecraftSpecialRendererItem(key)
                 && drawCapturedMinecraftIcon(canvas, scratch2, item, key, flatIcon)) {
             return;
         }
 
-        boolean specialRendererFamily = isMinecraftSpecialRendererItem(key);
-
-        // Fix36: do NOT let raw/captured atlas tiles win for block-entity and template
-        // item families.  Chests, beds, shulkers, pots, fences, walls, buttons and similar
-        // items often expose a valid PNG path that is only a source/material texture, not
-        // the final Minecraft GUI icon.  Drawing that first is what turns them into brown,
-        // purple, terracotta, or plank squares.  Route those families straight into the
-        // Android JSON/synthetic renderer and pass null for the flat texture so it cannot
-        // fall back to the wrong square.
-        if (specialRendererFamily && drawCachedItemIcon(canvas, scratch2, item, key, null)) {
-            return;
-        }
-
-        // Only normal generated items may use Minecraft-captured flat icons.  The hidden
-        // hotbar-probe path is not trusted for special/block-entity items because it can
-        // leak to the main screen and it commonly captures source material tiles.
-        if (drawCapturedMinecraftIcon(canvas, scratch2, item, key, flatIcon)) {
-            return;
-        }
-
-        // No-flicker fallback path. The finished icon is cached so moving the mouse does
-        // not force 9 z-buffer rasterizations every redraw.
-        if (drawCachedItemIcon(canvas, scratch2, item, key, rendererFlatIcon)) {
+        Bitmap installedFallback = loadBestInstalledItemAsset(item);
+        if (installedFallback != null && !installedFallback.isRecycled()) {
+            drawBitmapCenteredPixelPerfect(canvas, installedFallback, scratch2);
             return;
         }
 
         drawMissingItemPlaceholder(canvas, scratch2);
+    }
+
+
+    /**
+     * Draws launcher overlay labels with the exact Minecraft ASCII bitmap font used by
+     * the HUD/item counts. Package-private so the Legacy button rail and custom keyboard
+     * can use the same renderer instead of an Android system Typeface.
+     */
+    void drawMinecraftAsciiOverlayLabel(@NonNull Canvas canvas, @NonNull String value,
+                                        @NonNull RectF bounds, int color) {
+        Bitmap font = obtainMinecraftAsciiFontBitmap();
+        if (font != null && !font.isRecycled() && font.getWidth() >= 16 && font.getHeight() >= 16) {
+            int cellH = Math.max(1, font.getHeight() / 16);
+            float targetH = Math.max(dp(10f), Math.min(bounds.height() * 0.34f, dp(24f)));
+            float scale = targetH / cellH;
+            float width = measureMinecraftAsciiText(font, value, scale);
+            float x = bounds.centerX() - width * 0.5f;
+            float y = bounds.centerY() - (cellH * scale) * 0.5f;
+
+            Paint glyphPaint = fill;
+            glyphPaint.setFilterBitmap(false);
+            glyphPaint.setDither(false);
+            glyphPaint.setColorFilter(new PorterDuffColorFilter(Color.argb(215, 55, 55, 55), PorterDuff.Mode.SRC_IN));
+            drawMinecraftAsciiText(canvas, font, value, x + Math.max(1f, scale), y + Math.max(1f, scale), scale, glyphPaint);
+            glyphPaint.setColorFilter(new PorterDuffColorFilter(color, PorterDuff.Mode.SRC_IN));
+            drawMinecraftAsciiText(canvas, font, value, x, y, scale, glyphPaint);
+            glyphPaint.setColorFilter(null);
+            return;
+        }
+
+        // Last-resort startup fallback only; once Minecraft assets are available the
+        // exact ascii.png path above always replaces this system-font emergency path.
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setFakeBoldText(false);
+        text.setColor(color);
+        text.setTextSize(Math.max(sp(10f), Math.min(sp(16f), bounds.height() * 0.30f)));
+        canvas.drawText(value, bounds.centerX(), bounds.centerY() - ((text.ascent() + text.descent()) * 0.5f), text);
+    }
+
+    /** Larger 3DS-only variant used by the optional FPS badge. */
+    void drawMinecraftAsciiOverlayLabelLarge(@NonNull Canvas canvas, @NonNull String value,
+                                             @NonNull RectF bounds, int color) {
+        Bitmap font = obtainMinecraftAsciiFontBitmap();
+        if (font != null && !font.isRecycled() && font.getWidth() >= 16 && font.getHeight() >= 16) {
+            int cellH = Math.max(1, font.getHeight() / 16);
+            float targetH = Math.max(dp(12f), Math.min(bounds.height() * 0.58f, dp(34f)));
+            float scale = targetH / cellH;
+            float width = measureMinecraftAsciiText(font, value, scale);
+            float maxWidth = Math.max(1f, bounds.width() * 0.94f);
+            if (width > maxWidth) {
+                scale *= maxWidth / width;
+                width = measureMinecraftAsciiText(font, value, scale);
+            }
+            float x = bounds.centerX() - width * 0.5f;
+            float y = bounds.centerY() - (cellH * scale) * 0.5f;
+
+            Paint glyphPaint = fill;
+            glyphPaint.setFilterBitmap(false);
+            glyphPaint.setDither(false);
+            glyphPaint.setColorFilter(new PorterDuffColorFilter(
+                    Color.argb(215, 55, 55, 55), PorterDuff.Mode.SRC_IN));
+            drawMinecraftAsciiText(canvas, font, value,
+                    x + Math.max(1f, scale), y + Math.max(1f, scale), scale, glyphPaint);
+            glyphPaint.setColorFilter(new PorterDuffColorFilter(color, PorterDuff.Mode.SRC_IN));
+            drawMinecraftAsciiText(canvas, font, value, x, y, scale, glyphPaint);
+            glyphPaint.setColorFilter(null);
+            return;
+        }
+
+        text.setTextAlign(Paint.Align.CENTER);
+        text.setFakeBoldText(false);
+        text.setColor(color);
+        text.setTextSize(Math.max(sp(12f), Math.min(sp(22f), bounds.height() * 0.56f)));
+        canvas.drawText(value, bounds.centerX(),
+                bounds.centerY() - ((text.ascent() + text.descent()) * 0.5f), text);
+    }
+
+    /** Draws item counts with Minecraft's own ASCII font sheet when present. */
+    private void drawMinecraftItemCount(@NonNull Canvas canvas, @NonNull String value,
+                                        float right, float bottom, float pixelScale) {
+        Bitmap font = obtainMinecraftAsciiFontBitmap();
+        if (font == null || font.isRecycled() || font.getWidth() < 16 || font.getHeight() < 16) {
+            float pixel = Math.max(1f, pixelScale);
+            float width = value.length() * 6f * pixel - pixel;
+            drawXpPixelDigits(canvas, value, right - width + pixel, bottom - 7f * pixel + pixel,
+                    pixel, Color.rgb(63, 63, 63));
+            drawXpPixelDigits(canvas, value, right - width, bottom - 7f * pixel, pixel, Color.WHITE);
+            return;
+        }
+
+        int cellW = Math.max(1, font.getWidth() / 16);
+        int cellH = Math.max(1, font.getHeight() / 16);
+        float targetH = Math.max(dp(8f), cellH * Math.max(1f, pixelScale));
+        float scale = targetH / cellH;
+        float total = measureMinecraftAsciiText(font, value, scale);
+        float x = right - total;
+        float y = bottom - targetH;
+
+        Paint glyphPaint = fill;
+        glyphPaint.setFilterBitmap(false);
+        glyphPaint.setDither(false);
+        glyphPaint.setColorFilter(new PorterDuffColorFilter(Color.rgb(63, 63, 63), PorterDuff.Mode.SRC_IN));
+        drawMinecraftAsciiText(canvas, font, value, x + Math.max(1f, scale), y + Math.max(1f, scale), scale, glyphPaint);
+        glyphPaint.setColorFilter(new PorterDuffColorFilter(Color.WHITE, PorterDuff.Mode.SRC_IN));
+        drawMinecraftAsciiText(canvas, font, value, x, y, scale, glyphPaint);
+        glyphPaint.setColorFilter(null);
+    }
+
+    @Nullable
+    private Bitmap obtainMinecraftAsciiFontBitmap() {
+        if (minecraftAsciiFontBitmap != null && !minecraftAsciiFontBitmap.isRecycled()) {
+            return minecraftAsciiFontBitmap;
+        }
+        File file = resolveExportedAssetFile("assets/minecraft/textures/font/ascii.png");
+        if (file == null || !file.isFile() || file.length() <= 0L) return null;
+        String key = file.getAbsolutePath() + '#' + file.lastModified() + '#' + file.length();
+        if (minecraftAsciiFontBitmap != null && !minecraftAsciiFontBitmap.isRecycled()
+                && key.equals(minecraftAsciiFontSourceKey)) return minecraftAsciiFontBitmap;
+        try {
+            BitmapFactory.Options options = new BitmapFactory.Options();
+            options.inScaled = false;
+            Bitmap decoded = BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+            if (decoded == null) return null;
+            if (minecraftAsciiFontBitmap != null && !minecraftAsciiFontBitmap.isRecycled()) minecraftAsciiFontBitmap.recycle();
+            minecraftAsciiFontBitmap = decoded;
+            minecraftAsciiFontSourceKey = key;
+            return decoded;
+        } catch (Throwable throwable) {
+            return null;
+        }
+    }
+
+    private float measureMinecraftAsciiText(@NonNull Bitmap font, @NonNull String value, float scale) {
+        float out = 0f;
+        for (int i = 0; i < value.length(); i++) {
+            int glyph = value.charAt(i) & 0xFF;
+            out += (minecraftAsciiGlyphWidth(font, glyph) + 1) * scale;
+        }
+        return Math.max(0f, out - scale);
+    }
+
+    private void drawMinecraftAsciiText(@NonNull Canvas canvas, @NonNull Bitmap font, @NonNull String value,
+                                        float x, float y, float scale, @NonNull Paint paint) {
+        int cellW = Math.max(1, font.getWidth() / 16);
+        int cellH = Math.max(1, font.getHeight() / 16);
+        for (int i = 0; i < value.length(); i++) {
+            int glyph = value.charAt(i) & 0xFF;
+            int col = glyph & 15;
+            int row = (glyph >>> 4) & 15;
+            int visibleW = minecraftAsciiGlyphWidth(font, glyph);
+            Rect srcRect = new Rect(col * cellW, row * cellH, col * cellW + visibleW, row * cellH + cellH);
+            RectF dstRect = new RectF(x, y, x + visibleW * scale, y + cellH * scale);
+            canvas.drawBitmap(font, srcRect, dstRect, paint);
+            x += (visibleW + 1) * scale;
+        }
+    }
+
+    private int minecraftAsciiGlyphWidth(@NonNull Bitmap font, int glyph) {
+        int cellW = Math.max(1, font.getWidth() / 16);
+        int cellH = Math.max(1, font.getHeight() / 16);
+        int col = glyph & 15;
+        int row = (glyph >>> 4) & 15;
+        int left = col * cellW;
+        int top = row * cellH;
+        for (int x = cellW - 1; x >= 0; x--) {
+            for (int y = 0; y < cellH; y++) {
+                if ((font.getPixel(left + x, top + y) >>> 24) != 0) return x + 1;
+            }
+        }
+        return Math.max(1, cellW / 2);
     }
 
 
@@ -1392,6 +3057,7 @@ final class DualScreenControlsView extends View {
             canvas.drawBitmap(cached, null, dst, fill);
             return true;
         }
+        if (failedRenderedItemCache.contains(cacheKey)) return false;
         if (renderedItemCache.size() > 96) recycleBitmapCache(renderedItemCache);
 
         Bitmap rendered = null;
@@ -1408,6 +3074,7 @@ final class DualScreenControlsView extends View {
             }
             if (!drawn || isBitmapEffectivelyBlank(rendered)) {
                 if (rendered != null && !rendered.isRecycled()) rendered.recycle();
+                failedRenderedItemCache.add(cacheKey);
                 return false;
             }
             renderedItemCache.put(cacheKey, rendered);
@@ -1418,6 +3085,7 @@ final class DualScreenControlsView extends View {
             return true;
         } catch (Throwable throwable) {
             if (rendered != null && !rendered.isRecycled()) rendered.recycle();
+            failedRenderedItemCache.add(cacheKey);
             Logging.e(TAG, "Unable to render cached dual-screen item icon " + key, throwable);
             return false;
         }
@@ -1427,7 +3095,7 @@ final class DualScreenControlsView extends View {
     private String renderedIconCacheKey(@NonNull HudItem item, @NonNull String key,
                                         @Nullable Bitmap flatIcon, int size) {
         StringBuilder out = new StringBuilder(160);
-        out.append("fix174|").append(key).append('|').append(item.id).append('|').append(item.label)
+        out.append("fix181|").append(key).append('|').append(item.id).append('|').append(item.label)
                 .append('|').append(size).append('|').append(item.iconPath);
         // Fix103: do not call quickJsonModelStamp() or quickSpecialTextureStamp() from the
         // draw path. Those helpers scan droidbridge_dual_screen_assets/model_jsons and
@@ -1436,7 +3104,8 @@ final class DualScreenControlsView extends View {
         // Model/texture changes during a running world are rare; if they happen, the cache
         // naturally clears on size changes / detach, and the item icon path/id changes when
         // the state writer exports a different item.
-        if (flatIcon != null) out.append("|b=").append(flatIcon.getWidth()).append('x').append(flatIcon.getHeight());
+        if (flatIcon != null) out.append("|b=").append(flatIcon.getWidth()).append('x').append(flatIcon.getHeight())
+                .append('@').append(flatIcon.getGenerationId());
         return out.toString();
     }
 
@@ -1541,50 +3210,56 @@ final class DualScreenControlsView extends View {
     }
 
     private boolean isBitmapEffectivelyBlank(@NonNull Bitmap bitmap) {
-        int w = bitmap.getWidth();
-        int h = bitmap.getHeight();
-        if (w <= 0 || h <= 0) return true;
-        int stepX = Math.max(1, w / 12);
-        int stepY = Math.max(1, h / 12);
-        for (int y = 0; y < h; y += stepY) {
-            for (int x = 0; x < w; x += stepX) {
-                if (Color.alpha(bitmap.getPixel(x, y)) > 8) return false;
+        // Live icon responses are produced off the UI thread. Never allow a stale/recycled
+        // bitmap reference to crash the second-screen view while a newer icon is arriving.
+        if (bitmap.isRecycled()) return true;
+        try {
+            int w = bitmap.getWidth();
+            int h = bitmap.getHeight();
+            if (w <= 0 || h <= 0) return true;
+            int stepX = Math.max(1, w / 12);
+            int stepY = Math.max(1, h / 12);
+            int visible = 0;
+            int lit = 0;
+            for (int y = 0; y < h; y += stepY) {
+                for (int x = 0; x < w; x += stepX) {
+                    int pixel = bitmap.getPixel(x, y);
+                    if (Color.alpha(pixel) <= 8) continue;
+                    visible++;
+                    if (Color.red(pixel) + Color.green(pixel) + Color.blue(pixel) > 18) lit++;
+                }
             }
+            // A valid dark Minecraft item still has multiple shaded/highlighted pixels. Pure
+            // transparent images and the opaque-black framebuffer captures are both rejected.
+            return visible == 0 || lit < 4;
+        } catch (IllegalStateException recycledDuringProbe) {
+            // Defensive fallback for any bitmap whose ownership is outside the live-icon cache.
+            return true;
         }
-        return true;
     }
 
     private boolean drawJsonModelIcon(@NonNull Canvas canvas, @NonNull RectF r, @NonNull HudItem item,
                                       @NonNull String key, @Nullable Bitmap flatIcon) {
         ModelDefinition model = loadJsonModelDefinition(item);
 
+        // 1.1.10: resolve Minecraft's installed item definition FIRST for every item.
+        // The previous order special-cased beds/pots/stonecutters/banners before this call,
+        // so valid exported JSON could never affect what the hotbar actually drew.
+        if (drawInstalledItemDefinitionIcon(canvas, r, item, key)) return true;
 
-        // 1.0.159: preserve the original fixed bed route.  Beds must use the
-        // DroidBridge/BetterBeds-shaped model before the installed 26.x special item
-        // definition or the manual entity-sheet crop can take over.  This is the path
-        // that fixed the bottom HUD without touching Minecraft's own inventory/hand model.
-        if (isBedItem(key)) {
-            if (model != null && model.elements.size() > 0
-                    && renderJsonModel(canvas, r, model, guiTransformForModel(model, key))) {
-                return true;
-            }
-            if (drawGeneratedBetterBedModelIcon(canvas, r, key)) return true;
+        // Older/resource-pack model exports that predate assets/<namespace>/items/*.json
+        // still get a real resolved JSON model pass before synthetic compatibility shapes.
+        if (model != null && model.elements.size() > 0
+                && !isTrapdoorItem(key)
+                && renderJsonModel(canvas, r, model, guiTransformForModel(model, key))) {
+            return true;
         }
 
-
-        // 1.0.174: these three item families are the ones still not represented correctly
-        // by the Android cuboid/template approximations. Use DroidBridge-private reference
-        // icons bundled in the companion Fabric jar, so Minecraft's own inventory/hand
-        // models stay untouched and fixed beds/shulkers/chests do not regress.
-        if (isDecoratedPotLikeItem(key) && drawDroidBridgeReferenceItemIcon(canvas, r, referenceIconNameForItem(item, key))) return true;
-        if (isStonecutterItem(key) && drawDroidBridgeReferenceItemIcon(canvas, r, referenceIconNameForItem(item, key))) return true;
-        if (isBannerItem(key) && drawDroidBridgeReferenceItemIcon(canvas, r, referenceIconNameForItem(item, key))) return true;
-
-        // Asset-translator path: Minecraft 1.21.5+/26.x item definitions live under
-        // assets/<namespace>/items/<item>.json. This handles minecraft:model,
-        // minecraft:select, minecraft:composite, and minecraft:special before the older
-        // bundled-PNG/synthetic fallback code can draw the wrong material tile.
-        if (drawInstalledItemDefinitionIcon(canvas, r, item, key)) return true;
+        // BetterBeds Android-private model remains a fallback only. It no longer shadows
+        // a real installed item definition.
+        if (isBedItem(key)) {
+            if (drawGeneratedBetterBedModelIcon(canvas, r, key)) return true;
+        }
 
         // Trapdoors must not go through the generic JSON first-pass.  Some exported
         // item parents collapse to a cube/full-block particle model, which is why the
@@ -1729,7 +3404,18 @@ final class DualScreenControlsView extends View {
                     if (modelFile == null || !modelFile.isFile()) continue;
                     ModelDefinition model = loadModelDefinitionFromFile(modelFile, 0);
                     if (model != null && model.elements.size() > 0) {
-                        drew |= renderJsonModel(canvas, r, model, guiTransformForModel(model, key));
+                        drew |= renderJsonModel(canvas, r, model, guiTransformForModel(model, key), layer.transform);
+                    } else if (model != null) {
+                        // item/generated and hand-held model parents commonly have no cuboid
+                        // elements at all; their visible icon is layer0/layer1. 1.1.8 silently
+                        // skipped these definitions here, which left valid hotbar assets blank
+                        // when the legacy iconPath had not been exported yet.
+                        String textureId = firstResolvedTexture(model, "layer0", "layer1", "particle", "texture", "all");
+                        Bitmap texture = textureId == null ? null : loadJsonTexture(textureId);
+                        if (texture != null && !texture.isRecycled()) {
+                            drawBitmapCenteredPixelPerfect(canvas, texture, r);
+                            drew = true;
+                        }
                     }
                     continue;
                 }
@@ -1747,10 +3433,21 @@ final class DualScreenControlsView extends View {
                     drawnSpecialKeys.add(specialKey);
 
                     JSONObject generated = DualScreenMinecraftAssetRendererService.buildGeneratedSpecialModel(layer);
-                    if (generated == null) continue;
-                    ModelDefinition generatedModel = ModelDefinition.fromJson(generated);
-                    if (generatedModel != null && generatedModel.elements.size() > 0) {
-                        drew |= renderJsonModel(canvas, r, generatedModel, guiTransformForModel(generatedModel, key));
+                    if (generated != null) {
+                        ModelDefinition generatedModel = ModelDefinition.fromJson(generated);
+                        if (generatedModel != null && generatedModel.elements.size() > 0) {
+                            drew |= renderJsonModel(canvas, r, generatedModel, guiTransformForModel(generatedModel, key), layer.transform);
+                            continue;
+                        }
+                    }
+
+                    // Unknown/future special renderers should still show their underlying
+                    // installed texture instead of collapsing to the missing-item dot.
+                    String specialTextureId = DualScreenItemDefinitionTranslator.textureIdForSpecial(layer);
+                    Bitmap specialTexture = specialTextureId.isEmpty() ? null : loadJsonTexture(specialTextureId);
+                    if (specialTexture != null && !specialTexture.isRecycled()) {
+                        drawBitmapCenteredPixelPerfect(canvas, specialTexture, r);
+                        drew = true;
                     }
                 }
             } catch (Throwable throwable) {
@@ -1762,28 +3459,14 @@ final class DualScreenControlsView extends View {
 
 
     private boolean shouldUseInstalledItemDefinitionPath(@NonNull String cleanId, @NonNull String key) {
-        String value = (cleanId + " " + key).toLowerCase(Locale.ROOT);
-
-        // These families currently need dedicated generated geometry and/or layered
-        // pattern composition. Resolving their assets synchronously in onDraw() is what
-        // produced the ANRs seen when a shulker box was placed in the HUD.
-        if (value.contains("shulker_box")) return false;
-        if (value.contains("decorated_pot") || value.contains("decorative_pot")) return false;
-        if (value.contains("flower_pot") || value.contains("pottery_sherd")) return false;
-        if (value.endsWith("_banner") || value.contains(":banner") || value.contains("/banner")) return false;
-        if (value.contains("skull") || value.contains("head")) return false;
-        if (value.contains("shield")) return false;
-        if (value.contains("sign")) return false;
-
-        // Keep the proven/cheap paths active. Beds are the known working case, and
-        // chest/ender/trapped chest can use the generated chest cuboid path.
-        if (isBedItem(value)) return true;
-        if (isChestLikeItem(value)) return true;
-        if (isStonecutterItem(value)) return true;
-
-        // Normal model definitions are okay, but template families already have cheap
-        // local Android renderers below and do not need this new path.
-        return !isMinecraftSpecialRendererItem(value);
+        // 1.1.10: do not blacklist any vanilla item family from the installed-definition
+        // renderer. The blacklist was the direct reason shulkers, pots, banners, signs,
+        // shields and heads ignored their exported JSON and stayed on approximations.
+        if (cleanId == null || key == null) return false;
+        String id = cleanId.trim().toLowerCase(Locale.ROOT);
+        String itemKey = key.trim().toLowerCase(Locale.ROOT);
+        return !id.isEmpty() && !itemKey.isEmpty()
+                && !"minecraft:air".equals(id) && !"air".equals(itemKey);
     }
 
 
@@ -2028,8 +3711,23 @@ final class DualScreenControlsView extends View {
     @Nullable
     private String referenceIconNameForItem(@NonNull HudItem item, @NonNull String key) {
         String value = (key + " " + (item.id == null ? "" : item.id) + " " + (item.label == null ? "" : item.label)).toLowerCase(Locale.ROOT);
-        if (isDecoratedPotLikeItem(value)) return "decorated_pot.png";
+        value = value.replace('-', '_').replace(' ', '_');
+        if (isScaffoldingItem(value)) return "scaffolding.png";
+        // flower_pot is included in isDecoratedPotLikeItem() for the legacy model fallback,
+        // but these are two different embedded inventory icons. Resolve the exact flower pot
+        // before the broader decorated-pot family so both slots cannot collapse to one image.
+        if (value.contains("flower_pot")) return "flower_pot.png";
+        if (value.contains("decorated_pot") || value.contains("pottery_sherd")) return "decorated_pot.png";
         if (isStonecutterItem(value)) return "stonecutter.png";
+        if (isLecternItem(value)) return "lectern.png";
+        if (value.contains("sculk_sensor")) return "sculk_sensor.png";
+        if (value.contains("dragon_head")) return "dragon_head.png";
+        if (value.contains("wither_skeleton_skull")) return "wither_skeleton_skull.png";
+        if (value.contains("skeleton_skull")) return "skeleton_skull.png";
+        if (value.contains("creeper_head")) return "creeper_head.png";
+        if (value.contains("piglin_head")) return "piglin_head.png";
+        if (value.contains("zombie_head")) return "zombie_head.png";
+        if (value.contains("player_head")) return "player_head.png";
         if (isBannerItem(value)) {
             if (value.contains("ominous")) return "ominous_banner.png";
             String color = bannerColorNameForKey(value);
@@ -2060,7 +3758,9 @@ final class DualScreenControlsView extends View {
         if (name == null || name.trim().isEmpty()) return false;
         Bitmap icon = loadDroidBridgeReferenceIcon(name.trim());
         if (icon == null || icon.isRecycled()) return false;
-        drawBitmapVisibleCropped(canvas, icon, dst);
+        // Preserve the source aspect ratio. The old visible-crop helper stretched tall banners
+        // into square/horizontal swatches, which is why Android did not resemble Minecraft.
+        drawBitmapCenteredPixelPerfect(canvas, icon, dst);
         return true;
     }
 
@@ -2070,18 +3770,9 @@ final class DualScreenControlsView extends View {
         String cacheKey = "reference/" + clean;
         Bitmap cached = itemIconCache.get(cacheKey);
         if (cached != null && !cached.isRecycled()) return cached;
-        File file = resolveBundledDroidBridgeAssetFile("assets/droidbridge_dualscreen/reference_icons/" + clean);
-        if (file == null || !file.isFile() || file.length() <= 0L) return null;
-        try {
-            BitmapFactory.Options options = new BitmapFactory.Options();
-            options.inScaled = false;
-            Bitmap bitmap = BitmapFactory.decodeFile(file.getAbsolutePath(), options);
-            if (bitmap != null) itemIconCache.put(cacheKey, bitmap);
-            return bitmap;
-        } catch (Throwable throwable) {
-            Logging.e(TAG, "Unable to load DroidBridge reference icon " + clean, throwable);
-            return null;
-        }
+        Bitmap bitmap = externalRenderedIconCache.getEmbeddedReference(clean);
+        if (bitmap != null && !bitmap.isRecycled()) itemIconCache.put(cacheKey, bitmap);
+        return bitmap;
     }
 
 
@@ -2320,7 +4011,10 @@ final class DualScreenControlsView extends View {
     }
 
     private boolean isBannerItem(@NonNull String key) {
-        return key.endsWith("_banner") || key.contains(":banner") || key.contains("/banner");
+        String value = key.toLowerCase(Locale.ROOT);
+        return value.endsWith("_banner") || value.contains("_banner")
+                || value.contains(":banner") || value.contains("/banner")
+                || value.contains(" banner");
     }
 
     private boolean isStonecutterItem(@NonNull String key) {
@@ -3655,23 +5349,29 @@ final class DualScreenControlsView extends View {
 
     private boolean renderJsonModel(@NonNull Canvas canvas, @NonNull RectF r, @NonNull ModelDefinition model,
                                     @NonNull GuiTransform guiTransform) {
+        return renderJsonModel(canvas, r, model, guiTransform, null);
+    }
+
+    private boolean renderJsonModel(@NonNull Canvas canvas, @NonNull RectF r, @NonNull ModelDefinition model,
+                                    @NonNull GuiTransform guiTransform,
+                                    @Nullable DualScreenItemDefinitionTranslator.Transform itemTransform) {
         ArrayList<FaceDraw> faces = new ArrayList<>();
         Bounds2D bounds = new Bounds2D();
         // Use the canonical 16x16x16 block-space bounds for scaling, then include
-        // any out-of-range custom elements.  Scaling only to the model's own elements
-        // made thin models such as trapdoors stretch into full cubes.
-        addFullBlockBounds(bounds, guiTransform);
+        // any out-of-range custom elements. 1.1.10 applies both display.gui and the
+        // item-definition transformation before calculating these bounds.
+        addFullBlockBounds(bounds, guiTransform, itemTransform);
         for (ModelElement element : model.elements) {
-            addElementBounds(bounds, element, guiTransform);
+            addElementBounds(bounds, element, guiTransform, itemTransform);
         }
         if (!bounds.valid()) return false;
         for (ModelElement element : model.elements) {
-            addModelFace(faces, model, element, "down", r, bounds, guiTransform);
-            addModelFace(faces, model, element, "north", r, bounds, guiTransform);
-            addModelFace(faces, model, element, "west", r, bounds, guiTransform);
-            addModelFace(faces, model, element, "south", r, bounds, guiTransform);
-            addModelFace(faces, model, element, "east", r, bounds, guiTransform);
-            addModelFace(faces, model, element, "up", r, bounds, guiTransform);
+            addModelFace(faces, model, element, "down", r, bounds, guiTransform, itemTransform);
+            addModelFace(faces, model, element, "north", r, bounds, guiTransform, itemTransform);
+            addModelFace(faces, model, element, "west", r, bounds, guiTransform, itemTransform);
+            addModelFace(faces, model, element, "south", r, bounds, guiTransform, itemTransform);
+            addModelFace(faces, model, element, "east", r, bounds, guiTransform, itemTransform);
+            addModelFace(faces, model, element, "up", r, bounds, guiTransform, itemTransform);
         }
         if (faces.isEmpty()) return false;
         Collections.sort(faces, new Comparator<FaceDraw>() {
@@ -3679,11 +5379,6 @@ final class DualScreenControlsView extends View {
                 return Float.compare(a.depth, b.depth);
             }
         });
-        // Do not rely on Canvas painter ordering for JSON models. Minecraft/asset-renderer
-        // rasterizes triangles with depth testing; Canvas drawBitmapMesh does not. The lack of
-        // depth testing is what made Fix11/12 draw hidden stair/trapdoor faces over the real
-        // texture and turn the mesh dark/broken. Rasterize the model into a tiny ARGB bitmap
-        // with a z-buffer first, then draw that finished icon into the slot.
         return drawRasterizedModel(canvas, r, faces);
     }
 
@@ -3841,23 +5536,33 @@ final class DualScreenControlsView extends View {
         return Color.argb(outA, outR, outG, outB);
     }
 
-    private void addFullBlockBounds(@NonNull Bounds2D bounds, @NonNull GuiTransform guiTransform) {
+    private void addFullBlockBounds(@NonNull Bounds2D bounds, @NonNull GuiTransform guiTransform,
+                                    @Nullable DualScreenItemDefinitionTranslator.Transform itemTransform) {
         float[] xs = {0f, 16f};
         float[] ys = {0f, 16f};
         float[] zs = {0f, 16f};
-        for (float x : xs) for (float y : ys) for (float z : zs) bounds.include(projectRaw(x, y, z, guiTransform));
+        for (float x : xs) for (float y : ys) for (float z : zs) {
+            bounds.include(projectRaw(x, y, z, guiTransform, itemTransform));
+        }
     }
 
-    private void addElementBounds(@NonNull Bounds2D bounds, @NonNull ModelElement e, @NonNull GuiTransform guiTransform) {
+    private void addElementBounds(@NonNull Bounds2D bounds, @NonNull ModelElement e,
+                                  @NonNull GuiTransform guiTransform,
+                                  @Nullable DualScreenItemDefinitionTranslator.Transform itemTransform) {
         float[] xs = {e.from[0], e.to[0]};
         float[] ys = {e.from[1], e.to[1]};
         float[] zs = {e.from[2], e.to[2]};
-        for (float x : xs) for (float y : ys) for (float z : zs) bounds.include(projectRaw(x, y, z, guiTransform));
+        for (float x : xs) for (float y : ys) for (float z : zs) {
+            float[] p = applyElementRotation(e, x, y, z);
+            bounds.include(projectRaw(p[0], p[1], p[2], guiTransform, itemTransform));
+        }
     }
 
     private void addModelFace(@NonNull ArrayList<FaceDraw> out, @NonNull ModelDefinition model,
                               @NonNull ModelElement e, @NonNull String faceName,
-                              @NonNull RectF dst, @NonNull Bounds2D bounds, @NonNull GuiTransform guiTransform) {
+                              @NonNull RectF dst, @NonNull Bounds2D bounds,
+                              @NonNull GuiTransform guiTransform,
+                              @Nullable DualScreenItemDefinitionTranslator.Transform itemTransform) {
         ModelFace face = e.faces.get(faceName);
         if (face == null || face.texture == null || face.texture.length() == 0) return;
         String texture = model.resolveTexture(face.texture);
@@ -3874,13 +5579,16 @@ final class DualScreenControlsView extends View {
         float[][] points = faceCorners(e, faceName);
         if (points == null) return;
         float[] verts = new float[8];
+        float[] depths = new float[4];
         float depth = 0f;
         for (int i = 0; i < 4; i++) {
-            float[] projected = projectRaw(points[i][0], points[i][1], points[i][2], guiTransform);
+            float[] rotated = applyElementRotation(e, points[i][0], points[i][1], points[i][2]);
+            float[] projected = projectRaw(rotated[0], rotated[1], rotated[2], guiTransform, itemTransform);
             float[] scaled = scaleProjected(projected, dst, bounds);
             verts[i * 2] = scaled[0];
             verts[i * 2 + 1] = scaled[1];
-            depth += depthForPoint(points[i][0], points[i][1], points[i][2], guiTransform);
+            depths[i] = depthForPoint(rotated[0], rotated[1], rotated[2], guiTransform, itemTransform);
+            depth += depths[i];
         }
         FaceDraw draw = new FaceDraw();
         draw.faceName = faceName;
@@ -3888,21 +5596,13 @@ final class DualScreenControlsView extends View {
         draw.uv = face.uv;
         draw.rotation = face.rotation;
         draw.verts = verts;
-        draw.depths = new float[] {
-                depthForPoint(points[0][0], points[0][1], points[0][2], guiTransform),
-                depthForPoint(points[1][0], points[1][1], points[1][2], guiTransform),
-                depthForPoint(points[2][0], points[2][1], points[2][2], guiTransform),
-                depthForPoint(points[3][0], points[3][1], points[3][2], guiTransform)
-        };
+        draw.depths = depths;
         draw.depth = depth / 4f;
         out.add(draw);
     }
 
     @Nullable
     private String fallbackTextureForFace(@NonNull ModelDefinition model, @NonNull String faceName) {
-        // Some exported/inherited stair and trapdoor JSONs resolve one face variable but not
-        // another. Do not leave those quads empty; fall back to the same Minecraft texture
-        // groups the vanilla parents use: top/up, bottom/down, and side for vertical faces.
         String resolved;
         if ("up".equals(faceName)) {
             resolved = firstResolvedTexture(model, "top", "up", "all", "side", "texture", "layer0", "particle");
@@ -3917,9 +5617,6 @@ final class DualScreenControlsView extends View {
     private boolean isFrontFacingFace(@NonNull String faceName, @NonNull GuiTransform guiTransform) {
         float[] n = faceNormal(faceName);
         if (n == null) return false;
-        // After the display transform, positive Z is facing the GUI camera in this
-        // orthographic projection. This keeps culling stable for [30,225,0], [30,135,0],
-        // trapdoors, stairs, and custom cuboid models without post-render mirroring.
         return transformedNormalDepth(n[0], n[1], n[2], guiTransform) > 0.001f;
     }
 
@@ -3945,11 +5642,10 @@ final class DualScreenControlsView extends View {
         final float cosZ = (float) Math.cos(rz);
         final float sinZ = (float) Math.sin(rz);
 
-        float x1 = (x * cosY) + (z * sinY);
-        float z1 = (-x * sinY) + (z * cosY);
-        float y1 = (y * cosX) - (z1 * sinX);
-        float z2 = (y * sinX) + (z1 * cosX);
-        // Z rotation does not change depth, but keep the same transform order for clarity.
+        float x1 = (x * guiTransform.scaleX * cosY) + (z * guiTransform.scaleZ * sinY);
+        float z1 = (-x * guiTransform.scaleX * sinY) + (z * guiTransform.scaleZ * cosY);
+        float y1 = (y * guiTransform.scaleY * cosX) - (z1 * sinX);
+        float z2 = (y * guiTransform.scaleY * sinX) + (z1 * cosX);
         float ignoredX = (x1 * cosZ) - (y1 * sinZ);
         if (ignoredX == Float.MIN_VALUE) return z2;
         return z2;
@@ -3968,20 +5664,73 @@ final class DualScreenControlsView extends View {
         return null;
     }
 
-    private float[] projectRaw(float x, float y, float z, @NonNull GuiTransform guiTransform) {
-        float[] transformed = transformForMinecraftGui(x, y, z, guiTransform);
+    @NonNull
+    private float[] applyElementRotation(@NonNull ModelElement element, float x, float y, float z) {
+        String axis = element.rotationAxis;
+        float angle = element.rotationAngle;
+        if (axis == null || axis.isEmpty() || Math.abs(angle) < 0.0001f) return new float[] {x, y, z};
+        float ox = element.rotationOrigin[0];
+        float oy = element.rotationOrigin[1];
+        float oz = element.rotationOrigin[2];
+        float px = x - ox;
+        float py = y - oy;
+        float pz = z - oz;
+        double radians = Math.toRadians(angle);
+        float c = (float) Math.cos(radians);
+        float s = (float) Math.sin(radians);
+        float rx = px, ry = py, rz = pz;
+        if ("x".equals(axis)) {
+            ry = py * c - pz * s;
+            rz = py * s + pz * c;
+        } else if ("y".equals(axis)) {
+            rx = px * c + pz * s;
+            rz = -px * s + pz * c;
+        } else if ("z".equals(axis)) {
+            rx = px * c - py * s;
+            ry = px * s + py * c;
+        }
+        if (element.rotationRescale) {
+            float ac = Math.abs(c);
+            if (ac > 0.0001f) {
+                float scale = 1f / ac;
+                if ("x".equals(axis)) { ry *= scale; rz *= scale; }
+                else if ("y".equals(axis)) { rx *= scale; rz *= scale; }
+                else if ("z".equals(axis)) { rx *= scale; ry *= scale; }
+            }
+        }
+        return new float[] {rx + ox, ry + oy, rz + oz};
+    }
+
+    private float[] projectRaw(float x, float y, float z, @NonNull GuiTransform guiTransform,
+                               @Nullable DualScreenItemDefinitionTranslator.Transform itemTransform) {
+        float[] transformed = transformForMinecraftGui(x, y, z, guiTransform, itemTransform);
         return new float[] { transformed[0], transformed[1] };
     }
 
     @NonNull
-    private float[] transformForMinecraftGui(float x, float y, float z, @NonNull GuiTransform guiTransform) {
-        // Vanilla block/item GUI display transform in centered block space. The default
-        // root block pose is [30,225,0], while authored models can override it, such as
-        // stairs using [30,135,0]. Keep this as a camera/model display transform, not a
-        // screen-space flip of the completed image.
-        final float nx = x - 8f;
-        final float ny = y - 8f;
-        final float nz = z - 8f;
+    private float[] transformForMinecraftGui(float x, float y, float z, @NonNull GuiTransform guiTransform,
+                                             @Nullable DualScreenItemDefinitionTranslator.Transform itemTransform) {
+        float nx = x - 8f;
+        float ny = y - 8f;
+        float nz = z - 8f;
+
+        // Item-definition Transformation is applied in model-centered space. 1.1.9 parsed
+        // this object but then discarded it, so composite/transformed definitions could
+        // never match Minecraft even when every JSON and texture was exported correctly.
+        if (itemTransform != null) {
+            float[] v = rotateByQuaternion(nx, ny, nz, itemTransform.leftRotation);
+            nx = v[0] * safeScale(itemTransform.scale, 0);
+            ny = v[1] * safeScale(itemTransform.scale, 1);
+            nz = v[2] * safeScale(itemTransform.scale, 2);
+            v = rotateByQuaternion(nx, ny, nz, itemTransform.rightRotation);
+            nx = v[0] + safeArray(itemTransform.translation, 0, 0f);
+            ny = v[1] + safeArray(itemTransform.translation, 1, 0f);
+            nz = v[2] + safeArray(itemTransform.translation, 2, 0f);
+        }
+
+        nx *= guiTransform.scaleX;
+        ny *= guiTransform.scaleY;
+        nz *= guiTransform.scaleZ;
 
         final double rx = Math.toRadians(guiTransform.rotX);
         final double ry = Math.toRadians(guiTransform.rotY);
@@ -3993,8 +5742,6 @@ final class DualScreenControlsView extends View {
         final float cosZ = (float) Math.cos(rz);
         final float sinZ = (float) Math.sin(rz);
 
-        // Preserve the projection style that already keeps full cubes/logs upright.
-        // Only the selected display.gui yaw changes for authored models like stairs.
         float x1 = (nx * cosY) + (nz * sinY);
         float z1 = (-nx * sinY) + (nz * cosY);
         float y1 = (ny * cosX) - (z1 * sinX);
@@ -4002,7 +5749,36 @@ final class DualScreenControlsView extends View {
         float x2 = (x1 * cosZ) - (y1 * sinZ);
         float y2 = (x1 * sinZ) + (y1 * cosZ);
 
+        // display.gui translation values are expressed in model pixels in the JSON path.
+        x2 += guiTransform.transX;
+        y2 += guiTransform.transY;
+        z2 += guiTransform.transZ;
         return new float[] { x2, -y2, z2 };
+    }
+
+    @NonNull
+    private float[] rotateByQuaternion(float x, float y, float z, @Nullable float[] q) {
+        if (q == null || q.length < 4) return new float[] {x, y, z};
+        float qx = q[0], qy = q[1], qz = q[2], qw = q[3];
+        float len = (float) Math.sqrt(qx*qx + qy*qy + qz*qz + qw*qw);
+        if (len < 0.000001f) return new float[] {x, y, z};
+        qx /= len; qy /= len; qz /= len; qw /= len;
+        float tx = 2f * (qy * z - qz * y);
+        float ty = 2f * (qz * x - qx * z);
+        float tz = 2f * (qx * y - qy * x);
+        return new float[] {
+                x + qw * tx + (qy * tz - qz * ty),
+                y + qw * ty + (qz * tx - qx * tz),
+                z + qw * tz + (qx * ty - qy * tx)
+        };
+    }
+
+    private float safeScale(@Nullable float[] values, int index) {
+        return safeArray(values, index, 1f);
+    }
+
+    private float safeArray(@Nullable float[] values, int index, float fallback) {
+        return values != null && index >= 0 && index < values.length ? values[index] : fallback;
     }
 
     private float[] scaleProjected(@NonNull float[] p, @NonNull RectF dst, @NonNull Bounds2D b) {
@@ -4014,8 +5790,9 @@ final class DualScreenControlsView extends View {
         return new float[] { dst.centerX() + (p[0] - cx) * scale, dst.centerY() + (p[1] - cy) * scale };
     }
 
-    private float depthForPoint(float x, float y, float z, @NonNull GuiTransform guiTransform) {
-        return transformForMinecraftGui(x, y, z, guiTransform)[2];
+    private float depthForPoint(float x, float y, float z, @NonNull GuiTransform guiTransform,
+                                @Nullable DualScreenItemDefinitionTranslator.Transform itemTransform) {
+        return transformForMinecraftGui(x, y, z, guiTransform, itemTransform)[2];
     }
 
     private float brightnessForFace(@NonNull String face) {
@@ -4393,6 +6170,58 @@ final class DualScreenControlsView extends View {
     }
 
     @Nullable
+    private File extractInstalledAssetFromExactVersion(@NonNull String version, @NonNull String clean) {
+        File mcRoot = findMinecraftRoot();
+        if (mcRoot == null) return null;
+        File dir = new File(new File(mcRoot, "versions"), version);
+        File jar = new File(dir, version + ".jar");
+        if (jar.isFile() && jar.length() > 0L) {
+            File extracted = extractAssetFromZip(jar, clean);
+            if (extracted != null && extracted.isFile() && extracted.length() > 0L) return extracted;
+        }
+        // Some launchers keep the effective client jar under a derived name in the same
+        // version directory. Search only this exact version directory before giving up.
+        File[] children = dir.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                if (child == null || !child.isFile() || !child.getName().endsWith(".jar") || child.length() <= 0L) continue;
+                File extracted = extractAssetFromZip(child, clean);
+                if (extracted != null && extracted.isFile() && extracted.length() > 0L) return extracted;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * HUD-only JAR resolver with a negative cache.
+     *
+     * The generic installed-asset resolver intentionally remains unchanged because item/model
+     * resources can have different reload semantics. Experience-bar sprites are immutable for
+     * the life of a Minecraft launch, while exported HUD files are checked separately before
+     * this method is reached. That makes a per-view negative cache safe and removes the accidental
+     * disk/ZIP scan loop introduced when the real vanilla XP bar was added.
+     */
+    @Nullable
+    private File extractInstalledHudAssetFromJars(@NonNull String clean) {
+        String cacheKey = "hudjar/" + clean;
+        File cached = installedAssetFileCache.get(cacheKey);
+        if (cached != null && cached.isFile() && cached.length() > 0L) return cached;
+        if (missingInstalledHudJarAssetCache.contains(clean)) return null;
+
+        File extracted = extractInstalledAssetFromJars(clean);
+        if (extracted != null && extracted.isFile() && extracted.length() > 0L) {
+            installedAssetFileCache.put(cacheKey, extracted);
+            return extracted;
+        }
+
+        if (missingInstalledHudJarAssetCache.size() > 64) {
+            missingInstalledHudJarAssetCache.clear();
+        }
+        missingInstalledHudJarAssetCache.add(clean);
+        return null;
+    }
+
+    @Nullable
     private File extractInstalledAssetFromJars(@NonNull String clean) {
         ArrayList<File> jars = new ArrayList<>();
         File game = hudStateFile.getParentFile();
@@ -4413,6 +6242,21 @@ final class DualScreenControlsView extends View {
     private void addVersionJars(@NonNull ArrayList<File> jars, @Nullable File mcRoot) {
         if (mcRoot == null) return;
         File versions = new File(mcRoot, "versions");
+        // For legacy HUD profiles, make the exact client jar authoritative over unrelated
+        // newer version jars. This lets 1.12.2 resolve its own item/model/gui resources
+        // while keeping 1.21.6+/26.2 ordering untouched.
+        String exactLegacyVersion = legacyHudAtlasVersion();
+        if (exactLegacyVersion != null) {
+            File exactDir = new File(versions, exactLegacyVersion);
+            File exactJar = new File(exactDir, exactLegacyVersion + ".jar");
+            if (exactJar.isFile() && exactJar.length() > 0L) addUniqueFile(jars, exactJar);
+            File[] exactChildren = exactDir.listFiles();
+            if (exactChildren != null) {
+                for (File child : exactChildren) {
+                    if (child != null && child.isFile() && child.getName().endsWith(".jar") && child.length() > 0L) addUniqueFile(jars, child);
+                }
+            }
+        }
         File[] dirs = versions.listFiles();
         if (dirs == null) return;
         ArrayList<File> found = new ArrayList<>();
@@ -4881,6 +6725,55 @@ final class DualScreenControlsView extends View {
     }
 
     @Nullable
+    private Bitmap loadBestInstalledItemAsset(@NonNull HudItem item) {
+        String id = canonicalLiveItemId(item);
+        if (id.isEmpty()) return null;
+        String namespace = "minecraft";
+        String path = id;
+        int colon = id.indexOf(':');
+        if (colon >= 0) {
+            namespace = id.substring(0, colon);
+            path = id.substring(colon + 1);
+        }
+        path = path.replace('\\', '/');
+        if (path.isEmpty()) return null;
+
+        String cacheKey = "bestasset/" + namespace + ':' + path;
+        Bitmap cached = itemIconCache.get(cacheKey);
+        if (cached != null && !cached.isRecycled()) return cached;
+        if (Boolean.TRUE.equals(missingInstalledItemAssetCache.get(cacheKey))) return null;
+
+        String[] candidates = new String[] {
+                "assets/" + namespace + "/textures/item/" + path + ".png",
+                "assets/" + namespace + "/textures/block/" + path + ".png",
+                "assets/" + namespace + "/textures/entity/" + path + ".png",
+                "assets/" + namespace + "/textures/" + path + ".png"
+        };
+        for (String relative : candidates) {
+            try {
+                File file = resolveExportedAssetFile(relative);
+                if (file == null || !file.isFile() || file.length() <= 0L) continue;
+                BitmapFactory.Options options = new BitmapFactory.Options();
+                options.inScaled = false;
+                Bitmap bitmap = BitmapFactory.decodeFile(file.getAbsolutePath(), options);
+                if (bitmap == null || bitmap.isRecycled() || isBitmapEffectivelyBlank(bitmap)) continue;
+                if (itemIconCache.size() > 160) {
+                    // Keep the long-lived model/texture caches bounded; the existing detach
+                    // cleanup still recycles everything owned by this view.
+                    recycleBitmapCache(itemIconCache);
+                }
+                itemIconCache.put(cacheKey, bitmap);
+                return bitmap;
+            } catch (Throwable throwable) {
+                Logging.e(TAG, "Unable to load installed fallback asset for " + id, throwable);
+            }
+        }
+        if (missingInstalledItemAssetCache.size() > 256) missingInstalledItemAssetCache.clear();
+        missingInstalledItemAssetCache.put(cacheKey, Boolean.TRUE);
+        return null;
+    }
+
+    @Nullable
     private Bitmap loadItemIcon(@Nullable String path) {
         if (path == null || path.trim().isEmpty()) return null;
         String rawPath = path.trim();
@@ -4947,6 +6840,7 @@ final class DualScreenControlsView extends View {
 
     @Override
     public boolean onTouchEvent(@NonNull MotionEvent event) {
+        if (topLegacyOverlayMode) return false;
         if (event.getSource() == 0) event.setSource(InputDevice.SOURCE_TOUCHSCREEN);
         int action = event.getActionMasked();
         int index = event.getActionIndex();
@@ -5065,6 +6959,7 @@ final class DualScreenControlsView extends View {
 
     @Override
     public boolean onKeyDown(int keyCode, @NonNull KeyEvent event) {
+        if (topLegacyOverlayMode) return false;
         if (handleControllerHotbarKey(keyCode, event)) return true;
         return super.onKeyDown(keyCode, event);
     }
@@ -5084,68 +6979,85 @@ final class DualScreenControlsView extends View {
 
     @Override
     public boolean onGenericMotionEvent(@NonNull MotionEvent event) {
+        if (topLegacyOverlayMode) return false;
         if (handleControllerHotbarMotion(event)) return true;
         return super.onGenericMotionEvent(event);
     }
 
     public boolean handleControllerHotbarMotion(@NonNull MotionEvent event) {
-        int source = event.getSource();
-        boolean controller = (source & InputDevice.SOURCE_JOYSTICK) == InputDevice.SOURCE_JOYSTICK
-                || (source & InputDevice.SOURCE_GAMEPAD) == InputDevice.SOURCE_GAMEPAD;
-        if (!controller) return false;
-
-        float l = Math.max(event.getAxisValue(MotionEvent.AXIS_LTRIGGER), event.getAxisValue(MotionEvent.AXIS_BRAKE));
-        float r = Math.max(event.getAxisValue(MotionEvent.AXIS_RTRIGGER), event.getAxisValue(MotionEvent.AXIS_GAS));
-        boolean lDown = l > 0.35f;
-        boolean rDown = r > 0.35f;
-        boolean handled = false;
-        if (lDown && !leftTriggerWasDown) {
-            navigateHotbarByController(-1);
-            handled = true;
-        }
-        if (rDown && !rightTriggerWasDown) {
-            navigateHotbarByController(1);
-            handled = true;
-        }
-        leftTriggerWasDown = lDown;
-        rightTriggerWasDown = rDown;
-        return handled;
+        // L2/R2 are real analog triggers and DroidBridge's normal game profile maps
+        // them to Use/Attack. They must not be reinterpreted by the lower HUD as
+        // hotbar navigation. The Activity-owned GamepadInputController handles the
+        // physical trigger axes and reports a hotbar preview only if the active
+        // profile explicitly maps that trigger to SCROLL_UP / SCROLL_DOWN.
+        return false;
     }
 
     private boolean isControllerHotbarPreviousKey(int keyCode) {
-        return keyCode == KeyEvent.KEYCODE_BUTTON_L1 || keyCode == KeyEvent.KEYCODE_BUTTON_L2;
+        return keyCode == KeyEvent.KEYCODE_BUTTON_L1;
     }
 
     private boolean isControllerHotbarNextKey(int keyCode) {
-        return keyCode == KeyEvent.KEYCODE_BUTTON_R1 || keyCode == KeyEvent.KEYCODE_BUTTON_R2;
+        return keyCode == KeyEvent.KEYCODE_BUTTON_R1;
     }
 
     private void navigateHotbarByController(int delta) {
+        int next = applyControllerHotbarVisualFeedback(delta);
+        if (next < 0) return;
+        // This path is used only when the HUD view itself owns the controller event.
+        // The GameActivity observer below uses previewControllerHotbarDelta() instead,
+        // which intentionally does NOT send a second input event.
+        sendKeyTap(LwjglGlfwKeycode.GLFW_KEY_1 + next);
+    }
+
+    /**
+     * Passive visual-only notification for a physical L1/R1 edge already being routed
+     * through GameActivity to Minecraft. Never send input from this method.
+     */
+    void previewControllerHotbarDelta(int delta) {
+        applyControllerHotbarVisualFeedback(delta);
+    }
+
+    private int applyControllerHotbarVisualFeedback(int delta) {
+        if (delta == 0) return -1;
         long now = SystemClock.uptimeMillis();
-        if (now - lastControllerHotbarNavMs < CONTROLLER_HOTBAR_NAV_DEBOUNCE_MS) return;
-        // A real controller/trigger navigation should immediately supersede any old
-        // touchscreen acknowledgment window. Controller behavior itself is unchanged.
+        if (now - lastControllerHotbarNavMs < CONTROLLER_HOTBAR_NAV_DEBOUNCE_MS) return -1;
+
+        // Controller navigation supersedes an older touchscreen acknowledgment window.
         pendingTouchHotbarSlot = -1;
         pendingTouchHotbarUntilMs = 0L;
         lastControllerHotbarNavMs = now;
+
         int base = selectedSlot;
-        // 1.0.112: when the user is actively scrolling, do not wait for the next
-        // file-state poll before choosing the next local slot. The state writer can
-        // lag one poll behind mouse-wheel/trigger input.
-        if (touchedHotbarSlot < 0 && hudState.isFresh() && hudState.selectedSlot >= 0 && hudState.selectedSlot < SLOT_COUNT) base = hudState.selectedSlot;
+        if (pendingControllerHotbarSlot < 0
+                && hudState.isFresh()
+                && hudState.selectedSlot >= 0
+                && hudState.selectedSlot < SLOT_COUNT) {
+            base = hudState.selectedSlot;
+        }
+
         int next = (base + delta) % SLOT_COUNT;
         if (next < 0) next += SLOT_COUNT;
+
         selectedSlot = next;
         touchedHotbarSlot = next;
-        sendKeyTap(LwjglGlfwKeycode.GLFW_KEY_1 + next);
+        pendingControllerHotbarSlot = next;
+        pendingControllerHotbarUntilMs = now + CONTROLLER_HOTBAR_ACK_TIMEOUT_MS;
+
         invalidate();
         handler.removeCallbacks(clearControllerSlotFeedbackRunnable);
-        handler.postDelayed(clearControllerSlotFeedbackRunnable, 700L);
+        handler.postDelayed(clearControllerSlotFeedbackRunnable, CONTROLLER_HOTBAR_ACK_TIMEOUT_MS);
+        return next;
     }
 
     @NonNull private final Runnable clearControllerSlotFeedbackRunnable = new Runnable() {
         @Override public void run() {
             touchedHotbarSlot = -1;
+            if (pendingControllerHotbarSlot >= 0
+                    && SystemClock.uptimeMillis() >= pendingControllerHotbarUntilMs) {
+                pendingControllerHotbarSlot = -1;
+                pendingControllerHotbarUntilMs = 0L;
+            }
             invalidate();
         }
     };
@@ -5166,6 +7078,17 @@ final class DualScreenControlsView extends View {
                 break;
             case ACTION_PERSPECTIVE:
                 sendKeyTap(LwjglGlfwKeycode.GLFW_KEY_F5);
+                break;
+            case ACTION_DUAL_SETTINGS:
+                dualSettingsOpen = !dualSettingsOpen;
+                rebuildLayout(getWidth(), getHeight());
+                invalidate();
+                break;
+            case ACTION_TOGGLE_MAP:
+                toggleDualScreenProperty("droidbridge_dualscreen_map.properties", "mapEnabled");
+                break;
+            case ACTION_TOGGLE_COORDS:
+                toggleDualScreenProperty("droidbridge_dualscreen_coordinates.properties", "coordinatesEnabled");
                 break;
             default:
                 sendActionDown(action);
@@ -5259,11 +7182,29 @@ final class DualScreenControlsView extends View {
         final float rotX;
         final float rotY;
         final float rotZ;
+        final float transX;
+        final float transY;
+        final float transZ;
+        final float scaleX;
+        final float scaleY;
+        final float scaleZ;
 
         GuiTransform(float rotX, float rotY, float rotZ) {
+            this(rotX, rotY, rotZ, 0f, 0f, 0f, 1f, 1f, 1f);
+        }
+
+        GuiTransform(float rotX, float rotY, float rotZ,
+                     float transX, float transY, float transZ,
+                     float scaleX, float scaleY, float scaleZ) {
             this.rotX = rotX;
             this.rotY = rotY;
             this.rotZ = rotZ;
+            this.transX = transX;
+            this.transY = transY;
+            this.transZ = transZ;
+            this.scaleX = scaleX;
+            this.scaleY = scaleY;
+            this.scaleZ = scaleZ;
         }
 
         @Nullable static GuiTransform fromJson(@Nullable JSONObject displayJson) {
@@ -5271,11 +7212,18 @@ final class DualScreenControlsView extends View {
             JSONObject gui = displayJson.optJSONObject("gui");
             if (gui == null) return null;
             JSONArray rotation = gui.optJSONArray("rotation");
-            if (rotation == null || rotation.length() < 3) return null;
+            JSONArray translation = gui.optJSONArray("translation");
+            JSONArray scale = gui.optJSONArray("scale");
             return new GuiTransform(
-                    (float) rotation.optDouble(0, MODEL_GUI_ROT_X_DEGREES),
-                    (float) rotation.optDouble(1, MODEL_GUI_ROT_Y_DEGREES),
-                    (float) rotation.optDouble(2, MODEL_GUI_ROT_Z_DEGREES)
+                    rotation != null && rotation.length() > 0 ? (float) rotation.optDouble(0, MODEL_GUI_ROT_X_DEGREES) : MODEL_GUI_ROT_X_DEGREES,
+                    rotation != null && rotation.length() > 1 ? (float) rotation.optDouble(1, MODEL_GUI_ROT_Y_DEGREES) : MODEL_GUI_ROT_Y_DEGREES,
+                    rotation != null && rotation.length() > 2 ? (float) rotation.optDouble(2, MODEL_GUI_ROT_Z_DEGREES) : MODEL_GUI_ROT_Z_DEGREES,
+                    translation != null && translation.length() > 0 ? (float) translation.optDouble(0, 0d) : 0f,
+                    translation != null && translation.length() > 1 ? (float) translation.optDouble(1, 0d) : 0f,
+                    translation != null && translation.length() > 2 ? (float) translation.optDouble(2, 0d) : 0f,
+                    scale != null && scale.length() > 0 ? (float) scale.optDouble(0, 1d) : 1f,
+                    scale != null && scale.length() > 1 ? (float) scale.optDouble(1, 1d) : 1f,
+                    scale != null && scale.length() > 2 ? (float) scale.optDouble(2, 1d) : 1f
             );
         }
     }
@@ -5329,11 +7277,22 @@ final class DualScreenControlsView extends View {
         @NonNull float[] from = new float[] {0f, 0f, 0f};
         @NonNull float[] to = new float[] {16f, 16f, 16f};
         @NonNull final Map<String, ModelFace> faces = new HashMap<>();
+        @NonNull float[] rotationOrigin = new float[] {8f, 8f, 8f};
+        @NonNull String rotationAxis = "";
+        float rotationAngle = 0f;
+        boolean rotationRescale = false;
 
         @Nullable static ModelElement fromJson(@NonNull JSONObject root) {
             ModelElement element = new ModelElement();
             element.from = floatArray(root.optJSONArray("from"), element.from);
             element.to = floatArray(root.optJSONArray("to"), element.to);
+            JSONObject rotationJson = root.optJSONObject("rotation");
+            if (rotationJson != null) {
+                element.rotationOrigin = floatArray(rotationJson.optJSONArray("origin"), element.rotationOrigin);
+                element.rotationAxis = rotationJson.optString("axis", "").trim().toLowerCase(Locale.ROOT);
+                element.rotationAngle = (float) rotationJson.optDouble("angle", 0d);
+                element.rotationRescale = rotationJson.optBoolean("rescale", false);
+            }
             JSONObject facesJson = root.optJSONObject("faces");
             if (facesJson == null) return null;
             JSONArray names = facesJson.names();
@@ -5464,7 +7423,10 @@ final class DualScreenControlsView extends View {
         }
 
         static HudItem empty() { return new HudItem("", "", "", "", 0, -1, -1); }
-        boolean isEmpty() { return count <= 0 && label.isEmpty() && id.isEmpty(); }
+        boolean isEmpty() {
+            String cleanId = id.trim().toLowerCase(Locale.ROOT);
+            return count <= 0 || "air".equals(cleanId) || "minecraft:air".equals(cleanId);
+        }
         @NonNull String displayLabel() {
             if (!label.isEmpty()) return label;
             String fromId = displayFromId(id);
@@ -5637,7 +7599,10 @@ final class DualScreenControlsView extends View {
         }
 
         boolean isFresh() {
-            return valid && fileModifiedMs > 0L && SystemClock.uptimeMillis() - readAtMs <= HUD_STALE_MS;
+            // Coordinates represent the last known player position. Standing still means the
+            // coordinate file may not be rewritten, so age must not make valid coordinates
+            // disappear. The explicit enabled flag still controls whether they are drawn.
+            return valid && fileModifiedMs > 0L;
         }
 
         @Nullable
@@ -5699,6 +7664,27 @@ final class DualScreenControlsView extends View {
         }
     }
 
+    private static final class LegacyHudOptions {
+        final boolean legacyHudEnabled;
+        final boolean showHealth;
+        final boolean showHunger;
+        final boolean showArmor;
+        final boolean showAir;
+
+        LegacyHudOptions(boolean legacyHudEnabled, boolean showHealth, boolean showHunger,
+                         boolean showArmor, boolean showAir) {
+            this.legacyHudEnabled = legacyHudEnabled;
+            this.showHealth = showHealth;
+            this.showHunger = showHunger;
+            this.showArmor = showArmor;
+            this.showAir = showAir;
+        }
+
+        @NonNull static LegacyHudOptions defaults() {
+            return new LegacyHudOptions(false, true, true, true, true);
+        }
+    }
+
     private static final class HudState {
         final long readAtMs;
         final long fileModifiedMs;
@@ -5716,8 +7702,12 @@ final class DualScreenControlsView extends View {
         @NonNull final HudItem[] items;
         @NonNull final HudItem offhand;
         @NonNull final String mainArm;
+        @NonNull final String compatProfile;
         final boolean mapEnabled;
         final int mapSize;
+        final int mapCenterX;
+        final int mapCenterZ;
+        @NonNull final String mapDimension;
         final float mapPlayerX;
         final float mapPlayerY;
         final float mapRotation;
@@ -5728,9 +7718,9 @@ final class DualScreenControlsView extends View {
                          float absorption, int armor, int food, int air, int maxAir,
                          float experienceProgress, int experienceLevel, int selectedSlot,
                          @Nullable String screenTitle, @NonNull HudItem[] items,
-                         @NonNull HudItem offhand, @NonNull String mainArm,
-                         boolean mapEnabled, int mapSize, float mapPlayerX, float mapPlayerY,
-                         float mapRotation, @NonNull String mapData, boolean valid) {
+                         @NonNull HudItem offhand, @NonNull String mainArm, @NonNull String compatProfile,
+                         boolean mapEnabled, int mapSize, int mapCenterX, int mapCenterZ, @NonNull String mapDimension,
+                         float mapPlayerX, float mapPlayerY, float mapRotation, @NonNull String mapData, boolean valid) {
             this.readAtMs = readAtMs;
             this.fileModifiedMs = fileModifiedMs;
             this.health = health;
@@ -5747,8 +7737,12 @@ final class DualScreenControlsView extends View {
             this.items = items;
             this.offhand = offhand;
             this.mainArm = mainArm;
+            this.compatProfile = compatProfile;
             this.mapEnabled = mapEnabled;
             this.mapSize = mapSize;
+            this.mapCenterX = mapCenterX;
+            this.mapCenterZ = mapCenterZ;
+            this.mapDimension = mapDimension;
             this.mapPlayerX = mapPlayerX;
             this.mapPlayerY = mapPlayerY;
             this.mapRotation = mapRotation;
@@ -5760,14 +7754,14 @@ final class DualScreenControlsView extends View {
             HudItem[] items = new HudItem[SLOT_COUNT];
             for (int i = 0; i < items.length; i++) items[i] = HudItem.empty();
             return new HudState(0L, 0L, -1f, -1f, 0f, -1, -1, -1, -1, 0f, -1, -1, null, items,
-                    HudItem.empty(), "right", false, MAP_PIXEL_SIZE, 64f, 64f, 0f, "", false);
+                    HudItem.empty(), "right", "", false, MAP_PIXEL_SIZE, 0, 0, "", 64f, 64f, 0f, "", false);
         }
 
         static HudState fallback() {
             HudItem[] items = new HudItem[SLOT_COUNT];
             for (int i = 0; i < items.length; i++) items[i] = HudItem.empty();
             return new HudState(SystemClock.uptimeMillis(), SystemClock.uptimeMillis(), 20f, 20f, 0f, 0, 20, -1, -1, 0f, -1, 0, null, items,
-                    HudItem.empty(), "right", false, MAP_PIXEL_SIZE, 64f, 64f, 0f, "", true);
+                    HudItem.empty(), "right", "", false, MAP_PIXEL_SIZE, 0, 0, "", 64f, 64f, 0f, "", true);
         }
 
         boolean isFresh() {
@@ -5905,8 +7899,12 @@ final class DualScreenControlsView extends View {
                         items,
                         offhand,
                         root.optString("mainArm", "right"),
+                        root.optString("compatProfile", ""),
                         root.optBoolean("mapEnabled", false),
                         root.optInt("mapSize", MAP_PIXEL_SIZE),
+                        root.optInt("mapCenterX", 0),
+                        root.optInt("mapCenterZ", 0),
+                        root.optString("mapDimension", ""),
                         (float) root.optDouble("mapPlayerX", MAP_PIXEL_SIZE * 0.5d),
                         (float) root.optDouble("mapPlayerY", MAP_PIXEL_SIZE * 0.5d),
                         (float) root.optDouble("mapRotation", 0d),

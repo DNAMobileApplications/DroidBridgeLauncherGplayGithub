@@ -289,6 +289,11 @@ public final class TouchControlsStore {
                 updated.strokeWidth = previous.strokeWidth;
                 updated.backgroundColor = previous.backgroundColor;
                 updated.strokeColor = previous.strokeColor;
+                updated.imageUri = previous.imageUri;
+                updated.imageMode = previous.imageMode;
+                updated.imageScalePercent = previous.imageScalePercent;
+                updated.imageOffsetXPercent = previous.imageOffsetXPercent;
+                updated.imageOffsetYPercent = previous.imageOffsetYPercent;
                 updated.toggle = previous.toggle;
                 updated.visibleInGame = previous.visibleInGame;
                 updated.visibleInMenu = previous.visibleInMenu;

@@ -28,6 +28,7 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.LinearLayout;
 import android.widget.ListView;
+import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -44,6 +45,7 @@ import java.util.ArrayList;
 import ca.dnamobile.droidbridgelauncher.feature.log.Logging;
 import ca.dnamobile.droidbridgelauncher.ui.LauncherDialogStyle;
 import ca.dnamobile.droidbridgelauncher.utils.FullscreenUtils;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 public final class ControlsActivity extends AppCompatActivity {
     private static final int REQUEST_IMPORT_CONTROLS = 9011;
@@ -225,15 +227,64 @@ public final class ControlsActivity extends AppCompatActivity {
         if (position < 0 || position >= layoutFiles.size()) return;
         File file = layoutFiles.get(position);
 
+        TouchControlsLayoutData layoutData = TouchControlsStore.loadLayout(file);
         LinearLayout root = LauncherDialogStyle.createDialogRoot(
                 this,
-                file.getName(),
+                displayLayoutTitle(layoutData, file),
                 "Choose what to do with this controller profile."
         );
         final AlertDialog[] holder = new AlertDialog[1];
 
+        int screenWidth = getResources().getDisplayMetrics().widthPixels;
+        int screenHeight = getResources().getDisplayMetrics().heightPixels;
+        boolean useTwoColumns = screenWidth >= dp(600) || screenWidth > screenHeight;
+
+        LinearLayout options = new LinearLayout(this);
+        options.setOrientation(LinearLayout.VERTICAL);
+
+        LinearLayout firstTarget = options;
+        LinearLayout secondTarget = options;
+        if (useTwoColumns) {
+            firstTarget = createDialogOptionRow();
+            secondTarget = createDialogOptionRow();
+            options.addView(firstTarget, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            ));
+            options.addView(secondTarget, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            ));
+        }
+
+        ScrollView optionsScroll = new ScrollView(this);
+        optionsScroll.setFillViewport(false);
+        optionsScroll.setClipToPadding(false);
+        optionsScroll.setVerticalScrollBarEnabled(!useTwoColumns);
+        optionsScroll.addView(options, new ScrollView.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        LinearLayout.LayoutParams optionsScrollParams;
+        if (useTwoColumns) {
+            // Landscape/wide devices get a compact 2x2 option grid so Export and Delete
+            // remain visible without the Material dialog clipping the bottom rows.
+            optionsScrollParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+        } else {
+            int maxOptionsHeight = Math.min(dp(420), Math.max(dp(220), Math.round(screenHeight * 0.55f)));
+            optionsScrollParams = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    maxOptionsHeight
+            );
+        }
+        root.addView(optionsScroll, optionsScrollParams);
+
         addLayoutOption(
-                root,
+                firstTarget,
                 "Use this layout",
                 "Select this profile for the next game launch.",
                 false,
@@ -243,7 +294,7 @@ public final class ControlsActivity extends AppCompatActivity {
                 }
         );
         addLayoutOption(
-                root,
+                firstTarget,
                 "Edit",
                 "Open this profile in the touch-control editor.",
                 false,
@@ -254,7 +305,7 @@ public final class ControlsActivity extends AppCompatActivity {
                 }
         );
         addLayoutOption(
-                root,
+                secondTarget,
                 "Export JSON",
                 "Save or share a copy of this controller profile.",
                 false,
@@ -264,7 +315,7 @@ public final class ControlsActivity extends AppCompatActivity {
                 }
         );
         addLayoutOption(
-                root,
+                secondTarget,
                 "Delete",
                 "Remove this profile from DroidBridge.",
                 true,
@@ -274,7 +325,7 @@ public final class ControlsActivity extends AppCompatActivity {
                 }
         );
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(root)
                 .setNegativeButton(android.R.string.cancel, null)
                 .create();
@@ -301,8 +352,8 @@ public final class ControlsActivity extends AppCompatActivity {
 
         GradientDrawable background = LauncherDialogStyle.roundedDrawable(
                 this,
-                destructive ? 0x332F1010 : LauncherDialogStyle.COLOR_CARD_BG_PRESSED,
-                destructive ? 0xFFFF6D6D : LauncherDialogStyle.COLOR_CARD_STROKE,
+                destructive ? LauncherDialogStyle.COLOR_CARD_BG : LauncherDialogStyle.COLOR_CARD_BG_PRESSED,
+                destructive ? LauncherDialogStyle.COLOR_ERROR : LauncherDialogStyle.COLOR_CARD_STROKE,
                 14
         );
         card.setBackground(background);
@@ -312,7 +363,7 @@ public final class ControlsActivity extends AppCompatActivity {
         titleView.setTextSize(15f);
         titleView.setTypeface(Typeface.DEFAULT_BOLD);
         titleView.setTextColor(destructive
-                ? 0xFFFF8A80
+                ? LauncherDialogStyle.COLOR_ERROR
                 : LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         titleView.setIncludeFontPadding(false);
         card.addView(titleView, new LinearLayout.LayoutParams(
@@ -331,12 +382,30 @@ public final class ControlsActivity extends AppCompatActivity {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-        );
-        params.setMargins(0, dp(4), 0, dp(4));
+        LinearLayout.LayoutParams params;
+        if (root.getOrientation() == LinearLayout.HORIZONTAL) {
+            params = new LinearLayout.LayoutParams(
+                    0,
+                    ViewGroup.LayoutParams.WRAP_CONTENT,
+                    1f
+            );
+            params.setMargins(dp(4), dp(4), dp(4), dp(4));
+        } else {
+            params = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT,
+                    ViewGroup.LayoutParams.WRAP_CONTENT
+            );
+            params.setMargins(0, dp(4), 0, dp(4));
+        }
         root.addView(card, params);
+    }
+
+    @NonNull
+    private LinearLayout createDialogOptionRow() {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.TOP);
+        return row;
     }
 
     private void confirmDelete(@NonNull File file) {
@@ -344,7 +413,7 @@ public final class ControlsActivity extends AppCompatActivity {
             Toast.makeText(this, "Default layout cannot be deleted.", Toast.LENGTH_SHORT).show();
             return;
         }
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle("Delete layout?")
                 .setMessage(file.getName())
                 .setNegativeButton(android.R.string.cancel, null)
@@ -382,14 +451,14 @@ public final class ControlsActivity extends AppCompatActivity {
         addImportChoice(
                 root,
                 "Legacy launcher profile",
-                "Use for Zalith, Amethyst, Mojo/MJ, or Pojav controls.json files. Preserves their screen-position formulas, density conversions, saved button scale, and legacy version rules.",
+                "Use for compatible third-party controls.json files. Preserves their screen-position formulas, density conversions, saved button scale, and legacy version rules.",
                 view -> {
                     if (holder[0] != null) holder[0].dismiss();
                     openImportPicker(TouchControlsLayoutData.IMPORT_MODE_OTHER_LAUNCHER);
                 }
         );
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(root)
                 .setNegativeButton(android.R.string.cancel, null)
                 .create();
@@ -505,17 +574,21 @@ public final class ControlsActivity extends AppCompatActivity {
         button.setAllCaps(false);
         button.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         button.setTypeface(Typeface.DEFAULT_BOLD);
-        button.setMinHeight(0);
-        button.setMinimumHeight(0);
+        button.setMinHeight(dp(44));
+        button.setMinimumHeight(dp(44));
         button.setPadding(dp(8), 0, dp(8), 0);
         button.setTextSize(13f);
+        button.setSingleLine(true);
+        button.setEllipsize(TextUtils.TruncateAt.END);
         button.setBackground(LauncherDialogStyle.roundedDrawable(this, LauncherDialogStyle.COLOR_CARD_BG_PRESSED, LauncherDialogStyle.COLOR_CARD_STROKE, 14));
+        button.setElevation(0f);
+        button.setStateListAnimator(null);
         return button;
     }
 
     @NonNull
     private LinearLayout.LayoutParams actionButtonParams() {
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(36), 1f);
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(0, dp(44), 1f);
         params.setMargins(dp(3), 0, dp(3), 0);
         return params;
     }

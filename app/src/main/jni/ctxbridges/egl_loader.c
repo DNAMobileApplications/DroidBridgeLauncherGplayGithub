@@ -19,6 +19,10 @@
 #include <stdbool.h>
 #include <stdarg.h>
 #include <android/log.h>
+#include <link.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <stdint.h>
 #include "br_loader.h"
 #include "egl_loader.h"
 #include "../driver_helper/nsbypass.h"
@@ -67,6 +71,66 @@ static void loader_log(const char* fmt, ...) {
     fflush(stderr);
     fprintf(stdout, "%s: %s\n", EGL_LOADER_TAG, buffer);
     fflush(stdout);
+}
+
+
+static bool droidbridge_is_kopper_renderer(void) {
+    const char* renderer = getenv("DROIDBRIDGE_RENDERER");
+    if (renderer == NULL || renderer[0] == '\0') renderer = getenv("POJAV_RENDERER");
+    return renderer != NULL && strcmp(renderer, "opengles3_desktopgl_zink_kopper") == 0;
+}
+
+typedef struct {
+    int replacements;
+} droidbridge_brand_scrub_state_t;
+
+static int droidbridge_scrub_builder_branding_cb(struct dl_phdr_info* info, size_t size, void* data) {
+    (void)size;
+    droidbridge_brand_scrub_state_t* state = (droidbridge_brand_scrub_state_t*)data;
+    if (info == NULL || info->dlpi_name == NULL || strstr(info->dlpi_name, "libEGL_mesa.so") == NULL) return 0;
+
+    /* Builder-brand token in the imported Mesa binary. Keep this as raw bytes so
+     * DroidBridge source and user-visible strings carry no foreign launcher brand. */
+    static const unsigned char target[] = {0x4d,0x6f,0x6a,0x6f,0x4c,0x61,0x75,0x6e,0x63,0x68,0x65,0x72};
+    static const unsigned char replacement[] = {'D','r','o','i','d','B','r','i','d','g','e',' '};
+    const size_t token_len = sizeof(target);
+    long page_size_long = sysconf(_SC_PAGESIZE);
+    size_t page_size = page_size_long > 0 ? (size_t)page_size_long : 4096u;
+
+    for (ElfW(Half) i = 0; i < info->dlpi_phnum; ++i) {
+        const ElfW(Phdr)* ph = &info->dlpi_phdr[i];
+        if (ph->p_type != PT_LOAD || (ph->p_flags & PF_R) == 0 || ph->p_memsz < token_len) continue;
+
+        unsigned char* begin = (unsigned char*)(info->dlpi_addr + ph->p_vaddr);
+        size_t length = (size_t)ph->p_memsz;
+        for (size_t offset = 0; offset + token_len <= length; ++offset) {
+            unsigned char* hit = begin + offset;
+            if (memcmp(hit, target, token_len) != 0) continue;
+
+            uintptr_t page_start = ((uintptr_t)hit) & ~((uintptr_t)page_size - 1u);
+            uintptr_t page_end = (((uintptr_t)hit + token_len + page_size - 1u) & ~((uintptr_t)page_size - 1u));
+            size_t protect_len = (size_t)(page_end - page_start);
+            int original_prot = PROT_READ;
+            if (ph->p_flags & PF_W) original_prot |= PROT_WRITE;
+            if (ph->p_flags & PF_X) original_prot |= PROT_EXEC;
+
+            if (mprotect((void*)page_start, protect_len, original_prot | PROT_WRITE) != 0) continue;
+            memcpy(hit, replacement, token_len);
+            __builtin___clear_cache((char*)hit, (char*)hit + token_len);
+            (void)mprotect((void*)page_start, protect_len, original_prot);
+            state->replacements++;
+        }
+    }
+    return 0;
+}
+
+static void droidbridge_scrub_imported_mesa_branding(void) {
+    static bool attempted = false;
+    if (attempted || !droidbridge_is_kopper_renderer()) return;
+    attempted = true;
+    droidbridge_brand_scrub_state_t state = {0};
+    dl_iterate_phdr(droidbridge_scrub_builder_branding_cb, &state);
+    loader_log("Kopper imported-Mesa branding scrub replacements=%d", state.replacements);
 }
 
 static void* try_dlopen_egl(const char* name, int flags) {
@@ -130,14 +194,17 @@ static void* try_namespace_egl(const char* library_name, int flags) {
 
     const char* short_name = file_name_only(library_name);
     if (short_name == NULL || short_name[0] == '\0') short_name = "libEGL_mesa.so";
-    void* handle = try_namespace_egl_once(getenv("DROIDBRIDGE_MESA_NATIVE_DIR"), short_name, flags);
+
+    // Kopper/Turnip needs one namespace containing BOTH Mesa and the selected
+    // Vulkan-driver directory. Try the complete path first. linker_ns_load()
+    // keeps a single process namespace, so the first successful path wins.
+    void* handle = try_namespace_egl_once(getenv("DROIDBRIDGE_MESA_NAMESPACE_PATH"), short_name, flags);
+    if (handle != NULL) return handle;
+
+    handle = try_namespace_egl_once(getenv("DROIDBRIDGE_MESA_NATIVE_DIR"), short_name, flags);
     if (handle != NULL) return handle;
 
     handle = try_namespace_egl_once(getenv("DROIDBRIDGE_NATIVEDIR"), short_name, flags);
-    if (handle != NULL) return handle;
-
-    /* Last resort: allow an explicit override path for diagnostics. */
-    handle = try_namespace_egl_once(getenv("DROIDBRIDGE_MESA_NAMESPACE_PATH"), short_name, flags);
     if (handle != NULL) return handle;
 
     loader_log("Mesa namespace requested but namespace EGL loading did not succeed");
@@ -177,10 +244,89 @@ static bool droidbridge_should_native_configure_renderspec(void) {
     return false;
 }
 
+
+static void droidbridge_bind_egl_symbols(void) {
+#define EGLSYM(name) GLGetProcAddress(g_egl_handle, name)
+    eglBindAPI_p = EGLSYM("eglBindAPI");
+    eglChooseConfig_p = EGLSYM("eglChooseConfig");
+    eglCreateContext_p = EGLSYM("eglCreateContext");
+    eglCreatePbufferSurface_p = EGLSYM("eglCreatePbufferSurface");
+    eglCreateWindowSurface_p = EGLSYM("eglCreateWindowSurface");
+    eglDestroyContext_p = EGLSYM("eglDestroyContext");
+    eglDestroySurface_p = EGLSYM("eglDestroySurface");
+    eglGetConfigAttrib_p = EGLSYM("eglGetConfigAttrib");
+    eglGetCurrentContext_p = EGLSYM("eglGetCurrentContext");
+    eglGetDisplay_p = EGLSYM("eglGetDisplay");
+    eglGetPlatformDisplay_p = EGLSYM("eglGetPlatformDisplay");
+    if (eglGetPlatformDisplay_p == NULL) {
+        eglGetPlatformDisplay_p = EGLSYM("eglGetPlatformDisplayEXT");
+    }
+    eglGetError_p = EGLSYM("eglGetError");
+    eglInitialize_p = EGLSYM("eglInitialize");
+    eglMakeCurrent_p = EGLSYM("eglMakeCurrent");
+    eglSwapBuffers_p = EGLSYM("eglSwapBuffers");
+    eglReleaseThread_p = EGLSYM("eglReleaseThread");
+    eglSwapInterval_p = EGLSYM("eglSwapInterval");
+    eglSurfaceAttrib_p = EGLSYM("eglSurfaceAttrib");
+    eglTerminate_p = EGLSYM("eglTerminate");
+    eglGetCurrentSurface_p = EGLSYM("eglGetCurrentSurface");
+    eglQuerySurface_p = EGLSYM("eglQuerySurface");
+    eglQueryString_p = EGLSYM("eglQueryString");
+#undef EGLSYM
+}
+
+bool droidbridge_egl_adopt_handle(void* handle, const char* loaded_name) {
+    if (handle == NULL) return false;
+
+    void* get_display = GLGetProcAddress(handle, "eglGetDisplay");
+    void* initialize = GLGetProcAddress(handle, "eglInitialize");
+    void* make_current = GLGetProcAddress(handle, "eglMakeCurrent");
+    void* create_context = GLGetProcAddress(handle, "eglCreateContext");
+    if (get_display == NULL || initialize == NULL || make_current == NULL || create_context == NULL) {
+        loader_log("refusing EGL provider adoption handle=%p name=%s getDisplay=%p initialize=%p makeCurrent=%p createContext=%p",
+                   handle,
+                   loaded_name != NULL ? loaded_name : "<unknown>",
+                   get_display,
+                   initialize,
+                   make_current,
+                   create_context);
+        return false;
+    }
+
+    g_egl_handle = handle;
+    snprintf(g_egl_loaded_name, sizeof(g_egl_loaded_name), "%s",
+             loaded_name != NULL && loaded_name[0] != '\0' ? loaded_name : "<adopted>");
+    droidbridge_bind_egl_symbols();
+
+    loader_log("adopted EGL provider handle=%p name=%s getPlatformDisplay=%p queryString=%p",
+               g_egl_handle,
+               droidbridge_egl_get_loaded_name(),
+               eglGetPlatformDisplay_p,
+               eglQueryString_p);
+    return true;
+}
+
 void dlsym_EGL() {
     if (g_egl_handle != NULL) return;
 
-    char* eglName = NULL;
+    if (droidbridge_is_kopper_renderer()
+            && env_enabled("DROIDBRIDGE_KOPPER_FORCE_NAMESPACE_VULKAN")
+            && !env_enabled("DROIDBRIDGE_USE_SYSTEM_VULKAN")) {
+        /*
+         * v9: readiness is deliberately handed off through process environment
+         * state instead of a new driver_helper ELF symbol. This keeps
+         * libdroidbridge_runtime loadable across incremental native packaging
+         * while still failing closed if the Turnip namespace was not prepared.
+         */
+        const bool env_ready = env_enabled("DROIDBRIDGE_KOPPER_TURNIP_READY");
+        if (!env_ready) {
+            loader_log("Kopper custom Vulkan guard: Turnip namespace readiness was not published; refusing system-driver fallback");
+            abort();
+        }
+        loader_log("Kopper custom Vulkan guard passed envReady=1");
+    }
+
+    const char* eglName = NULL;
     char* gles = getenv("LIBGL_GLES");
     bool mesa = env_enabled("DROIDBRIDGE_MESA");
 
@@ -222,33 +368,9 @@ void dlsym_EGL() {
 
     if (g_egl_handle == NULL) abort();
 
-#define EGLSYM(name) GLGetProcAddress(g_egl_handle, name)
-    eglBindAPI_p = EGLSYM("eglBindAPI");
-    eglChooseConfig_p = EGLSYM("eglChooseConfig");
-    eglCreateContext_p = EGLSYM("eglCreateContext");
-    eglCreatePbufferSurface_p = EGLSYM("eglCreatePbufferSurface");
-    eglCreateWindowSurface_p = EGLSYM("eglCreateWindowSurface");
-    eglDestroyContext_p = EGLSYM("eglDestroyContext");
-    eglDestroySurface_p = EGLSYM("eglDestroySurface");
-    eglGetConfigAttrib_p = EGLSYM("eglGetConfigAttrib");
-    eglGetCurrentContext_p = EGLSYM("eglGetCurrentContext");
-    eglGetDisplay_p = EGLSYM("eglGetDisplay");
-    eglGetPlatformDisplay_p = EGLSYM("eglGetPlatformDisplay");
-    if (eglGetPlatformDisplay_p == NULL) {
-        eglGetPlatformDisplay_p = EGLSYM("eglGetPlatformDisplayEXT");
-    }
-    eglGetError_p = EGLSYM("eglGetError");
-    eglInitialize_p = EGLSYM("eglInitialize");
-    eglMakeCurrent_p = EGLSYM("eglMakeCurrent");
-    eglSwapBuffers_p = EGLSYM("eglSwapBuffers");
-    eglReleaseThread_p = EGLSYM("eglReleaseThread");
-    eglSwapInterval_p = EGLSYM("eglSwapInterval");
-    eglSurfaceAttrib_p = EGLSYM("eglSurfaceAttrib");
-    eglTerminate_p = EGLSYM("eglTerminate");
-    eglGetCurrentSurface_p = EGLSYM("eglGetCurrentSurface");
-    eglQuerySurface_p = EGLSYM("eglQuerySurface");
-    eglQueryString_p = EGLSYM("eglQueryString");
-#undef EGLSYM
+    droidbridge_scrub_imported_mesa_branding();
+
+    droidbridge_bind_egl_symbols();
 
     loader_log("EGL symbols loaded from %s getPlatformDisplay=%p queryString=%p",
                droidbridge_egl_get_loaded_name(), eglGetPlatformDisplay_p, eglQueryString_p);

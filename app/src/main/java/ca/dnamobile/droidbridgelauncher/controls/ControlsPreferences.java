@@ -30,6 +30,7 @@ public final class ControlsPreferences {
     private static final String KEY_SELECTED_LAYOUT = "selected_layout";
     private static final String KEY_OPACITY = "opacity";
     private static final String KEY_GLOBAL_BUTTON_SCALE_PERCENT = "global_button_scale_percent";
+    private static final String KEY_DUAL_SCREEN_BUTTON_SCALE_PERCENT = "dual_screen_button_scale_percent";
     private static final String KEY_EDIT_GRID = "edit_grid";
     private static final String KEY_SNAP_CONTROLS = "snap_controls";
     private static final String KEY_SIZE_PREVIEW_PERCENT = "size_preview_percent";
@@ -78,6 +79,10 @@ public final class ControlsPreferences {
     public static final int MIN_GLOBAL_BUTTON_SCALE_PERCENT = 50;
     public static final int MAX_GLOBAL_BUTTON_SCALE_PERCENT = 200;
     public static final int DEFAULT_GLOBAL_BUTTON_SCALE_PERCENT = 100;
+
+    public static final int MIN_DUAL_SCREEN_BUTTON_SCALE_PERCENT = 75;
+    public static final int MAX_DUAL_SCREEN_BUTTON_SCALE_PERCENT = 300;
+    public static final int DEFAULT_DUAL_SCREEN_BUTTON_SCALE_PERCENT = 100;
 
     private ControlsPreferences() {
     }
@@ -133,6 +138,28 @@ public final class ControlsPreferences {
                         percent,
                         MIN_GLOBAL_BUTTON_SCALE_PERCENT,
                         MAX_GLOBAL_BUTTON_SCALE_PERCENT
+                ))
+                .apply();
+    }
+
+    /** Additional scale applied only while the touch overlay is hosted on the bottom screen. */
+    public static int getDualScreenButtonScalePercent(@NonNull Context context) {
+        return clampInt(
+                prefs(context).getInt(
+                        KEY_DUAL_SCREEN_BUTTON_SCALE_PERCENT,
+                        DEFAULT_DUAL_SCREEN_BUTTON_SCALE_PERCENT
+                ),
+                MIN_DUAL_SCREEN_BUTTON_SCALE_PERCENT,
+                MAX_DUAL_SCREEN_BUTTON_SCALE_PERCENT
+        );
+    }
+
+    public static void setDualScreenButtonScalePercent(@NonNull Context context, int percent) {
+        prefs(context).edit()
+                .putInt(KEY_DUAL_SCREEN_BUTTON_SCALE_PERCENT, clampInt(
+                        percent,
+                        MIN_DUAL_SCREEN_BUTTON_SCALE_PERCENT,
+                        MAX_DUAL_SCREEN_BUTTON_SCALE_PERCENT
                 ))
                 .apply();
     }

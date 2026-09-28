@@ -27,6 +27,8 @@ import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 import androidx.core.content.FileProvider;
 
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
+
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
@@ -40,6 +42,7 @@ import ca.dnamobile.droidbridgelauncher.R;
 import ca.dnamobile.droidbridgelauncher.feature.log.Logging;
 import ca.dnamobile.droidbridgelauncher.utils.path.PathManager;
 import ca.dnamobile.droidbridgelauncher.runtime.Logger;
+import ca.dnamobile.droidbridgelauncher.settings.LauncherPreferences;
 
 public final class LauncherLogManager {
     private static final String TAG = "LauncherLogManager";
@@ -47,7 +50,6 @@ public final class LauncherLogManager {
     private static final String KEY_KEEP_LOG_HISTORY = "keep_log_history";
     private static final String KEY_LAST_LATEST_LOG_PATH = "last_latest_log_path";
     private static final long MAX_IN_MEMORY_LOG_BYTES = 12L * 1024L * 1024L;
-    private static final long MAX_HTML_PREVIEW_BYTES = 4L * 1024L * 1024L;
 
     private static boolean nativeLogStarted = false;
     @Nullable
@@ -203,6 +205,53 @@ public final class LauncherLogManager {
         }
     }
 
+    /**
+     * Main launcher Share Logs action.
+     *
+     * By default this presents a small in-app chooser for latestlog.txt vs launcherlogs.txt.
+     * Users can disable that chooser in Launcher Settings; when disabled this goes straight
+     * to sharing latestlog.txt.
+     */
+    public static void shareLogs(@NonNull Activity activity) {
+        if (!LauncherPreferences.isShareLogChooserEnabled(activity)) {
+            shareLatestLog(activity);
+            return;
+        }
+
+        /*
+         * Always create/show the source picker on the Activity UI thread.
+         * This keeps the in-app source selection separate from Android's
+         * ACTION_SEND chooser that appears after a log source is selected.
+         */
+        activity.runOnUiThread(() -> {
+            if (activity.isFinishing()
+                    || (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1
+                    && activity.isDestroyed())) {
+                return;
+            }
+
+            new MaterialAlertDialogBuilder(activity)
+                    .setTitle(R.string.share_logs_dialog_title)
+                    .setItems(
+                            new CharSequence[]{
+                                    activity.getString(R.string.share_logs_latest_option),
+                                    activity.getString(R.string.share_logs_launcher_option)
+                            },
+                            (dialog, which) -> {
+                                dialog.dismiss();
+
+                                if (which == 0) {
+                                    shareLatestLog(activity);
+                                } else if (which == 1) {
+                                    LauncherDiagnosticLog.share(activity);
+                                }
+                            }
+                    )
+                    .setNegativeButton(android.R.string.cancel, null)
+                    .show();
+        });
+    }
+
     public static void shareLatestLog(@NonNull Activity activity) {
         cleanLatestLogInPlace(activity);
 
@@ -215,145 +264,91 @@ public final class LauncherLogManager {
         rememberLatestLogPath(activity, latest);
 
         File shareDir = new File(activity.getCacheDir(), "shared_logs");
-        File shareTextFile = new File(shareDir, "latestlog.txt");
-        File chromeHtmlFile = new File(shareDir, "latestlog.html");
+        File shareFile = new File(shareDir, "latestlog.txt");
 
         try {
-            copyFile(latest, shareTextFile);
-            writeChromeHtmlPreview(shareTextFile, chromeHtmlFile);
-            shareTextFile.setReadable(true, false);
-            chromeHtmlFile.setReadable(true, false);
-            openOrShareTextFile(activity, shareTextFile, chromeHtmlFile);
-            return;
-        } catch (Throwable throwable) {
-            Logging.e(TAG, "Failed to share cached latestlog.txt", throwable);
-        }
-
-        try {
-            openOrShareTextFile(activity, latest, null);
+            copyFile(latest, shareFile);
+            shareFile.setReadable(true, false);
+            shareTextAttachment(
+                    activity,
+                    shareFile,
+                    "latestlog.txt",
+                    "DroidBridge latestlog.txt",
+                    activity.getString(R.string.share_logs_android_chooser_title)
+            );
         } catch (Throwable throwable) {
             Logging.e(TAG, "Failed to share latestlog.txt", throwable);
-            Toast.makeText(activity, throwable.getMessage(), Toast.LENGTH_LONG).show();
+            String message = throwable.getMessage();
+            Toast.makeText(
+                    activity,
+                    message != null && !message.trim().isEmpty()
+                            ? message
+                            : activity.getString(R.string.share_logs_share_failed),
+                    Toast.LENGTH_LONG
+            ).show();
         }
     }
 
-    private static void openOrShareTextFile(
+    /**
+     * Shares an actual text file using ACTION_SEND as the primary intent.
+     *
+     * The previous latestlog path used ACTION_VIEW as the chooser's primary intent and
+     * inserted ACTION_SEND only as an EXTRA_INITIAL_INTENTS entry. Android therefore
+     * populated the chooser with file viewers rather than normal share targets on some
+     * devices, which could hide Quick Share and Discord. This method deliberately uses
+     * ACTION_SEND + EXTRA_STREAM + ClipData + URI grants so Android shows the standard
+     * share sheet and receiving apps can read the FileProvider URI.
+     */
+    public static void shareTextAttachment(
             @NonNull Activity activity,
-            @NonNull File textFile,
-            @Nullable File htmlPreviewFile
+            @NonNull File file,
+            @NonNull String displayName,
+            @NonNull String subject,
+            @NonNull String chooserTitle
     ) {
-        Uri textUri = FileProvider.getUriForFile(
+        Uri uri = FileProvider.getUriForFile(
                 activity,
                 activity.getPackageName() + ".fileprovider",
-                textFile
+                file
         );
 
-        Intent sendIntent = buildSendIntent(activity, textUri);
+        Intent sendIntent = new Intent(Intent.ACTION_SEND);
+        sendIntent.setType("text/plain");
+        sendIntent.putExtra(Intent.EXTRA_STREAM, uri);
+        sendIntent.putExtra(Intent.EXTRA_SUBJECT, subject);
+        // Do not set EXTRA_TEXT here. Quick Share and some OEM share targets prefer
+        // EXTRA_TEXT over EXTRA_STREAM when both are present, which turns this into a
+        // text share (for example "DroidBridge latestlog.txt") instead of a file share.
+        sendIntent.setClipData(
+                ClipData.newUri(activity.getContentResolver(), displayName, uri)
+        );
+        sendIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
 
-        Intent primaryIntent;
-        if (htmlPreviewFile != null && htmlPreviewFile.isFile()) {
-            Uri htmlUri = FileProvider.getUriForFile(
-                    activity,
-                    activity.getPackageName() + ".fileprovider",
-                    htmlPreviewFile
-            );
-            primaryIntent = buildViewIntent(activity, htmlUri, "text/html", "latestlog.html");
-        } else {
-            primaryIntent = buildViewIntent(activity, textUri, "text/plain", "latestlog.txt");
-        }
-
-        Intent chooser = Intent.createChooser(primaryIntent, activity.getString(R.string.button_share_latest_log));
-        chooser.putExtra(Intent.EXTRA_INITIAL_INTENTS, new Intent[]{sendIntent});
-        chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-
+        // Some OEM share sheets and older target apps inspect explicit grants instead of
+        // inheriting only the chooser flag. Grant each resolved receiver read access too.
         try {
-            activity.startActivity(chooser);
-        } catch (ActivityNotFoundException throwable) {
-            activity.startActivity(Intent.createChooser(sendIntent, activity.getString(R.string.button_share_latest_log)));
-        }
-    }
-
-    @NonNull
-    private static Intent buildSendIntent(@NonNull Activity activity, @NonNull Uri textUri) {
-        Intent intent = new Intent(Intent.ACTION_SEND);
-        intent.setType("text/plain");
-        intent.putExtra(Intent.EXTRA_STREAM, textUri);
-        intent.putExtra(Intent.EXTRA_SUBJECT, "DroidBridge latestlog.txt");
-        intent.putExtra(Intent.EXTRA_TEXT, "DroidBridge latestlog.txt");
-        intent.setClipData(ClipData.newUri(activity.getContentResolver(), "latestlog.txt", textUri));
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        return intent;
-    }
-
-    @NonNull
-    private static Intent buildViewIntent(
-            @NonNull Activity activity,
-            @NonNull Uri uri,
-            @NonNull String mimeType,
-            @NonNull String label
-    ) {
-        Intent intent = new Intent(Intent.ACTION_VIEW);
-        intent.setDataAndType(uri, mimeType);
-        intent.setClipData(ClipData.newUri(activity.getContentResolver(), label, uri));
-        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-        return intent;
-    }
-
-    private static void writeChromeHtmlPreview(@NonNull File textFile, @NonNull File htmlFile) throws Exception {
-        File parent = htmlFile.getParentFile();
-        if (parent != null && !parent.exists()) parent.mkdirs();
-
-        String text = textFile.length() > MAX_HTML_PREVIEW_BYTES
-                ? readTailTextFile(textFile, MAX_HTML_PREVIEW_BYTES)
-                : readTextFile(textFile);
-        String prefix = textFile.length() > MAX_HTML_PREVIEW_BYTES
-                ? "[DroidBridge latestlog.txt is very large: " + textFile.length() + " bytes. Showing the tail only.]\n\n"
-                : "";
-        String html = "<!doctype html>\n"
-                + "<html><head><meta charset=\"utf-8\">"
-                + "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
-                + "<title>DroidBridge latestlog.txt</title>"
-                + "<style>"
-                + "body{margin:0;padding:16px;background:#111;color:#eee;font-family:monospace;font-size:13px;line-height:1.35;}"
-                + "pre{white-space:pre-wrap;word-wrap:break-word;margin:0;}"
-                + "</style></head><body><pre>"
-                + escapeHtml(prefix + text)
-                + "</pre></body></html>\n";
-
-        try (FileOutputStream out = new FileOutputStream(htmlFile, false)) {
-            out.write(html.getBytes(StandardCharsets.UTF_8));
-        }
-    }
-
-    @NonNull
-    private static String escapeHtml(@Nullable String text) {
-        if (text == null || text.isEmpty()) return "";
-
-        StringBuilder builder = new StringBuilder(text.length());
-        for (int i = 0; i < text.length(); i++) {
-            char c = text.charAt(i);
-            switch (c) {
-                case '&':
-                    builder.append("&amp;");
-                    break;
-                case '<':
-                    builder.append("&lt;");
-                    break;
-                case '>':
-                    builder.append("&gt;");
-                    break;
-                case '"':
-                    builder.append("&quot;");
-                    break;
-                case '\'':
-                    builder.append("&#39;");
-                    break;
-                default:
-                    builder.append(c);
-                    break;
+            java.util.List<android.content.pm.ResolveInfo> receivers =
+                    activity.getPackageManager().queryIntentActivities(
+                            sendIntent,
+                            android.content.pm.PackageManager.MATCH_DEFAULT_ONLY
+                    );
+            for (android.content.pm.ResolveInfo receiver : receivers) {
+                if (receiver == null || receiver.activityInfo == null) continue;
+                String packageName = receiver.activityInfo.packageName;
+                if (packageName == null || packageName.trim().isEmpty()) continue;
+                activity.grantUriPermission(
+                        packageName,
+                        uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION
+                );
             }
+        } catch (Throwable ignored) {
+            // FLAG_GRANT_READ_URI_PERMISSION + ClipData remain the standard fallback.
         }
-        return builder.toString();
+
+        Intent chooser = Intent.createChooser(sendIntent, chooserTitle);
+        chooser.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        activity.startActivity(chooser);
     }
 
     @NonNull

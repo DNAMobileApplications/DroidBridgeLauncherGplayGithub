@@ -55,7 +55,12 @@ LOCAL_PATH := $(HERE_PATH)
 include $(CLEAR_VARS)
 LOCAL_LDLIBS := -ldl -llog -landroid -lEGL -lGLESv2
 LOCAL_MODULE := droidbridge_runtime
-LOCAL_SHARED_LIBRARIES := driver_helper droidbridge_verity_sherpa_onnx_jni
+# v10: Do not link against the legacy prebuilt jniLibs/libdriver_helper.so.
+# That binary predates Kopper namespace readiness and can silently override the
+# source-built helper during Gradle packaging.  Use a DroidBridge-unique SONAME
+# so libdroidbridge_runtime is guaranteed to bind to the helper built from the
+# source below.
+LOCAL_SHARED_LIBRARIES := droidbridge_driver_helper droidbridge_verity_sherpa_onnx_jni
 # Preserve the explicit DT_NEEDED entry even though droidbridge_runtime does not
 # call Sherpa symbols directly. This makes Gradle copy the prebuilt into the APK.
 LOCAL_LDFLAGS += -Wl,--no-as-needed
@@ -151,7 +156,8 @@ include $(BUILD_SHARED_LIBRARY)
 
 include $(CLEAR_VARS)
 LOCAL_LDLIBS := -ldl -llog -landroid -lEGL -lGLESv2
-LOCAL_MODULE := driver_helper
+LOCAL_MODULE := droidbridge_driver_helper
+LOCAL_MODULE_FILENAME := libdroidbridge_driver_helper
 # Enable Android linker namespace loading for Mesa/Freedreno KGSL. This is the
 # key requirement for the working log: "Loaded EGL libEGL_mesa.so (in namespace: 1)".
 LOCAL_CFLAGS += -DADRENO_POSSIBLE
@@ -434,4 +440,3 @@ LOCAL_SRC_FILES := droidbridge_libhardware_compat.cpp
 LOCAL_LDLIBS := -ldl -llog
 LOCAL_LDFLAGS += -Wl,-soname,libhardware.so
 include $(BUILD_SHARED_LIBRARY)
-

@@ -24,7 +24,7 @@
             android:layout_marginBottom="12dp"
             app:cardBackgroundColor="?attr/colorSurface"
             app:cardCornerRadius="20dp"
-            app:cardElevation="3dp"
+            app:cardElevation="0dp"
             app:cardUseCompatPadding="false"
             app:strokeColor="?attr/colorOutlineVariant"
             app:strokeWidth="1dp">
@@ -43,6 +43,10 @@
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonBackToInstance"
                 style="@style/Widget.Material3.Button.OutlinedButton"
+                android:elevation="0dp"
+                android:stateListAnimator="@null"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
                 android:layout_width="46dp"
                 android:layout_height="44dp"
                 android:contentDescription="@string/content_browser_back_to_instance"
@@ -98,6 +102,10 @@
                     <com.google.android.material.button.MaterialButton
                         android:id="@+id/buttonContentBrowserVersionLock"
                         style="@style/Widget.Material3.Button.OutlinedButton"
+                        android:elevation="0dp"
+                        android:stateListAnimator="@null"
+                        android:insetTop="0dp"
+                        android:insetBottom="0dp"
                         android:layout_width="36dp"
                         android:layout_height="36dp"
                         android:layout_marginStart="6dp"
@@ -122,9 +130,13 @@
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/buttonSourceModrinth"
                     style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:elevation="0dp"
+                    android:stateListAnimator="@null"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
                     android:layout_width="wrap_content"
-                    android:layout_height="42dp"
-                    android:minHeight="42dp"
+                    android:layout_height="wrap_content"
+                    android:minHeight="44dp"
                     android:minWidth="0dp"
                     android:paddingStart="14dp"
                     android:paddingEnd="14dp"
@@ -133,9 +145,13 @@
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/buttonSourceCurseForge"
                     style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:elevation="0dp"
+                    android:stateListAnimator="@null"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
                     android:layout_width="wrap_content"
-                    android:layout_height="42dp"
-                    android:minHeight="42dp"
+                    android:layout_height="wrap_content"
+                    android:minHeight="44dp"
                     android:minWidth="0dp"
                     android:paddingStart="14dp"
                     android:paddingEnd="14dp"
@@ -219,6 +235,55 @@
         </LinearLayout>
 
         <LinearLayout
+            android:id="@+id/layoutModpackBrowseModeTabs"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="10dp"
+            android:visibility="gone">
+
+            <com.google.android.material.button.MaterialButtonToggleGroup
+                android:id="@+id/toggleModpackBrowseMode"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                app:selectionRequired="true"
+                app:singleSelection="true">
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonModpackAll"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:elevation="0dp"
+                    android:stateListAnimator="@null"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:minWidth="0dp"
+                    android:minHeight="44dp"
+                    android:text="@string/content_browser_modpack_all" />
+
+                <com.google.android.material.button.MaterialButton
+                    android:id="@+id/buttonModpackFavourites"
+                    style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:elevation="0dp"
+                    android:stateListAnimator="@null"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
+                    android:layout_width="0dp"
+                    android:layout_height="44dp"
+                    android:layout_weight="1"
+                    android:ellipsize="end"
+                    android:maxLines="1"
+                    android:minWidth="0dp"
+                    android:minHeight="44dp"
+                    android:text="@string/content_browser_modpack_favourites"
+                    app:icon="@drawable/ic_favorite_24" />
+            </com.google.android.material.button.MaterialButtonToggleGroup>
+        </LinearLayout>
+
+        <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
@@ -245,6 +310,10 @@
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonSortContent"
                 style="@style/Widget.Material3.Button.OutlinedButton"
+                android:elevation="0dp"
+                android:stateListAnimator="@null"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
                 android:layout_width="wrap_content"
                 android:layout_height="44dp"
                 android:minHeight="44dp"
@@ -252,24 +321,6 @@
                 android:paddingStart="14dp"
                 android:paddingEnd="14dp"
                 android:text="@string/content_browser_sort_downloads"
-                app:icon="@drawable/ic_expand_more_24"
-                app:iconGravity="textEnd" 
-                android:textColor="?attr/colorOnSurface"
-                app:backgroundTint="?attr/colorSurface"
-                app:iconTint="?attr/colorOnSurfaceVariant"
-                app:strokeColor="?attr/colorOutline"/>
-
-            <com.google.android.material.button.MaterialButton
-                android:id="@+id/buttonViewCount"
-                style="@style/Widget.Material3.Button.OutlinedButton"
-                android:layout_width="wrap_content"
-                android:layout_height="44dp"
-                android:layout_marginStart="10dp"
-                android:minHeight="44dp"
-                android:minWidth="0dp"
-                android:paddingStart="14dp"
-                android:paddingEnd="14dp"
-                android:text="@string/content_browser_view_count"
                 app:icon="@drawable/ic_expand_more_24"
                 app:iconGravity="textEnd" 
                 android:textColor="?attr/colorOnSurface"
@@ -292,6 +343,10 @@
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/buttonPagePreviousTop"
                     style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:elevation="0dp"
+                    android:stateListAnimator="@null"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
                     android:layout_width="46dp"
                     android:layout_height="42dp"
                     android:contentDescription="@string/content_browser_previous_page"
@@ -320,6 +375,10 @@
                 <com.google.android.material.button.MaterialButton
                     android:id="@+id/buttonPageNextTop"
                     style="@style/Widget.Material3.Button.OutlinedButton"
+                    android:elevation="0dp"
+                    android:stateListAnimator="@null"
+                    android:insetTop="0dp"
+                    android:insetBottom="0dp"
                     android:layout_width="46dp"
                     android:layout_height="42dp"
                     android:contentDescription="@string/content_browser_next_page"
@@ -416,6 +475,10 @@
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonPagePreviousBottom"
                 style="@style/Widget.Material3.Button.OutlinedButton"
+                android:elevation="0dp"
+                android:stateListAnimator="@null"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
                 android:layout_width="48dp"
                 android:layout_height="44dp"
                 android:contentDescription="@string/content_browser_previous_page"
@@ -444,6 +507,10 @@
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/buttonPageNextBottom"
                 style="@style/Widget.Material3.Button.OutlinedButton"
+                android:elevation="0dp"
+                android:stateListAnimator="@null"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
                 android:layout_width="48dp"
                 android:layout_height="44dp"
                 android:contentDescription="@string/content_browser_next_page"

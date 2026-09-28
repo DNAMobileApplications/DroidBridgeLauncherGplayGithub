@@ -56,6 +56,21 @@ public final class ModpackExportManager {
     private static final String VULKAN_SHIELD_FALLBACK_PACK_FOLDER = "DroidBridge-Vulkan-Shield-Fallback";
     private static final String VULKAN_SHIELD_FALLBACK_PACK_ID = "file/" + VULKAN_SHIELD_FALLBACK_PACK_FOLDER;
     private static final String[] ROOT_SHADER_CONFIGURATION_FILES = {"shaderpack.txt", "optionsshaders.txt"};
+    /**
+     * Modpack behaviour/configuration folders are part of the instance, not optional
+     * cosmetic content. Always keep them with an export so edited mod settings are not
+     * silently lost. Worlds remain opt-in separately below.
+     */
+    private static final String[] REQUIRED_CONFIGURATION_FOLDERS = {
+            "config", "defaultconfigs", "kubejs", "scripts"
+    };
+    /** Additional well-known folders used by mods/loaders to ship pack configuration. */
+    private static final String[] SUPPLEMENTAL_CONFIGURATION_FOLDERS = {
+            "openloader", "global_packs", "paxi", "patchouli_books", "resources"
+    };
+    private static final String[] ROOT_CONFIGURATION_EXTENSIONS = {
+            ".cfg", ".conf", ".config", ".json", ".json5", ".toml", ".properties", ".yaml", ".yml"
+    };
 
     public enum Platform {
         MODRINTH,
@@ -239,7 +254,7 @@ public final class ModpackExportManager {
             @NonNull ExportOptions options,
             @NonNull Listener listener
     ) throws Exception {
-        ArrayList<FileRecord> records = collectContentRecords(gameDirectory, options);
+        ArrayList<FileRecord> records = collectContentRecords(gameDirectory, minecraftVersion, options);
         ArrayList<String> warnings = new ArrayList<>();
 
         JSONObject index = new JSONObject();
@@ -309,7 +324,7 @@ public final class ModpackExportManager {
             @NonNull ExportOptions options,
             @NonNull Listener listener
     ) throws Exception {
-        ArrayList<FileRecord> records = collectContentRecords(gameDirectory, options);
+        ArrayList<FileRecord> records = collectContentRecords(gameDirectory, minecraftVersion, options);
         ArrayList<String> warnings = new ArrayList<>();
         Set<String> addedProjectIds = new HashSet<>();
 
@@ -383,12 +398,17 @@ public final class ModpackExportManager {
                 addFileOrDirectoryToZip(zip, source, ".minecraft/" + source.getName());
             }
 
+            addRootConfigurationFiles(zip, gameDirectory, ".minecraft/");
             addRootShaderConfigurationFiles(zip, gameDirectory, ".minecraft/", options.includeShaderPacks);
 
             File optionsFile = new File(gameDirectory, "options.txt");
             if (options.includeOptionsTxt && optionsFile.isFile()) {
                 addOptionsFileToZip(zip, optionsFile, ".minecraft/options.txt");
                 warnings.add("options.txt was included for private sharing. Remove it before sharing if it contains personal settings you do not want to ship.");
+            }
+            File optifineOptions = new File(gameDirectory, "optionsof.txt");
+            if (options.includeOptionsTxt && optifineOptions.isFile()) {
+                addFileToZip(zip, optifineOptions, ".minecraft/optionsof.txt");
             }
             if (options.includeSaves && new File(gameDirectory, "saves").isDirectory()) {
                 warnings.add("saves folder was included for private sharing. Remove it before sharing if you do not want to ship worlds.");
@@ -406,11 +426,27 @@ public final class ModpackExportManager {
     }
 
     @NonNull
-    private static ArrayList<FileRecord> collectContentRecords(@NonNull File gameDirectory, @NonNull ExportOptions options) {
+    private static ArrayList<FileRecord> collectContentRecords(
+            @NonNull File gameDirectory,
+            @Nullable String minecraftVersion,
+            @NonNull ExportOptions options
+    ) {
         ArrayList<FileRecord> out = new ArrayList<>();
-        if (options.includeMods) collectFolderRecords(gameDirectory, ModManagerContentType.MODS, "mods", out);
-        if (options.includeResourcePacks) collectFolderRecords(gameDirectory, ModManagerContentType.RESOURCEPACKS, "resourcepacks", out);
-        if (options.includeShaderPacks) collectFolderRecords(gameDirectory, ModManagerContentType.SHADERPACKS, "shaderpacks", out);
+        if (options.includeMods) collectFolderRecords(gameDirectory, ModManagerContentType.MODS, "mods", out, false);
+        if (options.includeResourcePacks) {
+            // 1.5.2 and older use texturepacks. Keep the real on-disk folder name in
+            // the export; also preserve a second pack folder if a migrated instance
+            // happens to contain both.
+            String preferred = ModManagerContentType.getResourcePackFolderName(minecraftVersion);
+            collectFolderRecords(gameDirectory, ModManagerContentType.RESOURCEPACKS, preferred, out,
+                    "texturepacks".equals(preferred));
+            String alternate = "texturepacks".equals(preferred) ? "resourcepacks" : "texturepacks";
+            if (new File(gameDirectory, alternate).isDirectory()) {
+                collectFolderRecords(gameDirectory, ModManagerContentType.RESOURCEPACKS, alternate, out,
+                        "texturepacks".equals(alternate));
+            }
+        }
+        if (options.includeShaderPacks) collectFolderRecords(gameDirectory, ModManagerContentType.SHADERPACKS, "shaderpacks", out, false);
         return out;
     }
 
@@ -418,7 +454,8 @@ public final class ModpackExportManager {
             @NonNull File gameDirectory,
             @NonNull ModManagerContentType type,
             @NonNull String folder,
-            @NonNull ArrayList<FileRecord> out
+            @NonNull ArrayList<FileRecord> out,
+            boolean forceOverride
     ) {
         File directory = new File(gameDirectory, folder);
         File[] files = directory.listFiles();
@@ -433,12 +470,14 @@ public final class ModpackExportManager {
 
             String relativePath = folder + "/" + file.getName();
             JSONObject entry = null;
-            try {
-                entry = ModManagerManifest.getInstalledEntryForFile(gameDirectory, type, file);
-            } catch (Throwable ignored) {
-            }
-            if (entry == null) {
-                entry = findDroidBridgeInstalledContentEntry(gameDirectory, file, relativePath);
+            if (!forceOverride) {
+                try {
+                    entry = ModManagerManifest.getInstalledEntryForFile(gameDirectory, type, file);
+                } catch (Throwable ignored) {
+                }
+                if (entry == null) {
+                    entry = findDroidBridgeInstalledContentEntry(gameDirectory, file, relativePath);
+                }
             }
             out.add(FileRecord.fromEntry(file, relativePath, entry));
         }
@@ -509,10 +548,11 @@ public final class ModpackExportManager {
             @NonNull ArrayList<String> warnings,
             @NonNull ExportOptions options
     ) throws Exception {
-        addOverrideFolderIfSelected(zip, gameDirectory, "config", options.includeConfig);
-        addOverrideFolderIfSelected(zip, gameDirectory, "defaultconfigs", options.includeDefaultConfigs);
-        addOverrideFolderIfSelected(zip, gameDirectory, "kubejs", options.includeKubeJs);
-        addOverrideFolderIfSelected(zip, gameDirectory, "scripts", options.includeScripts);
+        // Mod configuration is part of the pack. Do not let a config checkbox or an
+        // older caller accidentally strip edited settings from an exported instance.
+        addRequiredConfigurationFolders(zip, gameDirectory, "overrides/");
+        addRootConfigurationFiles(zip, gameDirectory, "overrides/");
+
         addOverrideFolderIfSelected(zip, gameDirectory, "saves", options.includeSaves);
         if (options.includeSaves && new File(gameDirectory, "saves").isDirectory()) {
             warnings.add("saves folder was included for private sharing. Remove it before publishing unless you intentionally want to ship worlds.");
@@ -525,6 +565,57 @@ public final class ModpackExportManager {
             addOptionsFileToZip(zip, optionsFile, "overrides/options.txt");
             warnings.add("options.txt was included for private sharing. Remove it before publishing if it contains personal settings you do not want to ship.");
         }
+        File optifineOptions = new File(gameDirectory, "optionsof.txt");
+        if (options.includeOptionsTxt && optifineOptions.isFile()) {
+            addFileToZip(zip, optifineOptions, "overrides/optionsof.txt");
+        }
+    }
+
+    private static void addRequiredConfigurationFolders(
+            @NonNull ZipOutputStream zip,
+            @NonNull File gameDirectory,
+            @NonNull String zipPrefix
+    ) throws Exception {
+        for (String folder : REQUIRED_CONFIGURATION_FOLDERS) {
+            File source = new File(gameDirectory, folder);
+            if (source.exists()) addFileOrDirectoryToZip(zip, source, zipPrefix + folder);
+        }
+        for (String folder : SUPPLEMENTAL_CONFIGURATION_FOLDERS) {
+            File source = new File(gameDirectory, folder);
+            if (source.exists()) addFileOrDirectoryToZip(zip, source, zipPrefix + folder);
+        }
+    }
+
+    /**
+     * Some older mods/loaders put configuration directly in the game root instead
+     * of config/. Preserve those files, but intentionally avoid broad .txt/.dat files
+     * that can contain player/server history or unrelated launcher state.
+     */
+    private static void addRootConfigurationFiles(
+            @NonNull ZipOutputStream zip,
+            @NonNull File gameDirectory,
+            @NonNull String zipPrefix
+    ) throws Exception {
+        File[] files = gameDirectory.listFiles();
+        if (files == null) return;
+        for (File source : files) {
+            if (!source.isFile() || source.isHidden()) continue;
+            String lower = source.getName().toLowerCase(Locale.US);
+            if (!hasAnySuffix(lower, ROOT_CONFIGURATION_EXTENSIONS)) continue;
+            if ("launcher_profiles.json".equals(lower)
+                    || "launcher_accounts.json".equals(lower)
+                    || "usercache.json".equals(lower)) {
+                continue;
+            }
+            addFileToZip(zip, source, zipPrefix + source.getName());
+        }
+    }
+
+    private static boolean hasAnySuffix(@NonNull String value, @NonNull String[] suffixes) {
+        for (String suffix : suffixes) {
+            if (value.endsWith(suffix)) return true;
+        }
+        return false;
     }
 
     private static void addRootShaderConfigurationFiles(
@@ -634,11 +725,10 @@ public final class ModpackExportManager {
         ArrayList<File> out = new ArrayList<>();
         addExportRootIfSelected(out, gameDirectory, "mods", options.includeMods);
         addExportRootIfSelected(out, gameDirectory, "resourcepacks", options.includeResourcePacks);
+        addExportRootIfSelected(out, gameDirectory, "texturepacks", options.includeResourcePacks);
         addExportRootIfSelected(out, gameDirectory, "shaderpacks", options.includeShaderPacks);
-        addExportRootIfSelected(out, gameDirectory, "config", options.includeConfig);
-        addExportRootIfSelected(out, gameDirectory, "defaultconfigs", options.includeDefaultConfigs);
-        addExportRootIfSelected(out, gameDirectory, "kubejs", options.includeKubeJs);
-        addExportRootIfSelected(out, gameDirectory, "scripts", options.includeScripts);
+        for (String folder : REQUIRED_CONFIGURATION_FOLDERS) addExportRootIfSelected(out, gameDirectory, folder, true);
+        for (String folder : SUPPLEMENTAL_CONFIGURATION_FOLDERS) addExportRootIfSelected(out, gameDirectory, folder, true);
         addExportRootIfSelected(out, gameDirectory, "saves", options.includeSaves);
         return out;
     }
@@ -1274,7 +1364,8 @@ public final class ModpackExportManager {
         File parent = source.getParentFile();
         if (VULKAN_SHIELD_FALLBACK_PACK_FOLDER.equals(source.getName())
                 && parent != null
-                && "resourcepacks".equalsIgnoreCase(parent.getName())) {
+                && ("resourcepacks".equalsIgnoreCase(parent.getName())
+                || "texturepacks".equalsIgnoreCase(parent.getName()))) {
             return;
         }
         if (source.isDirectory()) {

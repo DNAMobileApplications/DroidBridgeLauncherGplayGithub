@@ -13,8 +13,12 @@
 package ca.dnamobile.droidbridgelauncher;
 
 import android.annotation.SuppressLint;
-import android.app.AlertDialog;
+import android.Manifest;
+import androidx.appcompat.app.AlertDialog;
 import android.content.Context;
+import android.content.BroadcastReceiver;
+import android.content.IntentFilter;
+import android.content.pm.PackageManager;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
@@ -24,6 +28,7 @@ import android.media.AudioManager;
 import android.media.AudioFormat;
 import android.media.MediaRecorder;
 import android.media.MediaPlayer;
+import android.media.projection.MediaProjectionManager;
 import android.hardware.display.DisplayManager;
 import android.content.Intent;
 import android.content.pm.ResolveInfo;
@@ -44,6 +49,8 @@ import android.speech.tts.TextToSpeech;
 import android.speech.tts.Voice;
 import android.system.Os;
 import android.view.Display;
+import android.view.DisplayCutout;
+import android.util.DisplayMetrics;
 import android.view.Gravity;
 import android.view.InputDevice;
 import android.view.KeyEvent;
@@ -51,9 +58,14 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.ViewParent;
+import android.view.WindowInsets;
 import android.view.WindowManager;
+import android.widget.AdapterView;
+import android.widget.ArrayAdapter;
+import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.Spinner;
 import android.widget.TextView;
 import android.widget.Toast;
 
@@ -66,7 +78,9 @@ import ca.dnamobile.droidbridgelauncher.controls.ControlsActivity;
 import ca.dnamobile.droidbridgelauncher.controls.InGameControlsEditorDialog;
 import ca.dnamobile.droidbridgelauncher.controls.ControlsPreferences;
 import ca.dnamobile.droidbridgelauncher.controls.GameImeViewportController;
+import ca.dnamobile.droidbridgelauncher.controls.TouchControlsLayoutData;
 import ca.dnamobile.droidbridgelauncher.controls.TouchControlsOverlay;
+import ca.dnamobile.droidbridgelauncher.controls.TouchControlsStore;
 import ca.dnamobile.droidbridgelauncher.data.AccountStore;
 import ca.dnamobile.droidbridgelauncher.fancymenu.MicrosoftAuthConfigPersonal;
 import ca.dnamobile.droidbridgelauncher.fancymenu.MicrosoftAuthManagerPersonal;
@@ -95,6 +109,7 @@ import ca.dnamobile.droidbridgelauncher.modcompat.TouchControllerModCompat;
 import ca.dnamobile.droidbridgelauncher.modcompat.FFmpegPluginCompat;
 import ca.dnamobile.droidbridgelauncher.modcompat.ModPreLaunchWarningManager;
 import ca.dnamobile.droidbridgelauncher.renderer.DriverPluginManager;
+import ca.dnamobile.droidbridgelauncher.renderer.KopperZinkRenderer;
 import ca.dnamobile.droidbridgelauncher.renderer.DroidBridgeMesaSupport;
 import ca.dnamobile.droidbridgelauncher.renderer.BtaRendererPolicy;
 import ca.dnamobile.droidbridgelauncher.renderer.DroidBridgeNativeGlfwKgslRenderer;
@@ -104,6 +119,11 @@ import ca.dnamobile.droidbridgelauncher.renderer.RendererInterface;
 import ca.dnamobile.droidbridgelauncher.renderer.Renderers;
 import ca.dnamobile.droidbridgelauncher.settings.GameResolutionSettings;
 import ca.dnamobile.droidbridgelauncher.settings.LauncherPreferences;
+import ca.dnamobile.droidbridgelauncher.recording.GameRecordingService;
+import ca.dnamobile.droidbridgelauncher.recording.DualScreenRecordingSession;
+import ca.dnamobile.droidbridgelauncher.recording.RecordingPreferences;
+import ca.dnamobile.droidbridgelauncher.recording.RecordingFrameBridge;
+import ca.dnamobile.droidbridgelauncher.recording.PrimaryRecordingFramePump;
 import ca.dnamobile.droidbridgelauncher.security.LauncherSecurity;
 import ca.dnamobile.droidbridgelauncher.utils.AppOrientationHelper;
 import ca.dnamobile.droidbridgelauncher.utils.FullscreenUtils;
@@ -147,6 +167,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicReference;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 
 @SuppressLint("CustomSplashScreen")
@@ -164,6 +185,8 @@ public class GameActivity extends AppCompatActivity {
             "https://github.com/DNAMobileApplications/DroidBridgeLauncherFFMPEG/releases/";
     private static final String VULKAN_EXTENSION_CHECKER_INSTALL_URL =
             "https://drive.google.com/file/d/1Gnpq_ndy3Qz916Y6i9KeA3qaHJKGVsbW/view?usp=sharing";
+    private static final int REQUEST_GAME_RECORDING_CAPTURE = 7410;
+    private static final int REQUEST_GAME_RECORDING_AUDIO_PERMISSION = 7411;
 
     public static final String EXTRA_VERSION_ID = "ca.dnamobile.droidbridgelauncher.extra.VERSION_ID";
     public static final String EXTRA_INSTANCE_SETTINGS_KEY =
@@ -179,11 +202,15 @@ public class GameActivity extends AppCompatActivity {
     private GyroInputController gyroInputController;
     private GameCursorOverlay gameCursorOverlay;
     private TouchControlsOverlay touchControlsOverlay;
+    private int activeInGameMenuShortcutKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+    private int activeInGameMenuShortcutDeviceId = -1;
     @Nullable
     private AccountStore accountStore;
     @Nullable
     private MicrosoftAuthManagerPersonal microsoftAuthManager;
     private String versionId;
+    @NonNull
+    private String compatibilityVersionId = "";
     @NonNull
     private String instanceSettingsKey = "";
     @Nullable
@@ -212,6 +239,7 @@ public class GameActivity extends AppCompatActivity {
     private boolean btaGamepadMapperLogged;
     private long lastLegacy4jFallbackProbeMs;
     private FloatingGameSettingsOverlayController floatingGameSettingsOverlayController;
+    private long androidVirtualMouseUiReleaseSuppressUntilMs;
     @Nullable
     private DualScreenController dualScreenController;
     @Nullable
@@ -220,6 +248,91 @@ public class GameActivity extends AppCompatActivity {
     private AlertDialog inGameControlsDialog;
     @Nullable
     private InGameControlsEditorDialog inGameControlsEditorDialog;
+    private boolean recordingStateReceiverRegistered;
+    private boolean recordingTouchControlsHidden;
+    @Nullable
+    private PrimaryRecordingFramePump primaryRecordingFramePump;
+    private long primaryRecordingFramePumpSessionId;
+    private boolean recordingFrameBridgeReceiverRegistered;
+    private final BroadcastReceiver gameRecordingStateReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent == null || !GameRecordingService.ACTION_STATE.equals(intent.getAction())) return;
+            String state = intent.getStringExtra(GameRecordingService.EXTRA_STATE);
+            String message = intent.getStringExtra(GameRecordingService.EXTRA_MESSAGE);
+            if (GameRecordingService.STATE_STARTED.equals(state)) {
+                applyRecordingTouchControlVisibility(true);
+                if (message != null && !message.trim().isEmpty()) {
+                    Toast.makeText(GameActivity.this, message, Toast.LENGTH_SHORT).show();
+                }
+                return;
+            }
+
+            if (GameRecordingService.STATE_STOPPED.equals(state)
+                    || GameRecordingService.STATE_ERROR.equals(state)) {
+                DualScreenRecordingSession.stopAsync();
+                applyRecordingTouchControlVisibility(false);
+                if (message != null && !message.trim().isEmpty()) {
+                    Toast.makeText(GameActivity.this, message, Toast.LENGTH_LONG).show();
+                }
+            }
+        }
+    };
+    private final BroadcastReceiver recordingFrameBridgeReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            if (intent == null) return;
+            String action = intent.getAction();
+            long sessionId = intent.getLongExtra(
+                    RecordingFrameBridge.EXTRA_SESSION, Long.MIN_VALUE);
+
+            if (RecordingFrameBridge.ACTION_DETACH.equals(action)) {
+                if (sessionId == primaryRecordingFramePumpSessionId) {
+                    stopPrimaryRecordingFramePump();
+                }
+                return;
+            }
+
+            if (!RecordingFrameBridge.ACTION_ATTACH.equals(action)) return;
+
+            android.view.Surface encoderSurface = RecordingFrameBridge.readSurface(intent);
+            int width = intent.getIntExtra(RecordingFrameBridge.EXTRA_WIDTH, 0);
+            int height = intent.getIntExtra(RecordingFrameBridge.EXTRA_HEIGHT, 0);
+            int fps = intent.getIntExtra(RecordingFrameBridge.EXTRA_FPS, 30);
+
+            stopPrimaryRecordingFramePump();
+            boolean success = false;
+            String detail = null;
+            try {
+                if (encoderSurface == null || !encoderSurface.isValid()) {
+                    detail = "Encoder surface is unavailable";
+                } else if (minecraftSurface == null || !minecraftSurface.isRecordingFrameCaptureReady()) {
+                    detail = "Minecraft render surface is not ready";
+                } else {
+                    PrimaryRecordingFramePump pump = new PrimaryRecordingFramePump(
+                            minecraftSurface, encoderSurface, width, height, fps);
+                    success = pump.start();
+                    if (success) {
+                        primaryRecordingFramePump = pump;
+                        primaryRecordingFramePumpSessionId = sessionId;
+                        detail = "Minecraft render-only frame pump attached";
+                    } else {
+                        pump.stop();
+                        detail = "Minecraft render-only frame pump could not start";
+                    }
+                }
+            } catch (Throwable throwable) {
+                detail = throwable.getClass().getSimpleName() + ": " + throwable.getMessage();
+                Logging.e("GameActivity", "Unable to attach clean recording frame pump", throwable);
+                if (encoderSurface != null) {
+                    try { encoderSurface.release(); } catch (Throwable ignored) {}
+                }
+            }
+
+            RecordingFrameBridge.sendAck(
+                    GameActivity.this, sessionId, success, detail);
+        }
+    };
     @Nullable
     private OnBackPressedCallback androidBackPressedCallback;
     private long lastAndroidBackHandledUptimeMs;
@@ -371,13 +484,20 @@ public class GameActivity extends AppCompatActivity {
         if (versionId == null || versionId.trim().isEmpty()) {
             throw new IllegalStateException("No version id was provided to GameActivity.");
         }
-        DroidBridgeSDL3Bootstrap.configure(this, versionId);
         String explicitSettingsKey = getIntent().getStringExtra(EXTRA_INSTANCE_SETTINGS_KEY);
+        compatibilityVersionId = resolveCompatibilityVersionId(versionId, explicitSettingsKey);
+        // Android-side marker used only by the Dual-screen HUD exact-icon bridge. 26.2 now
+        // stays on the proven v9 mailbox transport, but this marker lets the bridge keep the
+        // longer cold-start retry window required by a brand-new 26.2 GuiItemAtlas.
+        System.setProperty("droidbridge.dualscreen.android.mc26_2",
+                "26.2".equalsIgnoreCase(compatibilityVersionId.trim()) ? "true" : "false");
+        DroidBridgeSDL3Bootstrap.configure(this, compatibilityVersionId);
         instanceSettingsKey = InstanceLaunchSettings.resolveInstanceKey(
                 explicitSettingsKey,
                 versionId
         );
         Logging.i("GameActivity", "Launch identity versionId=" + versionId
+                + " compatibilityVersionId=" + compatibilityVersionId
                 + " instanceSettingsKey=" + instanceSettingsKey
                 + " explicit=" + (explicitSettingsKey != null && !explicitSettingsKey.trim().isEmpty()));
 
@@ -418,11 +538,14 @@ public class GameActivity extends AppCompatActivity {
 
         binding = ActivityGameBinding.inflate(getLayoutInflater());
         setContentView(binding.getRoot());
+        registerGameRecordingStateReceiver();
+        registerRecordingFrameBridgeReceiver();
         minecraftSurface = binding.minecraftSurface;
         configureDualScreenController();
         if (dualScreenController != null) {
             dualScreenController.restoreOrEnableInitialMode(false);
         }
+        applyGameSurfaceLayoutMode(minecraftSurface);
         configureActiveMinecraftSurface(minecraftSurface);
         applyGameDisplaySurfaceOptions();
         setupMicrosoftAccountPreflightManager();
@@ -435,7 +558,13 @@ public class GameActivity extends AppCompatActivity {
 
         gamepadInputController = new GamepadInputController(
                 binding.getRoot(),
-                () -> runOnUiThread(this::openInGameButtonOverlay)
+                () -> runOnUiThread(this::openInGameButtonOverlay),
+                delta -> {
+                    DualScreenController controller = dualScreenController;
+                    if (controller != null) {
+                        controller.onMappedHotbarScroll(delta);
+                    }
+                }
         );
         gyroInputController = new GyroInputController(this);
 
@@ -3635,6 +3764,7 @@ public class GameActivity extends AppCompatActivity {
                 }
 
                 applyEarlyFreedrenoVsyncEnvironment();
+                applyEarlyLegacyOptiFineShaderCompatibility(renderer);
                 Logging.i("GameActivity", "Early Freedreno context route="
                         + (modernLwjgl && nativeGlfwAvailable ? "NativeGLFW" : "GLBridge")
                         + " versionId=" + versionId
@@ -3646,6 +3776,7 @@ public class GameActivity extends AppCompatActivity {
             if (DroidBridgeMesaSupport.isMesaZinkTurnipRenderer(renderer)) {
                 applyEarlyMesaZinkTurnipEnvironment(renderer, systemVulkan);
                 applyEarlyVulkanVsyncEnvironment();
+                applyEarlyLegacyOptiFineShaderCompatibility(renderer);
                 Logging.i("GameActivity", "Early renderer env prepared for " + renderer.getRendererName()
                         + " rendererId=vulkan_zink DROIDBRIDGE_EGL=" + DroidBridgeMesaSupport.LIB_EGL_MESA);
                 return;
@@ -3677,6 +3808,7 @@ public class GameActivity extends AppCompatActivity {
             applyEarlyRendererBridgeAliases(renderer, egl);
             configureEarlySdl3WrappedOpenGlEnvironment(renderer);
             applyEarlyVulkanVsyncEnvironment();
+            applyEarlyLegacyOptiFineShaderCompatibility(renderer);
 
             Logging.i("GameActivity", "Early renderer env prepared for " + renderer.getRendererName()
                     + " rendererId=" + resolveBridgeRendererId(renderer)
@@ -3684,6 +3816,55 @@ public class GameActivity extends AppCompatActivity {
         } catch (Throwable throwable) {
             Logging.e("GameActivity", "Failed to prepare early renderer env", throwable);
         }
+    }
+
+    private void applyEarlyLegacyOptiFineShaderCompatibility(@NonNull RendererInterface renderer) {
+        if (!isLegacyOptiFineVersionId(versionId)) return;
+
+        boolean mesaDesktopRenderer = DroidBridgeNativeGlfwKgslRenderer.isRenderer(renderer)
+                || DroidBridgeMesaSupport.isMesaZinkTurnipRenderer(renderer)
+                || DroidBridgeMesaSupport.isPureVulkanZinkRenderer(renderer)
+                || KopperZinkRenderer.isRenderer(renderer);
+        if (!mesaDesktopRenderer) return;
+
+        // This must run before Mesa/libOSMesa/libEGL_mesa is preloaded. Old
+        // OptiFine shader sources carry their own GLSL #version directives; a
+        // global reported-language override can make legacy compatibility code
+        // select behavior intended for newer GLSL versions.
+        setEarlyEnv("DROIDBRIDGE_LEGACY_OPTIFINE_SHADER_COMPAT", "1");
+        setEarlyEnv("DROIDBRIDGE_EGL_FORCE_COMPAT_PROFILE", "1");
+        setEarlyEnv("DROIDBRIDGE_EGL_FORCE_CORE_PROFILE", "");
+        setEarlyEnv("MESA_GL_VERSION_OVERRIDE", "4.6COMPAT");
+        setEarlyEnv("MESA_GLSL_VERSION_OVERRIDE", "");
+        setEarlyEnv("DROIDBRIDGE_PROP_MESA_GL_VERSION_OVERRIDE", "4.6COMPAT");
+        setEarlyEnv("DROIDBRIDGE_PROP_MESA_GLSL_VERSION_OVERRIDE", "");
+        setEarlyEnv("MESA_NO_ERROR", "0");
+        setEarlyEnv("LIBGL_NOERROR", "0");
+        setEarlyEnv("mesa_glthread", "false");
+
+        String message = "Legacy OptiFine shader compatibility prepared before Mesa load"
+                + " version=" + versionId
+                + " renderer=" + renderer.getRendererId()
+                + " gl=4.6COMPAT glslOverride=unset validation=on glthread=off";
+        Logging.i("GameActivity", message);
+        LauncherLogManager.append(message);
+    }
+
+    private static boolean isLegacyOptiFineVersionId(@Nullable String value) {
+        if (value == null) return false;
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        if (!normalized.contains("optifine")) return false;
+
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("(?<!\\d)1\\.(\\d+)(?:\\.(\\d+))?")
+                .matcher(normalized);
+        while (matcher.find()) {
+            try {
+                if (Integer.parseInt(matcher.group(1)) <= 12) return true;
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return false;
     }
 
     private void applyEarlyMobileGluesConfigEnvironment(@NonNull RendererInterface renderer) {
@@ -3710,17 +3891,25 @@ public class GameActivity extends AppCompatActivity {
         try {
             Renderers.reload(this);
             RendererInterface renderer = InstanceLaunchSettings.resolveEffectiveRendererForLaunch(this, versionId, instanceSettingsKey);
-            if (!DroidBridgeMesaSupport.isDroidBridgeMesaRenderer(renderer)) {
+            boolean mesaRenderSpec = DroidBridgeMesaSupport.isDroidBridgeMesaRenderer(renderer);
+            boolean android10ModernWrappedRenderSpec = Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q
+                    && DroidBridgeRenderSpec.isWrappedOpenGlRenderer(renderer)
+                    && isMinecraft26_2OrNewer(compatibilityVersionId);
+            if (!mesaRenderSpec && !android10ModernWrappedRenderSpec) {
                 return;
             }
 
-            boolean configured = DroidBridgeRenderSpec.configureForMesa(this, renderer);
+            boolean configured = DroidBridgeRenderSpec.configureForRenderer(this, renderer);
             Logging.i("GameActivity", "Early DroidBridge RenderSpec configured="
                     + configured
                     + " renderer="
                     + renderer.getRendererName()
                     + " rendererId="
-                    + renderer.getRendererId());
+                    + renderer.getRendererId()
+                    + " wrappedOpenGl="
+                    + DroidBridgeRenderSpec.isWrappedOpenGlRenderer(renderer)
+                    + " android10ModernWrapped="
+                    + android10ModernWrappedRenderSpec);
         } catch (Throwable throwable) {
             Logging.e("GameActivity", "Failed to configure early DroidBridge RenderSpec", throwable);
         }
@@ -3957,6 +4146,7 @@ public class GameActivity extends AppCompatActivity {
         setEarlyEnv("DROIDBRIDGE_SDL3_WRAPPED_OPENGL", "");
         setEarlyEnv("DROIDBRIDGE_SDL3_OPENGL_LIBRARY", "");
         setEarlyEnv("DROIDBRIDGE_SDL3_OPENGL_KIND", "");
+        setEarlyEnv("DROIDBRIDGE_SDL3_DISABLE_PERSISTENT_MAPPING", "");
         DroidBridgeSDL3Bootstrap.clearOpenGlCompatibility();
 
         setEarlyEnv("DROIDBRIDGE_EGL", DroidBridgeMesaSupport.LIB_EGL_MESA);
@@ -4031,13 +4221,22 @@ public class GameActivity extends AppCompatActivity {
         String combined = rendererIdentity(renderer);
 
         if (isLtwRenderer(renderer)) {
+            boolean minecraft26Plus = isMinecraft26OrNewer(compatibilityVersionId);
             setEarlyEnv("DROIDBRIDGE_RENDERER", "opengles3_ltw");
+            setEarlyEnv("POJAV_RENDERER", "opengles3_ltw");
             setEarlyEnv("DROIDBRIDGE_EGL", "libltw.so");
             setEarlyEnv("DROIDBRIDGE_EGL_LIBRARY", "libltw.so");
-            setEarlyEnv("DROIDBRIDGE_EGL_LIBRARY", "libltw.so");
             setEarlyEnv("DROIDBRIDGE_RENDERER_LIBRARY", "libltw.so");
-            setEarlyEnv("DROIDBRIDGE_RENDERER_LIBRARY", "libltw.so");
-            setEarlyEnv("LIBGL_ES", "3");
+            setEarlyEnv("POJAV_RENDERER_LIBRARY", "libltw.so");
+            setEarlyEnv("POJAVEXEC_EGL", "libltw.so");
+            setEarlyEnv("POJAVEXEC_EGL_LIBRARY", "libltw.so");
+            // Minecraft 26+ uses the newer OpenGL backend. Match LTW's current
+            // Android launcher profile there without changing the known-good
+            // pre-26 path used by 1.21.x.
+            setEarlyEnv("LIBGL_ES", minecraft26Plus ? "2" : "3");
+            setEarlyEnv("LIBGL_NOERROR", minecraft26Plus ? "1" : "");
+            setEarlyEnv("LTW_NEVER_FLUSH_BUFFERS", minecraft26Plus ? "1" : "0");
+            setEarlyEnv("LTW_COHERENT_DYNAMIC_STORAGE", minecraft26Plus ? "1" : "0");
             setEarlyEnv("DROIDBRIDGE_USE_SYSTEM_VULKAN", "1");
             setEarlyEnv("DRIVER_PATH", "");
             setEarlyEnv("VK_ICD_FILENAMES", "");
@@ -4047,8 +4246,45 @@ public class GameActivity extends AppCompatActivity {
             setEarlyEnv("OSMESA_LIB", "");
             setEarlyEnv("GALLIUM_DRIVER", "");
             setEarlyEnv("MESA_LOADER_DRIVER_OVERRIDE", "");
-            setEarlyEnv("LTW_NEVER_FLUSH_BUFFERS", "0");
-            setEarlyEnv("LTW_COHERENT_DYNAMIC_STORAGE", "0");
+            Logging.i("GameActivity", "LTW compatibility profile prepared minecraft26Plus="
+                    + minecraft26Plus + " version=" + compatibilityVersionId);
+            return;
+        }
+
+        if (KopperZinkRenderer.isRenderer(renderer)) {
+            setEarlyEnv("DROIDBRIDGE_RENDERER", KopperZinkRenderer.RENDERER_ID);
+            setEarlyEnv("POJAV_RENDERER", KopperZinkRenderer.RENDERER_ID);
+            setEarlyEnv("DROIDBRIDGE_RENDERER_LIBRARY", KopperZinkRenderer.MAIN_LIBRARY);
+            setEarlyEnv("POJAV_RENDERER_LIBRARY", KopperZinkRenderer.MAIN_LIBRARY);
+            setEarlyEnv("DROIDBRIDGE_EGL", KopperZinkRenderer.EGL_LIBRARY);
+            setEarlyEnv("DROIDBRIDGE_EGL_LIBRARY", KopperZinkRenderer.EGL_LIBRARY);
+            setEarlyEnv("POJAVEXEC_EGL", KopperZinkRenderer.EGL_LIBRARY);
+            setEarlyEnv("POJAVEXEC_EGL_LIBRARY", KopperZinkRenderer.EGL_LIBRARY);
+            setEarlyEnv("LIBGL_ES", "3");
+            setEarlyEnv("GALLIUM_DRIVER", "zink");
+            setEarlyEnv("MESA_LOADER_DRIVER_OVERRIDE", "zink");
+            setEarlyEnv("force_gl_vendor", "Mesa/DroidBridge");
+            setEarlyEnv("MESA_ANDROID_NO_KMS_SWRAST", "1");
+            setEarlyEnv("MESA_NO_ERROR", "0");
+            setEarlyEnv("LIBGL_NOERROR", "0");
+            setEarlyEnv("ZINK_DESCRIPTORS", "lazy");
+            setEarlyEnv("ZINK_DEBUG", "compact,noreorder");
+            setEarlyEnv("mesa_glthread", "false");
+            setEarlyEnv("DROIDBRIDGE_EGL_FORCE_RGBX8888", "1");
+            // Kopper must stay on TextureView even if the user enabled the global
+            // native SurfaceView compatibility toggle for another renderer.
+            setEarlyEnv("DROIDBRIDGE_KOPPER_FORCE_TEXTUREVIEW", "1");
+            setEarlyEnv("DROIDBRIDGE_KOPPER_FORCE_NAMESPACE_VULKAN", "1");
+            File kopperVulkanAliasDir = new File(PathManager.DIR_CACHE, "kopper-vulkan-loader");
+            //noinspection ResultOfMethodCallIgnored
+            kopperVulkanAliasDir.mkdirs();
+            setEarlyEnv("DROIDBRIDGE_KOPPER_VULKAN_ALIAS_DIR", kopperVulkanAliasDir.getAbsolutePath());
+            setEarlyEnv("POJAV_ZINK_PREFER_SYSTEM_DRIVER", "");
+            setEarlyEnv("LIB_MESA_NAME", "");
+            setEarlyEnv("OSMESA_LIB", "");
+            setEarlyEnv("DROIDBRIDGE_OSMESA_LIBRARY", "");
+            setEarlyEnv("OSMESA_LIBRARY", "");
+            setEarlyEnv("LIBGL_OSMESA", "");
             return;
         }
 
@@ -4118,7 +4354,7 @@ public class GameActivity extends AppCompatActivity {
     private void configureEarlySdl3WrappedOpenGlEnvironment(
             @NonNull RendererInterface renderer
     ) {
-        if (!DroidBridgeSDL3Bootstrap.requiresAndroidSdlPlatform(versionId)) {
+        if (!DroidBridgeSDL3Bootstrap.requiresAndroidSdlPlatform(compatibilityVersionId)) {
             DroidBridgeSDL3Bootstrap.clearOpenGlCompatibility();
             return;
         }
@@ -4139,6 +4375,9 @@ public class GameActivity extends AppCompatActivity {
         if (isMobileGluesRenderer(renderer)) {
             rendererKind = "mobileglues";
             fallbackNames = new String[] {"libmobileglues.so", "libMobileGlues.so"};
+        } else if (isLtwRenderer(renderer)) {
+            rendererKind = "ltw";
+            fallbackNames = new String[] {"libltw.so"};
         } else if (identity.contains("krypton")
                 || identity.contains("ng_gl4es")
                 || "libng_gl4es.so".equalsIgnoreCase(
@@ -4153,23 +4392,11 @@ public class GameActivity extends AppCompatActivity {
             return;
         }
 
-        // Use a dedicated EGL provider. Pointing SDL at libdroidbridge_runtime.so was
-        // ambiguous because that library is also linked against Android libEGL.so;
-        // depending on the linker namespace SDL could resolve the system exports and
-        // completely bypass the desktop-GL-to-GLES translation shim.
-        File eglProvider = new File(
-                PathManager.DIR_NATIVE_LIB,
-                "libdroidbridge_sdl3_egl.so"
-        );
+        // SDL3 must load DroidBridge's EGL translation provider even for LTW.
+        // LTW remains the wrapped desktop-GL provider, but using libltw.so as
+        // SDL_EGL_LIBRARY makes SDL_GL_LoadLibrary fail on Android. The dedicated
+        // shim owns SDL's EGL-facing API and routes GL proc resolution to LTW.
         File glWrapper = resolveRendererLibraryFile(renderer, fallbackNames);
-
-        if (!eglProvider.isFile()) {
-            DroidBridgeSDL3Bootstrap.clearOpenGlCompatibility();
-            Logging.e("GameActivity", "SDL3 wrapped OpenGL EGL provider is missing: "
-                    + eglProvider.getAbsolutePath()
-                    + "; rebuild the native droidbridge_sdl3_egl module");
-            return;
-        }
 
         String glWrapperPath;
         if (glWrapper != null && glWrapper.isFile()) {
@@ -4184,19 +4411,33 @@ public class GameActivity extends AppCompatActivity {
                     + " searchPaths=" + renderer.getLibrarySearchPaths());
         }
 
+        File eglProvider = new File(
+                PathManager.DIR_NATIVE_LIB,
+                "libdroidbridge_sdl3_egl.so"
+        );
+        if (!eglProvider.isFile()) {
+            DroidBridgeSDL3Bootstrap.clearOpenGlCompatibility();
+            Logging.e("GameActivity", "SDL3 wrapped OpenGL EGL provider is missing: "
+                    + eglProvider.getAbsolutePath()
+                    + "; rebuild the native droidbridge_sdl3_egl module");
+            return;
+        }
+        String eglProviderPath = eglProvider.getAbsolutePath();
+
         setEarlyEnv("SDL_VIDEO_FORCE_EGL", "1");
-        setEarlyEnv("SDL_EGL_LIBRARY", eglProvider.getAbsolutePath());
+        setEarlyEnv("SDL_EGL_LIBRARY", eglProviderPath);
         setEarlyEnv("SDL_OPENGL_LIBRARY", glWrapperPath);
-        setEarlyEnv("SDL_VIDEO_EGL_DRIVER", eglProvider.getAbsolutePath());
+        setEarlyEnv("SDL_VIDEO_EGL_DRIVER", eglProviderPath);
         setEarlyEnv("SDL_VIDEO_GL_DRIVER", glWrapperPath);
         setEarlyEnv("SDL_VIDEO_EGL_ALLOW_GETDISPLAY_FALLBACK", "1");
         setEarlyEnv("DROIDBRIDGE_SDL3_WRAPPED_OPENGL", "1");
         setEarlyEnv("DROIDBRIDGE_SDL3_OPENGL_LIBRARY", glWrapperPath);
         setEarlyEnv("DROIDBRIDGE_SDL3_OPENGL_KIND", rendererKind);
-        // Snapshot 4's immutable persistent-buffer path is not reliable through
-        // GLES-backed desktop wrappers. The native GL capability filter consumes
-        // this before LWJGL creates its GLCapabilities object.
-        setEarlyEnv("DROIDBRIDGE_SDL3_DISABLE_PERSISTENT_MAPPING", "1");
+        // Keep LTW's native persistent-buffer implementation enabled. The 26.3
+        // LTW fix is SDL3 context preservation, matching the working MJ-style
+        // lifecycle rather than hiding GL_ARB_buffer_storage.
+        setEarlyEnv("DROIDBRIDGE_SDL3_DISABLE_PERSISTENT_MAPPING",
+                "ltw".equals(rendererKind) ? "0" : "1");
 
         // Keep the v11/v12 MobileGlues aliases for old source trees and logs.
         if ("mobileglues".equals(rendererKind)) {
@@ -4205,18 +4446,18 @@ public class GameActivity extends AppCompatActivity {
         }
 
         DroidBridgeSDL3Bootstrap.configureOpenGlCompatibility(
-                eglProvider.getAbsolutePath(),
+                eglProviderPath,
                 glWrapperPath,
                 rendererKind
         );
 
         Logging.i("GameActivity", "SDL3 wrapped OpenGL compatibility prepared"
                 + " kind=" + rendererKind
-                + " eglProvider=" + eglProvider.getAbsolutePath()
+                + " eglProvider=" + eglProviderPath
                 + " glLibrary=" + glWrapperPath
                 + " graphicsApi=" + graphicsApi);
         System.err.println("DroidBridgeSDL3EGLSetup: prepared kind=" + rendererKind
-                + " provider=" + eglProvider.getAbsolutePath()
+                + " provider=" + eglProviderPath
                 + " glLibrary=" + glWrapperPath);
     }
 
@@ -4730,6 +4971,11 @@ public class GameActivity extends AppCompatActivity {
 
     private void clearEarlyRendererEnvAliases() {
         setEarlyEnv("DROIDBRIDGE_RENDERER", "");
+        setEarlyEnv("DROIDBRIDGE_LEGACY_OPTIFINE_SHADER_COMPAT", "");
+        setEarlyEnv("POJAV_RENDERER", "");
+        setEarlyEnv("POJAV_RENDERER_LIBRARY", "");
+        setEarlyEnv("POJAVEXEC_EGL", "");
+        setEarlyEnv("POJAVEXEC_EGL_LIBRARY", "");
         setEarlyEnv("DROIDBRIDGE_RENDERER_MESA_MODE", "");
         setEarlyEnv("DROIDBRIDGE_RENDERER_LIBRARY", "");
         setEarlyEnv("DROIDBRIDGE_RENDERER_LIBRARY", "");
@@ -4744,6 +4990,7 @@ public class GameActivity extends AppCompatActivity {
         setEarlyEnv("MESA_LOADER_DRIVER_OVERRIDE", "");
         setEarlyEnv("LIBGL_ES", "");
         setEarlyEnv("DROIDBRIDGE_EGL_FORCE_DESKTOP_GL", "");
+        setEarlyEnv("DROIDBRIDGE_EGL_FORCE_RGBX8888", "");
         setEarlyEnv("DROIDBRIDGE_EGL_NO_SYSTEM_FALLBACK", "");
         setEarlyEnv("DROIDBRIDGE_USE_SYSTEM_VULKAN", "");
         setEarlyEnv("JAVA_LAUNCHER_USE_SYSTEM_VULKAN_DRIVER", "");
@@ -4772,6 +5019,7 @@ public class GameActivity extends AppCompatActivity {
         setEarlyEnv("DROIDBRIDGE_MESA_MODE", "");
         setEarlyEnv("DROIDBRIDGE_MESA_NATIVE_DIR", "");
         setEarlyEnv("DROIDBRIDGE_MESA_ALIAS_DIR", "");
+        setEarlyEnv("DROIDBRIDGE_KOPPER_VULKAN_ALIAS_DIR", "");
         setEarlyEnv("DROIDBRIDGE_MESA_NAMESPACE", "");
         setEarlyEnv("DROIDBRIDGE_MESA_NAMESPACE_PATH", "");
         setEarlyEnv("DROIDBRIDGE_MESA_EGL", "");
@@ -4809,6 +5057,7 @@ public class GameActivity extends AppCompatActivity {
         setEarlyEnv("DROIDBRIDGE_SDL3_WRAPPED_OPENGL", "");
         setEarlyEnv("DROIDBRIDGE_SDL3_OPENGL_LIBRARY", "");
         setEarlyEnv("DROIDBRIDGE_SDL3_OPENGL_KIND", "");
+        setEarlyEnv("DROIDBRIDGE_SDL3_DISABLE_PERSISTENT_MAPPING", "");
         DroidBridgeSDL3Bootstrap.clearOpenGlCompatibility();
     }
 
@@ -4831,6 +5080,10 @@ public class GameActivity extends AppCompatActivity {
 
         if (isLtwRenderer(renderer)) {
             return "libltw.so";
+        }
+
+        if (KopperZinkRenderer.isRenderer(renderer)) {
+            return KopperZinkRenderer.EGL_LIBRARY;
         }
 
         if (isMobileGluesRenderer(renderer)) {
@@ -4888,12 +5141,14 @@ public class GameActivity extends AppCompatActivity {
         setEarlyEnv("DROIDBRIDGE_MESA_EGL", "");
         setEarlyEnv("DROIDBRIDGE_MESA_NATIVE_DIR", "");
         setEarlyEnv("DROIDBRIDGE_MESA_ALIAS_DIR", "");
+        setEarlyEnv("DROIDBRIDGE_KOPPER_VULKAN_ALIAS_DIR", "");
         setEarlyEnv("DROIDBRIDGE_MESA_NAMESPACE", "");
         setEarlyEnv("DROIDBRIDGE_MESA_NAMESPACE_PATH", "");
         setEarlyEnv("DROIDBRIDGE_MESA_EGL_SINGLE_INSTANCE", "");
         setEarlyEnv("DROIDBRIDGE_MESA_DESKTOP_GL", "");
         setEarlyEnv("DROIDBRIDGE_MESA_SAFE_SWAPS", "");
         setEarlyEnv("DROIDBRIDGE_EGL_FORCE_DESKTOP_GL", "");
+        setEarlyEnv("DROIDBRIDGE_EGL_FORCE_RGBX8888", "");
         setEarlyEnv("DROIDBRIDGE_EGL_NO_SYSTEM_FALLBACK", "");
 
         setEarlyEnv("MESA_PROCESS_NAME", "");
@@ -5020,15 +5275,20 @@ public class GameActivity extends AppCompatActivity {
         if (binding == null) return;
         View root = binding.getRoot();
         if (!(root instanceof ViewGroup)) return;
-        if (dualScreenController != null && dualScreenController.isShowing()) return;
+        if (dualScreenController != null && dualScreenController.ownsTouchControls()) return;
 
         touchControlsOverlay = new TouchControlsOverlay(this);
         touchControlsOverlay.setAppMenuListener(this::openInGameButtonOverlay);
         touchControlsOverlay.setPassthroughTarget(minecraftSurface);
+        touchControlsOverlay.setMinecraftOptionsFile(
+                new File(resolveActiveGameDirectoryForRuntime(), "options.txt"));
+        touchControlsOverlay.setInputViewportTarget(shouldUseCenteredPortraitGameViewport()
+                ? minecraftSurface : null);
         touchControlsOverlay.loadSelectedLayout();
         touchControlsOverlay.applyVirtualMouseLaunchSessionState();
         touchControlsOverlay.setControlsVisible(ControlsPreferences.isTouchControlsEnabled(this)
-                && (dualScreenController == null || !dualScreenController.isShowing()));
+                && (dualScreenController == null || !dualScreenController.ownsTouchControls()));
+        touchControlsOverlay.setAlpha(1f);
 
         ((ViewGroup) root).addView(
                 touchControlsOverlay,
@@ -5037,6 +5297,12 @@ public class GameActivity extends AppCompatActivity {
                         ViewGroup.LayoutParams.MATCH_PARENT
                 )
         );
+
+        // Reapply visibility semantics after live single/dual-screen transitions. Recording never
+        // changes this live overlay's alpha; clean capture happens at the encoder source instead.
+        if (recordingTouchControlsHidden || GameRecordingService.isRecording()) {
+            applyRecordingTouchControlVisibility(true);
+        }
     }
 
     private void removeTouchControlsOverlay() {
@@ -5048,10 +5314,15 @@ public class GameActivity extends AppCompatActivity {
 
     private void refreshTouchControlsOverlay() {
         if (touchControlsOverlay == null) return;
+        touchControlsOverlay.setInputViewportTarget(shouldUseCenteredPortraitGameViewport()
+                ? minecraftSurface : null);
+        touchControlsOverlay.setMinecraftOptionsFile(
+                new File(resolveActiveGameDirectoryForRuntime(), "options.txt"));
         touchControlsOverlay.loadSelectedLayout();
         touchControlsOverlay.applyVirtualMouseLaunchSessionState();
         touchControlsOverlay.setControlsVisible(ControlsPreferences.isTouchControlsEnabled(this)
-                && (dualScreenController == null || !dualScreenController.isShowing()));
+                && (dualScreenController == null || !dualScreenController.ownsTouchControls()));
+        touchControlsOverlay.setAlpha(1f);
         touchControlsOverlay.bringToFront();
         if (binding != null && binding.layoutLogOverlay.getVisibility() == View.VISIBLE) {
             binding.layoutLogOverlay.bringToFront();
@@ -5081,13 +5352,16 @@ public class GameActivity extends AppCompatActivity {
         if (target == null) return;
 
         if (gameCursorOverlay != null && gameCursorOverlay.getParent() == target) {
-            target.post(() -> initializeBridgePointerForCursorTarget(target));
+            gameCursorOverlay.setViewportTarget(minecraftSurface);
+            target.post(() -> initializeBridgePointerForCursorTarget(
+                    resolveCursorGeometryTarget(target)));
             return;
         }
 
         removeCursorOverlay();
 
         gameCursorOverlay = new GameCursorOverlay(target.getContext());
+        gameCursorOverlay.setViewportTarget(minecraftSurface);
         target.addView(
                 gameCursorOverlay,
                 new ViewGroup.LayoutParams(
@@ -5096,7 +5370,25 @@ public class GameActivity extends AppCompatActivity {
                 )
         );
         gameCursorOverlay.bringToFront();
-        target.post(() -> initializeBridgePointerForCursorTarget(target));
+        target.post(() -> initializeBridgePointerForCursorTarget(
+                resolveCursorGeometryTarget(target)));
+    }
+
+    @NonNull
+    private View resolveCursorGeometryTarget(@NonNull ViewGroup fallback) {
+        MinecraftGLSurface surface = minecraftSurface;
+        if (surface != null && surface.getWidth() > 1 && surface.getHeight() > 1) {
+            try {
+                Display surfaceDisplay = surface.getDisplay();
+                Display fallbackDisplay = fallback.getDisplay();
+                if (surfaceDisplay == null || fallbackDisplay == null
+                        || surfaceDisplay.getDisplayId() == fallbackDisplay.getDisplayId()) {
+                    return surface;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return fallback;
     }
 
     @Nullable
@@ -5236,6 +5528,8 @@ public class GameActivity extends AppCompatActivity {
 
         binding.buttonGameSettings.setOnClickListener(view -> openInGameButtonOverlay());
         floatingGameSettingsOverlayController.refreshFromPreferences();
+        floatingGameSettingsOverlayController.setSuppressed(
+                dualScreenController != null && dualScreenController.ownsTouchControls());
         floatingGameSettingsOverlayController.bringToFront();
     }
 
@@ -5266,20 +5560,27 @@ public class GameActivity extends AppCompatActivity {
                 (ViewGroup) binding.getRoot(),
                 (surface, alreadyRunning) -> runOnUiThread(() -> {
                     minecraftSurface = surface;
+                    applyGameSurfaceLayoutMode(surface);
                     configureActiveMinecraftSurface(surface);
                     if (alreadyRunning) {
                         surface.start(true);
                     }
                     boolean dualActive = dualScreenController != null
-                            && dualScreenController.isShowing();
+                            && dualScreenController.ownsTouchControls();
                     if (dualActive) {
                         removeTouchControlsOverlay();
                     } else if (touchControlsOverlay == null) {
                         installTouchControlsOverlay();
                     } else {
                         touchControlsOverlay.setPassthroughTarget(surface);
+                        touchControlsOverlay.setInputViewportTarget(shouldUseCenteredPortraitGameViewport()
+                                ? surface : null);
                         touchControlsOverlay.setDualScreenBottomHudHotbarMode(false);
                         touchControlsOverlay.setControlsVisible(ControlsPreferences.isTouchControlsEnabled(this));
+                        touchControlsOverlay.setAlpha(1f);
+                    }
+                    if (floatingGameSettingsOverlayController != null) {
+                        floatingGameSettingsOverlayController.setSuppressed(dualActive);
                     }
                     refreshCursorOverlayTarget();
                     scheduleMinecraftSurfaceRefresh();
@@ -5310,6 +5611,9 @@ public class GameActivity extends AppCompatActivity {
             if (touchControlsOverlay == null) {
                 installTouchControlsOverlay();
             }
+            if (floatingGameSettingsOverlayController != null) {
+                floatingGameSettingsOverlayController.setSuppressed(false);
+            }
             refreshCursorOverlayTarget();
             return;
         }
@@ -5321,6 +5625,10 @@ public class GameActivity extends AppCompatActivity {
             }
         } else {
             dualScreenController.onResume(launchStarted);
+        }
+        if (floatingGameSettingsOverlayController != null) {
+            floatingGameSettingsOverlayController.setSuppressed(
+                    dualScreenController != null && dualScreenController.ownsTouchControls());
         }
         refreshCursorOverlayTarget();
     }
@@ -5337,6 +5645,111 @@ public class GameActivity extends AppCompatActivity {
             dualScreenController.toggleScreenSwap(launchStarted);
             refreshCursorOverlayTarget();
         }
+    }
+
+    /**
+     * "Portrait (Centered Game View)" keeps GameActivity in portrait while constraining
+     * only the Activity-owned Minecraft surface to a centered landscape-aspect rectangle.
+     * The render child itself remains MATCH_PARENT inside MinecraftGLSurface, so both the
+     * TextureView and native SurfaceView paths are sized correctly before rendering starts.
+     * External dual-screen Presentation surfaces intentionally remain fullscreen.
+     */
+    private void applyGameSurfaceLayoutMode(@Nullable MinecraftGLSurface surface) {
+        if (surface == null || binding == null || surface != binding.minecraftSurface) return;
+        if (!(surface.getLayoutParams() instanceof FrameLayout.LayoutParams)) return;
+
+        FrameLayout.LayoutParams params = (FrameLayout.LayoutParams) surface.getLayoutParams();
+        boolean centeredPortrait = LauncherPreferences.APP_ORIENTATION_PORTRAIT_CENTERED_GAME.equals(
+                LauncherPreferences.getGameOrientationMode(this));
+        boolean dualScreenActive = dualScreenController != null && dualScreenController.isShowing();
+
+        int desiredWidth = ViewGroup.LayoutParams.MATCH_PARENT;
+        int desiredHeight = ViewGroup.LayoutParams.MATCH_PARENT;
+        int desiredGravity = Gravity.TOP | Gravity.START;
+
+        if (centeredPortrait && !dualScreenActive) {
+            // Use the root's actual post-inset content width. Using raw DisplayMetrics
+            // made the surface height come from the full panel while MATCH_PARENT width
+            // was measured inside notch padding, visibly squeezing the centered view.
+            View root = binding.getRoot();
+            int portraitWidth = 0;
+            if (root != null && root.getWidth() > 1) {
+                portraitWidth = Math.max(1, root.getWidth()
+                        - root.getPaddingLeft() - root.getPaddingRight());
+            }
+            if (portraitWidth <= 1) {
+                DisplayMetrics metrics = getResources().getDisplayMetrics();
+                portraitWidth = Math.max(1, Math.min(metrics.widthPixels, metrics.heightPixels));
+            }
+            float landscapeAspect = resolveCenteredPortraitGameAspect();
+            desiredHeight = Math.max(1, Math.round(portraitWidth / landscapeAspect));
+            desiredGravity = Gravity.CENTER;
+        }
+
+        if (params.width != desiredWidth
+                || params.height != desiredHeight
+                || params.gravity != desiredGravity
+                || params.leftMargin != 0
+                || params.topMargin != 0
+                || params.rightMargin != 0
+                || params.bottomMargin != 0) {
+            params.width = desiredWidth;
+            params.height = desiredHeight;
+            params.gravity = desiredGravity;
+            params.leftMargin = 0;
+            params.topMargin = 0;
+            params.rightMargin = 0;
+            params.bottomMargin = 0;
+            surface.setLayoutParams(params);
+        }
+
+        if (touchControlsOverlay != null) {
+            touchControlsOverlay.setInputViewportTarget(centeredPortrait && !dualScreenActive
+                    ? surface : null);
+        }
+        if (gameCursorOverlay != null) {
+            gameCursorOverlay.setViewportTarget(surface);
+        }
+    }
+
+    private boolean shouldUseCenteredPortraitGameViewport() {
+        return LauncherPreferences.APP_ORIENTATION_PORTRAIT_CENTERED_GAME.equals(
+                LauncherPreferences.getGameOrientationMode(this))
+                && (dualScreenController == null || !dualScreenController.isShowing());
+    }
+
+    private float resolveCenteredPortraitGameAspect() {
+        final float fourThree = 4f / 3f;
+        final float sixteenNine = 16f / 9f;
+        try {
+            GameResolutionSettings.Profile profile = GameResolutionSettings.getRuntimeProfileOverride();
+            if (profile == null) profile = GameResolutionSettings.getProfile(this);
+
+            if (GameResolutionSettings.MODE_BEST_4_3.equals(profile.mode)
+                    || GameResolutionSettings.MODE_MCSX.equals(profile.mode)) {
+                return fourThree;
+            }
+            if (GameResolutionSettings.MODE_1920_1080.equals(profile.mode)
+                    || GameResolutionSettings.MODE_NATIVE.equals(profile.mode)) {
+                // Native phone aspect ratios such as the S22's ~19.5:9 make a
+                // portrait-centered game strip unnecessarily short. Native centered
+                // portrait intentionally uses the conventional landscape 16:9 view.
+                return sixteenNine;
+            }
+            if (GameResolutionSettings.MODE_CUSTOM.equals(profile.mode)) {
+                int longSide = Math.max(profile.customWidth, profile.customHeight);
+                int shortSide = Math.max(1, Math.min(profile.customWidth, profile.customHeight));
+                float aspect = longSide / (float) shortSide;
+                if (!Float.isNaN(aspect) && !Float.isInfinite(aspect)) {
+                    // Keep the portrait-centered view useful instead of becoming a
+                    // thin ultrawide strip. 4:3 through 16:9 still honors common custom
+                    // landscape layouts without visible geometric squeezing.
+                    return Math.max(fourThree, Math.min(sixteenNine, aspect));
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return sixteenNine;
     }
 
     private void configureActiveMinecraftSurface(@Nullable MinecraftGLSurface surface) {
@@ -5358,9 +5771,16 @@ public class GameActivity extends AppCompatActivity {
                         ? "<null>" : getCurrentFocus().getClass().getName())
         );
 
-        surface.setSpecialKeyEventListener(
-                event -> routeAynRearButtonEvent(event, "focused-surface")
-        );
+        surface.setSpecialKeyEventListener(event -> {
+            // This listener runs inside MinecraftGLSurface before its physical-keyboard ->
+            // GLFW/SDL injection. Keep the launcher shortcut here as well as at Activity level
+            // so focused SurfaceView/TextureView paths cannot bypass it.
+            if (handleInGameMenuKeyboardShortcut(event)) {
+                return true;
+            }
+            return routeAynRearButtonEvent(event, "focused-surface");
+        });
+        surface.setAndroidVirtualMouseUiRouter(this::routeAndroidVirtualMouseUiEvent);
         if (GamepadButton.isAynOdinBuild()) {
             LauncherLogManager.append(
                     "AYN rear-button bridge active: Activity + focused Minecraft surface, "
@@ -5369,6 +5789,8 @@ public class GameActivity extends AppCompatActivity {
         }
 
         GameImeViewportController.registerMinecraftSurface(surface);
+        surface.setMinecraftOptionsFile(
+                new File(resolveActiveGameDirectoryForRuntime(), "options.txt"));
         surface.setOnRenderingStartedListener(() -> runOnUiThread(() -> {
             gameRenderingStarted = true;
             CallbackBridge.setInputReady(true);
@@ -5381,6 +5803,91 @@ public class GameActivity extends AppCompatActivity {
         });
         surface.setFitsSystemWindows(false);
         surface.setClipToOutline(false);
+    }
+
+    private boolean routeAndroidVirtualMouseUiEvent(
+            int action,
+            float screenX,
+            float screenY,
+            int actionButton,
+            int buttonState,
+            long eventTime
+    ) {
+        if (!LauncherPreferences.isAndroidVirtualPhysicalMouse(this)) return false;
+
+        if ((action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL)
+                && eventTime > 0L
+                && eventTime <= androidVirtualMouseUiReleaseSuppressUntilMs) {
+            return true;
+        }
+
+        boolean primaryEvent = actionButton == MotionEvent.BUTTON_PRIMARY
+                || (buttonState & MotionEvent.BUTTON_PRIMARY) != 0;
+
+        if (action == MotionEvent.ACTION_DOWN && !primaryEvent) {
+            // Captured mouse drivers do not all populate actionButton on ACTION_DOWN.
+            // buttonState==0 is therefore allowed only when a visible DroidBridge target
+            // is actually under the centered cursor.
+            primaryEvent = actionButton == 0 && buttonState == 0;
+        }
+
+        FloatingGameSettingsOverlayController floating = floatingGameSettingsOverlayController;
+        boolean cogGestureEligible = action != MotionEvent.ACTION_DOWN || primaryEvent;
+        if (floating != null
+                && cogGestureEligible
+                && floating.dispatchCapturedPhysicalMouseGesture(action, screenX, screenY)) {
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                androidVirtualMouseUiReleaseSuppressUntilMs = Math.max(
+                        androidVirtualMouseUiReleaseSuppressUntilMs,
+                        (eventTime > 0L ? eventTime : android.os.SystemClock.uptimeMillis()) + 120L
+                );
+            }
+            return true;
+        }
+
+        TouchControlsOverlay overlay = touchControlsOverlay;
+        boolean overlayConsumed = false;
+        if (overlay != null && primaryEvent) {
+            overlayConsumed = overlay.dispatchCapturedPhysicalMouseToControl(
+                    action, screenX, screenY, eventTime);
+        } else if (overlay != null
+                && (action == MotionEvent.ACTION_MOVE
+                || action == MotionEvent.ACTION_UP
+                || action == MotionEvent.ACTION_CANCEL)) {
+            // Continue an already-started control press even though buttonState can be
+            // zero on ACTION_UP and on some captured-pointer MOVE events.
+            overlayConsumed = overlay.dispatchCapturedPhysicalMouseToControl(
+                    action, screenX, screenY, eventTime);
+        }
+        if (overlayConsumed
+                && (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL)) {
+            androidVirtualMouseUiReleaseSuppressUntilMs = Math.max(
+                    androidVirtualMouseUiReleaseSuppressUntilMs,
+                    (eventTime > 0L ? eventTime : android.os.SystemClock.uptimeMillis()) + 120L
+            );
+        }
+        return overlayConsumed;
+    }
+
+    private static boolean isScreenPointInsideVisibleView(
+            @Nullable View view,
+            float screenX,
+            float screenY
+    ) {
+        if (view == null || view.getVisibility() != View.VISIBLE || !view.isShown()
+                || view.getWidth() <= 0 || view.getHeight() <= 0) {
+            return false;
+        }
+        int[] location = new int[2];
+        try {
+            view.getLocationOnScreen(location);
+        } catch (Throwable ignored) {
+            return false;
+        }
+        return screenX >= location[0]
+                && screenX < location[0] + view.getWidth()
+                && screenY >= location[1]
+                && screenY < location[1] + view.getHeight();
     }
 
     @NonNull
@@ -5417,12 +5924,251 @@ public class GameActivity extends AppCompatActivity {
         return getFilesDir();
     }
 
+    private void registerGameRecordingStateReceiver() {
+        if (recordingStateReceiverRegistered) return;
+        IntentFilter filter = new IntentFilter(GameRecordingService.ACTION_STATE);
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(gameRecordingStateReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(gameRecordingStateReceiver, filter);
+            }
+            recordingStateReceiverRegistered = true;
+        } catch (Throwable throwable) {
+            Logging.e("GameActivity", "Unable to register recording state receiver", throwable);
+        }
+    }
+
+    private void unregisterGameRecordingStateReceiver() {
+        if (!recordingStateReceiverRegistered) return;
+        try {
+            unregisterReceiver(gameRecordingStateReceiver);
+        } catch (Throwable ignored) {
+        }
+        recordingStateReceiverRegistered = false;
+    }
+
+    private void registerRecordingFrameBridgeReceiver() {
+        if (recordingFrameBridgeReceiverRegistered) return;
+        IntentFilter filter = new IntentFilter();
+        filter.addAction(RecordingFrameBridge.ACTION_ATTACH);
+        filter.addAction(RecordingFrameBridge.ACTION_DETACH);
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                registerReceiver(recordingFrameBridgeReceiver, filter, Context.RECEIVER_NOT_EXPORTED);
+            } else {
+                registerReceiver(recordingFrameBridgeReceiver, filter);
+            }
+            recordingFrameBridgeReceiverRegistered = true;
+        } catch (Throwable throwable) {
+            Logging.e("GameActivity", "Unable to register clean recording frame receiver", throwable);
+        }
+    }
+
+    private void unregisterRecordingFrameBridgeReceiver() {
+        if (!recordingFrameBridgeReceiverRegistered) return;
+        stopPrimaryRecordingFramePump();
+        try {
+            unregisterReceiver(recordingFrameBridgeReceiver);
+        } catch (Throwable ignored) {
+        }
+        recordingFrameBridgeReceiverRegistered = false;
+    }
+
+    private void requestStartGameRecording() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            Toast.makeText(this,
+                    "Minecraft screen and audio recording requires Android 10 or newer.",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+
+        if (GameRecordingService.isRecordingOrStarting()) {
+            Toast.makeText(this, "A DroidBridge recording is already active.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(
+                    new String[]{Manifest.permission.RECORD_AUDIO},
+                    REQUEST_GAME_RECORDING_AUDIO_PERMISSION
+            );
+            return;
+        }
+        requestMediaProjectionForGameRecording();
+    }
+
+    private void requestMediaProjectionForGameRecording() {
+        MediaProjectionManager manager = (MediaProjectionManager)
+                getSystemService(Context.MEDIA_PROJECTION_SERVICE);
+        if (manager == null) {
+            Toast.makeText(this, "Android screen capture is unavailable on this device.", Toast.LENGTH_LONG).show();
+            return;
+        }
+        try {
+            startActivityForResult(
+                    manager.createScreenCaptureIntent(),
+                    REQUEST_GAME_RECORDING_CAPTURE
+            );
+        } catch (Throwable throwable) {
+            Logging.e("GameActivity", "Unable to request screen-capture permission", throwable);
+            Toast.makeText(this, "Unable to open Android's screen-capture permission.", Toast.LENGTH_LONG).show();
+        }
+    }
+
+    private void startApprovedGameRecording(@NonNull Intent projectionData) {
+        DisplayMetrics metrics = new DisplayMetrics();
+        Display display = Build.VERSION.SDK_INT >= Build.VERSION_CODES.R
+                ? getDisplay()
+                : getWindowManager().getDefaultDisplay();
+        if (display != null) {
+            display.getRealMetrics(metrics);
+        } else {
+            metrics.setTo(getResources().getDisplayMetrics());
+        }
+
+        int width = Math.max(2, metrics.widthPixels);
+        int height = Math.max(2, metrics.heightPixels);
+        if ((width & 1) != 0) width--;
+        if ((height & 1) != 0) height--;
+
+        boolean wantsBothScreens = LauncherPreferences.isDualScreenSupportEnabled(this)
+                && RecordingPreferences.isRecordBothScreensEnabled(this);
+        if (wantsBothScreens) {
+            if (dualScreenController == null) configureDualScreenController();
+            View secondScreenView = dualScreenController == null
+                    ? null
+                    : dualScreenController.getControlsRecordingView();
+            if (secondScreenView != null) {
+                // The second-screen recorder now suppresses touch artwork only inside its
+                // encoder draw pass. Do not alter the live controls that the player sees.
+                DualScreenRecordingSession.StartResult secondResult =
+                        DualScreenRecordingSession.start(this, secondScreenView);
+                if (!secondResult.success) {
+                    Toast.makeText(
+                            this,
+                            "Second-screen recording could not start ("
+                                    + (secondResult.errorMessage == null
+                                    ? "unknown error" : secondResult.errorMessage)
+                                    + "). The Minecraft screen will still be recorded.",
+                            Toast.LENGTH_LONG
+                    ).show();
+                }
+            } else {
+                Toast.makeText(
+                        this,
+                        "Record both screens is enabled, but no active DroidBridge second-screen HUD was found. Recording the Minecraft screen only.",
+                        Toast.LENGTH_LONG
+                ).show();
+            }
+        }
+
+        // Prepare capture-only touch-control visibility before MediaProjection queues its
+        // first frame. The live player still sees a secure visual mirror of the controls.
+        applyRecordingTouchControlVisibility(true);
+
+        GameRecordingService.start(
+                this,
+                RESULT_OK,
+                projectionData,
+                width,
+                height,
+                Math.max(1, metrics.densityDpi)
+        );
+        Toast.makeText(
+                this,
+                DualScreenRecordingSession.isRecording()
+                        ? "Starting dual-screen Minecraft recording..."
+                        : "Starting Minecraft recording...",
+                Toast.LENGTH_SHORT
+        ).show();
+    }
+
+    private void applyRecordingTouchControlVisibility(boolean recording) {
+        recordingTouchControlsHidden = recording
+                && RecordingPreferences.isHideTouchControlsEnabled(this);
+
+        // Never alter the live touch overlay for recording. When hiding is requested, the
+        // primary recorder captures Minecraft's render layer directly through RecordingFrameBridge;
+        // the player's actual controls therefore remain fully visible and fully interactive.
+        if (touchControlsOverlay != null) {
+            touchControlsOverlay.setControlsVisible(ControlsPreferences.isTouchControlsEnabled(this)
+                    && (dualScreenController == null || !dualScreenController.ownsTouchControls()));
+            touchControlsOverlay.setAlpha(1f);
+            touchControlsOverlay.bringToFront();
+        }
+
+        // The second-screen recorder already suppresses control artwork only inside its encoder
+        // draw pass, so its live bottom-screen controls also stay visible at full alpha.
+        if (dualScreenController != null) {
+            dualScreenController.setBottomTouchControlsRecordingHidden(false);
+        }
+        if (floatingGameSettingsOverlayController != null) {
+            floatingGameSettingsOverlayController.bringToFront();
+        }
+    }
+
+    private void stopPrimaryRecordingFramePump() {
+        PrimaryRecordingFramePump pump = primaryRecordingFramePump;
+        primaryRecordingFramePump = null;
+        primaryRecordingFramePumpSessionId = 0L;
+        if (pump != null) {
+            try {
+                pump.stop();
+            } catch (Throwable throwable) {
+                Logging.i("GameActivity", "Unable to stop clean recording frame pump: "
+                        + throwable.getMessage());
+            }
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, @Nullable Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode != REQUEST_GAME_RECORDING_CAPTURE) return;
+
+        configureWindow();
+        if (resultCode != RESULT_OK || data == null) {
+            Toast.makeText(this, "Screen recording was cancelled.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        startApprovedGameRecording(data);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(
+            int requestCode,
+            @NonNull String[] permissions,
+            @NonNull int[] grantResults
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults);
+        if (requestCode != REQUEST_GAME_RECORDING_AUDIO_PERMISSION) return;
+
+        boolean granted = grantResults.length > 0
+                && grantResults[0] == PackageManager.PERMISSION_GRANTED;
+        if (!granted) {
+            Toast.makeText(this,
+                    "DroidBridge needs audio permission for the selected recording audio mode.",
+                    Toast.LENGTH_LONG).show();
+            return;
+        }
+        requestMediaProjectionForGameRecording();
+    }
+
     private void openInGameButtonOverlay() {
         if (binding == null || exiting) return;
 
         if (inGameControlsDialog != null && inGameControlsDialog.isShowing()) {
             configureWindow();
             return;
+        }
+
+        // Android Virtual Mouse normally keeps a physical mouse captured while a
+        // Minecraft GUI is open so the visible software cursor can truly match
+        // Minecraft's centered logical cursor. This dialog is Android-owned UI, so
+        // temporarily release capture here to let the real OS pointer click it.
+        if (minecraftSurface != null) {
+            minecraftSurface.setAndroidVirtualMouseUiInteractionMode(true);
         }
 
         boolean touchEnabled = ControlsPreferences.isTouchControlsEnabled(this);
@@ -5478,6 +6224,12 @@ public class GameActivity extends AppCompatActivity {
                 }
         ));
 
+        // Keep touch-profile switching at the head of the in-game settings flow.
+        // The full Controller / gamepad overlay still contains the same selector for
+        // discoverability, but this copy is intentionally one-tap: selecting another
+        // profile applies it to the running game immediately and closes this dialog.
+        root.addView(buildInGameTouchLayoutSelector(dialogRef));
+
         root.addView(buildInGameDialogAction(
                 touchEnabled ? "Hide touch controls" : "Show touch controls",
                 touchEnabled
@@ -5490,7 +6242,11 @@ public class GameActivity extends AppCompatActivity {
                     ControlsPreferences.setTouchControlsEnabled(this, enabled);
                     if (touchControlsOverlay != null) {
                         touchControlsOverlay.setControlsVisible(enabled);
+                        touchControlsOverlay.setAlpha(1f);
                         touchControlsOverlay.bringToFront();
+                    }
+                    if (dualScreenController != null && dualScreenController.ownsTouchControls()) {
+                        dualScreenController.setBottomTouchControlsVisible(enabled);
                     }
                     applyInGameOverlayPreferences();
                 }
@@ -5539,6 +6295,35 @@ public class GameActivity extends AppCompatActivity {
             ));
         }
 
+        boolean recordingFinalizing = GameRecordingService.isFinalizing();
+        boolean recordingActive = GameRecordingService.isRecordingOrStarting();
+        boolean recordBothScreens = LauncherPreferences.isDualScreenSupportEnabled(this)
+                && RecordingPreferences.isRecordBothScreensEnabled(this);
+        String recordingAudioLabel = RecordingPreferences.getAudioModeLabel(this);
+        root.addView(buildInGameDialogAction(
+                recordingFinalizing
+                        ? "Finishing recording..."
+                        : (recordingActive ? "Stop recording" : "Start recording"),
+                recordingFinalizing
+                        ? "DroidBridge is finalizing the MP4 and saving it to Movies/DroidBridge/Recordings."
+                        : (recordingActive
+                        ? "Finish the current recording and save it to Movies/DroidBridge/Recordings."
+                        : (recordBothScreens
+                        ? "Record the Minecraft/game display plus the DroidBridge HUD/touch display as a matched second-screen MP4. Audio: " + recordingAudioLabel + "."
+                        : "Record the current Minecraft display. Audio: " + recordingAudioLabel + ". A second display may stay connected.")),
+                false,
+                () -> {
+                    dismissDialog(dialogRef[0]);
+                    if (recordingFinalizing) {
+                        Toast.makeText(this, "The recording is already being finalized.", Toast.LENGTH_SHORT).show();
+                    } else if (recordingActive) {
+                        showStopGameRecordingDialog();
+                    } else {
+                        requestStartGameRecording();
+                    }
+                }
+        ));
+
         TextView recoveryTitle = new TextView(this);
         recoveryTitle.setText("Recovery");
         recoveryTitle.setTextColor(COLOR_TEXT_MUTED);
@@ -5560,7 +6345,7 @@ public class GameActivity extends AppCompatActivity {
                 }
         ));
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .create();
         dialogRef[0] = dialog;
@@ -5568,6 +6353,9 @@ public class GameActivity extends AppCompatActivity {
         dialog.setOnDismissListener(d -> {
             if (inGameControlsDialog == dialog) {
                 inGameControlsDialog = null;
+            }
+            if (minecraftSurface != null) {
+                minecraftSurface.setAndroidVirtualMouseUiInteractionMode(false);
             }
             configureWindow();
         });
@@ -5580,6 +6368,139 @@ public class GameActivity extends AppCompatActivity {
         if (exiting || isFinishing() || isDestroyed()) return;
         runOnUiThread(this::openInGameButtonOverlay);
         configureWindow();
+    }
+
+    @NonNull
+    private View buildInGameTouchLayoutSelector(@NonNull AlertDialog[] dialogRef) {
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.VERTICAL);
+        card.setPadding(dpToPx(14), dpToPx(12), dpToPx(14), dpToPx(12));
+        card.setBackground(roundedDrawable(COLOR_CARD_BG, COLOR_CARD_STROKE, 18));
+
+        TextView title = new TextView(this);
+        title.setText("Touch controls profile");
+        title.setTextColor(COLOR_TEXT_PRIMARY);
+        title.setTextSize(16f);
+        title.setTypeface(Typeface.DEFAULT_BOLD);
+        card.addView(title, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        TextView summary = new TextView(this);
+        summary.setText("Switch the active touch-control profile. A selection is applied immediately and closes this dialog.");
+        summary.setTextColor(COLOR_TEXT_SECONDARY);
+        summary.setTextSize(12.5f);
+        summary.setPadding(0, dpToPx(3), 0, dpToPx(6));
+        card.addView(summary, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        List<File> layouts = TouchControlsStore.listLayouts(this);
+        ArrayList<File> touchLayouts = new ArrayList<>(layouts);
+        ArrayList<String> labels = new ArrayList<>();
+        String selectedPath = ControlsPreferences.getSelectedLayoutPath(this);
+        int selectedIndex = 0;
+
+        for (int i = 0; i < touchLayouts.size(); i++) {
+            File file = touchLayouts.get(i);
+            TouchControlsLayoutData data = TouchControlsStore.loadLayout(file);
+            String name = data != null && data.name != null && !data.name.trim().isEmpty()
+                    ? data.name.trim()
+                    : file.getName();
+            labels.add(name + "  •  " + file.getName());
+            if (selectedPath != null && file.getAbsolutePath().equals(selectedPath)) {
+                selectedIndex = i;
+            }
+        }
+
+        if (touchLayouts.isEmpty()) {
+            File fallback = TouchControlsStore.getDefaultLayoutFile(this);
+            touchLayouts.add(fallback);
+            labels.add("Default Touch Controls  •  " + fallback.getName());
+            selectedIndex = 0;
+        }
+
+        Spinner spinner = new Spinner(this);
+        ArrayAdapter<String> adapter = new ArrayAdapter<String>(
+                this,
+                android.R.layout.simple_spinner_item,
+                labels
+        ) {
+            @Override
+            public View getView(int position, @Nullable View convertView, @NonNull ViewGroup parent) {
+                View view = super.getView(position, convertView, parent);
+                styleInGameTouchLayoutSpinnerRow(view, false);
+                return view;
+            }
+
+            @Override
+            public View getDropDownView(int position, @Nullable View convertView, @NonNull ViewGroup parent) {
+                View view = super.getDropDownView(position, convertView, parent);
+                styleInGameTouchLayoutSpinnerRow(view, true);
+                return view;
+            }
+        };
+        adapter.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item);
+        spinner.setAdapter(adapter);
+        spinner.setSelection(Math.max(0, Math.min(selectedIndex, touchLayouts.size() - 1)), false);
+
+        final String initiallySelectedPath = touchLayouts
+                .get(Math.max(0, Math.min(selectedIndex, touchLayouts.size() - 1)))
+                .getAbsolutePath();
+        spinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (position < 0 || position >= touchLayouts.size()) return;
+
+                File selected = touchLayouts.get(position);
+                String nextPath = selected.getAbsolutePath();
+                String currentPath = ControlsPreferences.getSelectedLayoutPath(GameActivity.this);
+                String effectiveCurrentPath = currentPath == null ? initiallySelectedPath : currentPath;
+                if (nextPath.equals(effectiveCurrentPath)) return;
+
+                ControlsPreferences.setSelectedLayoutPath(GameActivity.this, nextPath);
+                reloadTouchControlsLayout();
+                applyInGameOverlayPreferences();
+                LauncherLogManager.append(
+                        "DroidBridgeControls: switched in-game touch profile -> " + selected.getName());
+                dismissDialog(dialogRef[0]);
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
+
+        card.addView(spinner, new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        ));
+
+        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT
+        );
+        params.setMargins(0, 0, 0, dpToPx(10));
+        card.setLayoutParams(params);
+        return card;
+    }
+
+    private void styleInGameTouchLayoutSpinnerRow(@NonNull View view, boolean dropdown) {
+        view.setBackgroundColor(dropdown ? COLOR_CARD_BG_PRESSED : Color.TRANSPARENT);
+        if (view instanceof TextView) {
+            TextView text = (TextView) view;
+            text.setTextColor(COLOR_TEXT_PRIMARY);
+            text.setTextSize(15f);
+            text.setSingleLine(false);
+            text.setPadding(
+                    text.getPaddingLeft(),
+                    dpToPx(8),
+                    text.getPaddingRight(),
+                    dpToPx(8)
+            );
+        }
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -5637,6 +6558,76 @@ public class GameActivity extends AppCompatActivity {
         return card;
     }
 
+    private void scheduleGameProcessKillAfterRecordingFinalizes(
+            @NonNull String reason,
+            long minimumDelayMs
+    ) {
+        GameRecordingService.stop(this);
+        final Handler handler = new Handler(Looper.getMainLooper());
+        final long earliestKill = SystemClock.elapsedRealtime() + Math.max(0L, minimumDelayMs);
+        final long deadline = SystemClock.elapsedRealtime() + 15000L;
+        final Runnable[] check = new Runnable[1];
+        check[0] = () -> {
+            long now = SystemClock.elapsedRealtime();
+            boolean busy = GameRecordingService.isRecordingOrStarting();
+            if (now < earliestKill) {
+                handler.postDelayed(check[0], Math.min(150L, earliestKill - now));
+                return;
+            }
+            if (busy && now < deadline) {
+                handler.postDelayed(check[0], 100L);
+                return;
+            }
+            if (busy) {
+                LauncherLogManager.append("RecordingLifecycle: finalization timed out before process exit reason="
+                        + reason + "; orphan recovery will run in launcher");
+            } else {
+                LauncherLogManager.append("RecordingLifecycle: finalization complete before process exit reason="
+                        + reason);
+            }
+            Process.killProcess(Process.myPid());
+        };
+        handler.postDelayed(check[0], Math.max(50L, minimumDelayMs));
+    }
+
+    private void showStopGameRecordingDialog() {
+        if (!GameRecordingService.isRecordingOrStarting()) {
+            Toast.makeText(this, "The recording has already stopped.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+        if (GameRecordingService.isFinalizing()) {
+            Toast.makeText(this, "The recording is already being finalized.", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle("Stop recording?")
+                .setMessage("Are you sure you want to stop the current recording? DroidBridge will finalize the MP4 and save it to Movies/DroidBridge/Recordings.")
+                .setNegativeButton("Keep recording", null)
+                .setPositiveButton("Stop recording", null)
+                .create();
+
+        dialog.setOnShowListener(dialogInterface -> {
+            styleDarkDialog(dialog);
+
+            TextView negative = dialog.getButton(AlertDialog.BUTTON_NEGATIVE);
+            if (negative != null) negative.setTextColor(COLOR_ACCENT);
+
+            TextView positive = dialog.getButton(AlertDialog.BUTTON_POSITIVE);
+            if (positive != null) {
+                positive.setTextColor(COLOR_DANGER);
+                positive.setOnClickListener(view -> {
+                    dialog.dismiss();
+                    GameRecordingService.stop(GameActivity.this);
+                    Toast.makeText(GameActivity.this,
+                            "Finishing recording...", Toast.LENGTH_SHORT).show();
+                });
+            }
+        });
+        dialog.setOnDismissListener(d -> configureWindow());
+        dialog.show();
+    }
+
     private void showForceCloseGameDialog() {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -5663,7 +6654,7 @@ public class GameActivity extends AppCompatActivity {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(root)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton("Force close", null)
@@ -5685,6 +6676,10 @@ public class GameActivity extends AppCompatActivity {
     private void forceCloseGameAndReturnToLauncher(@NonNull String reason) {
         if (exiting) return;
         exiting = true;
+        if (GameRecordingService.isRecordingOrStarting()) {
+            LauncherLogManager.append("RecordingLifecycle: force-close requested -> finalize before process kill");
+            GameRecordingService.stop(this);
+        }
         stopDroidBridgeAndroidMicProxy();
         stopDroidBridgeAndroidNarratorProxy();
 
@@ -5741,10 +6736,8 @@ public class GameActivity extends AppCompatActivity {
 
         finishAndRemoveTask();
 
-        new Handler(Looper.getMainLooper()).postDelayed(() -> {
-            LauncherLogManager.append("ForceClose: killing game process.");
-            Process.killProcess(Process.myPid());
-        }, 250L);
+        LauncherLogManager.append("ForceClose: waiting for recording finalization before game process kill.");
+        scheduleGameProcessKillAfterRecordingFinalizes("user force close", 250L);
     }
 
     private void dismissDialog(@Nullable AlertDialog dialog) {
@@ -5819,11 +6812,16 @@ public class GameActivity extends AppCompatActivity {
     }
 
     private void reloadTouchControlsLayout() {
+        if (dualScreenController != null && dualScreenController.ownsTouchControls()) {
+            dualScreenController.reloadBottomTouchControlsLayout();
+            return;
+        }
         if (touchControlsOverlay == null) return;
 
         touchControlsOverlay.loadSelectedLayout();
         touchControlsOverlay.applyVirtualMouseLaunchSessionState();
         touchControlsOverlay.setControlsVisible(ControlsPreferences.isTouchControlsEnabled(this));
+        touchControlsOverlay.setAlpha(1f);
         touchControlsOverlay.requestLayout();
         touchControlsOverlay.invalidate();
         touchControlsOverlay.bringToFront();
@@ -5930,7 +6928,7 @@ public class GameActivity extends AppCompatActivity {
     }
 
     private void startQuitWatchdog() {
-        if (!isMinecraft26_2OrNewer(versionId)) return;
+        if (!isMinecraft26_2OrNewer(compatibilityVersionId)) return;
 
         quitWatchdogSessionStartWallMs = System.currentTimeMillis();
         LauncherLogManager.append("QuitWatchdog: armed for " + versionId + " sessionStartMs=" + quitWatchdogSessionStartWallMs);
@@ -5997,10 +6995,65 @@ public class GameActivity extends AppCompatActivity {
 
             LauncherLogManager.append("QuitWatchdog: forcing GameActivity/game process exit.");
             LauncherLogManager.preserveLatestLogIfEnabled(this, versionId);
+            if (GameRecordingService.isRecordingOrStarting()) {
+                LauncherLogManager.append("RecordingLifecycle: quit watchdog -> finalize before process kill");
+                GameRecordingService.stop(this);
+            }
             exiting = true;
             finishAndRemoveTask();
-            Process.killProcess(Process.myPid());
+            scheduleGameProcessKillAfterRecordingFinalizes("quit watchdog", 250L);
         }, 2500L);
+    }
+
+    @NonNull
+    private String resolveCompatibilityVersionId(
+            @NonNull String rawVersionId,
+            @Nullable String explicitInstanceKey
+    ) {
+        LauncherInstance instance = null;
+        try {
+            if (explicitInstanceKey != null && !explicitInstanceKey.trim().isEmpty()) {
+                instance = LauncherInstanceManager.findByNameOrId(this, explicitInstanceKey.trim());
+            }
+            if (instance == null) {
+                instance = LauncherInstanceManager.findByNameOrId(this, rawVersionId);
+            }
+            if (instance != null) {
+                String minecraftVersion = instance.getMinecraftVersionId();
+                if (minecraftVersion != null && !minecraftVersion.trim().isEmpty()) {
+                    String resolved = minecraftVersion.trim();
+                    LauncherLogManager.append("GameActivity: compatibility Minecraft version resolved raw="
+                            + rawVersionId + " instance=" + instance.getName() + " minecraft=" + resolved
+                            + " base=" + instance.getBaseVersionId());
+                    return resolved;
+                }
+                String baseVersion = instance.getBaseVersionId();
+                if (baseVersion != null && !baseVersion.trim().isEmpty()) {
+                    String resolved = baseVersion.trim();
+                    LauncherLogManager.append("GameActivity: compatibility base version resolved raw="
+                            + rawVersionId + " instance=" + instance.getName() + " base=" + resolved);
+                    return resolved;
+                }
+            }
+        } catch (Throwable throwable) {
+            Logging.e("GameActivity", "Unable to resolve compatibility version for " + rawVersionId, throwable);
+        }
+        return rawVersionId;
+    }
+
+    private boolean isMinecraft26OrNewer(@NonNull String id) {
+        String lower = id.toLowerCase(Locale.ROOT).trim();
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("(?:^|[^0-9])(\\d+)\\.(\\d+)(?:\\.(\\d+))?")
+                .matcher(lower);
+        int major = -1;
+        while (matcher.find()) {
+            try {
+                major = Integer.parseInt(matcher.group(1));
+            } catch (NumberFormatException ignored) {
+            }
+        }
+        return major >= 26;
     }
 
     private boolean isMinecraft26_2OrNewer(@NonNull String id) {
@@ -6377,7 +7430,7 @@ public class GameActivity extends AppCompatActivity {
                 + result.message
                 + "\n\nYou can open Settings to use Refresh Microsoft account/skin, cancel launch, or continue anyway with the saved account.";
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle("Microsoft account needs attention")
                 .setMessage(message)
                 .setNegativeButton("Cancel launch", null)
@@ -6583,7 +7636,7 @@ public class GameActivity extends AppCompatActivity {
         cardParams.setMargins(0, 0, 0, dpToPx(8));
         root.addView(card, cardParams);
 
-        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+        AlertDialog.Builder builder = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setPositiveButton("I understand, launch", null)
                 .setNegativeButton(android.R.string.cancel, null);
@@ -6906,7 +7959,7 @@ public class GameActivity extends AppCompatActivity {
         cardParams.setMargins(0, 0, 0, dpToPx(8));
         root.addView(card, cardParams);
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setPositiveButton("Launch anyway", null)
                 .setNeutralButton("Get FFmpeg plugin", null)
@@ -7068,9 +8121,14 @@ public class GameActivity extends AppCompatActivity {
         // this runtime-only avoids coupling the two saved settings or affecting phones.
         FullscreenUtils.enableImmersive(this, shouldForceAynThorDualScreenFullscreen());
 
+        // Force Fullscreen controls the host window's edge-to-edge geometry. The
+        // separate Ignore display notch preference is enforced below as a physical
+        // safe inset, so it must not change this window-size decision.
+        boolean layoutBehindSystemBars = shouldForceAynThorDualScreenFullscreen()
+                || LauncherPreferences.isForceFullscreenMode(this);
         View decorView = getWindow().getDecorView();
         if (decorView != null) {
-            decorView.setFitsSystemWindows(false);
+            decorView.setFitsSystemWindows(!layoutBehindSystemBars);
             decorView.setClipToOutline(false);
             try {
                 decorView.requestApplyInsets();
@@ -7080,10 +8138,10 @@ public class GameActivity extends AppCompatActivity {
 
         if (binding != null) {
             View root = binding.getRoot();
-            root.setFitsSystemWindows(false);
+            root.setFitsSystemWindows(!layoutBehindSystemBars);
             root.setClipToOutline(false);
             if (minecraftSurface != null) {
-                minecraftSurface.setFitsSystemWindows(false);
+                minecraftSurface.setFitsSystemWindows(!layoutBehindSystemBars);
                 minecraftSurface.setClipToOutline(false);
             }
         }
@@ -7093,11 +8151,13 @@ public class GameActivity extends AppCompatActivity {
         if (binding == null) return;
 
         View root = binding.getRoot();
-        root.setFitsSystemWindows(false);
+        boolean layoutBehindSystemBars = shouldForceAynThorDualScreenFullscreen()
+                || LauncherPreferences.isForceFullscreenMode(this);
+        root.setFitsSystemWindows(!layoutBehindSystemBars);
         root.setClipToOutline(false);
 
         if (minecraftSurface != null) {
-            minecraftSurface.setFitsSystemWindows(false);
+            minecraftSurface.setFitsSystemWindows(!layoutBehindSystemBars);
             minecraftSurface.setClipToOutline(false);
         }
 
@@ -7107,21 +8167,177 @@ public class GameActivity extends AppCompatActivity {
             rootGroup.setClipToPadding(false);
         }
 
-        // Android cannot draw outside a phone's physical rounded display corners.
-        // This option instead keeps the game slightly inside the safe rectangle.
-        // Do not apply this padding when the user explicitly opted into using the
-        // display cutout/notch area, otherwise the notch toggle appears ignored.
+        // "Ignore display notch" means treat the camera cutout as unavailable game
+        // space. Android 15/16 can force edge-to-edge even when the legacy cutout
+        // attribute says NEVER, so enforce the actual DisplayCutout safe inset on
+        // the shared game root. Force Fullscreen remains independent.
         boolean ignoreDisplayCutout = LauncherPreferences.isIgnoreDisplayCutout(this);
-        boolean avoidRoundedCorners = LauncherPreferences.isAvoidRoundedDisplayCorners(this)
-                && !ignoreDisplayCutout;
-        int safeInset = avoidRoundedCorners ? dpToPx(10) : 0;
-        root.setPadding(safeInset, safeInset, safeInset, safeInset);
+        boolean avoidRoundedCorners = LauncherPreferences.isAvoidRoundedDisplayCorners(this);
+        int roundedCornerInset = avoidRoundedCorners ? dpToPx(10) : 0;
+        applyDisplayCutoutSafeArea(root, ignoreDisplayCutout, roundedCornerInset);
 
         try {
             root.requestApplyInsets();
             if (minecraftSurface != null) minecraftSurface.requestApplyInsets();
         } catch (Throwable ignored) {
         }
+    }
+
+    /**
+     * Applies the physical display-cutout safe rectangle to the whole game root without
+     * asking Android to resize the native game window. Keeping the adjustment on the root
+     * means Minecraft, the touch controls, the software cursor and launcher overlays all
+     * share exactly the same coordinate space.
+     *
+     * <p>When Ignore display notch is ON, the physical camera cutout is excluded from
+     * the usable game/control rectangle. When it is OFF, no cutout padding is added.</p>
+     */
+    private void applyDisplayCutoutSafeArea(
+            @NonNull View root,
+            boolean ignoreDisplayCutout,
+            int roundedCornerInset
+    ) {
+        // Android 15/16 may enforce edge-to-edge and SDL can change system-UI flags
+        // after GameActivity starts. Apply the real cutout only when the toggle is ON.
+        // A rounded-corner margin may still require the listener when notch avoidance
+        // itself is OFF.
+        if (!ignoreDisplayCutout && roundedCornerInset <= 0) {
+            root.setOnApplyWindowInsetsListener(null);
+            root.setPadding(0, 0, 0, 0);
+            reapplyCenteredPortraitLayoutAfterInsets();
+            return;
+        }
+
+        final View.OnApplyWindowInsetsListener listener = (view, insets) -> {
+            applyPhysicalDisplaySafeInsets(view, insets, ignoreDisplayCutout, roundedCornerInset);
+            // Never consume the insets. IME/navigation-aware children still need the
+            // original object, and the touch editor uses the same game-root geometry.
+            return insets;
+        };
+        root.setOnApplyWindowInsetsListener(listener);
+
+        // Keep the rounded-corner preference useful before the first inset dispatch.
+        root.setPadding(
+                roundedCornerInset,
+                roundedCornerInset,
+                roundedCornerInset,
+                roundedCornerInset
+        );
+
+        // requestApplyInsets() can be ignored if SDL changes the decor flags in the
+        // same frame. Apply any already-known root insets now and then request a fresh
+        // dispatch on the next frame as well.
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                WindowInsets current = root.getRootWindowInsets();
+                if (current != null) {
+                    applyPhysicalDisplaySafeInsets(root, current, ignoreDisplayCutout, roundedCornerInset);
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        root.post(() -> {
+            try {
+                WindowInsets current = Build.VERSION.SDK_INT >= Build.VERSION_CODES.M
+                        ? root.getRootWindowInsets() : null;
+                if (current != null) {
+                    applyPhysicalDisplaySafeInsets(root, current, ignoreDisplayCutout, roundedCornerInset);
+                }
+                root.requestApplyInsets();
+            } catch (Throwable ignored) {
+            }
+        });
+    }
+
+    private void applyPhysicalDisplaySafeInsets(
+            @NonNull View view,
+            @Nullable WindowInsets insets,
+            boolean ignoreDisplayCutout,
+            int roundedCornerInset
+    ) {
+        int rawLeft = 0;
+        int rawTop = 0;
+        int rawRight = 0;
+        int rawBottom = 0;
+
+        if (ignoreDisplayCutout && Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && insets != null) {
+            try {
+                DisplayCutout cutout = insets.getDisplayCutout();
+                if (cutout != null) {
+                    rawLeft = Math.max(rawLeft, cutout.getSafeInsetLeft());
+                    rawTop = Math.max(rawTop, cutout.getSafeInsetTop());
+                    rawRight = Math.max(rawRight, cutout.getSafeInsetRight());
+                    rawBottom = Math.max(rawBottom, cutout.getSafeInsetBottom());
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+
+        if (ignoreDisplayCutout && Build.VERSION.SDK_INT >= Build.VERSION_CODES.R && insets != null) {
+            try {
+                android.graphics.Insets cutoutInsets = insets.getInsets(WindowInsets.Type.displayCutout());
+                rawLeft = Math.max(rawLeft, cutoutInsets.left);
+                rawTop = Math.max(rawTop, cutoutInsets.top);
+                rawRight = Math.max(rawRight, cutoutInsets.right);
+                rawBottom = Math.max(rawBottom, cutoutInsets.bottom);
+            } catch (Throwable ignored) {
+            }
+        }
+
+        // If PhoneWindow/OEM decor fitting has already moved or shrunk the app root
+        // away from an unsafe edge, subtract that amount. This prevents double-insetting
+        // on Android versions that still honor LAYOUT_IN_DISPLAY_CUTOUT_MODE_NEVER while
+        // retaining the manual safety net required by Android 15/16 edge-to-edge.
+        int occupiedLeft = 0;
+        int occupiedTop = 0;
+        int occupiedRight = 0;
+        int occupiedBottom = 0;
+        try {
+            View decor = getWindow() == null ? null : getWindow().getDecorView();
+            if (decor != null && decor.getWidth() > 0 && decor.getHeight() > 0
+                    && view.getWidth() > 0 && view.getHeight() > 0) {
+                int[] viewLocation = new int[2];
+                int[] decorLocation = new int[2];
+                view.getLocationOnScreen(viewLocation);
+                decor.getLocationOnScreen(decorLocation);
+                occupiedLeft = Math.max(0, viewLocation[0] - decorLocation[0]);
+                occupiedTop = Math.max(0, viewLocation[1] - decorLocation[1]);
+                occupiedRight = Math.max(0,
+                        decor.getWidth() - occupiedLeft - view.getWidth());
+                occupiedBottom = Math.max(0,
+                        decor.getHeight() - occupiedTop - view.getHeight());
+            }
+        } catch (Throwable ignored) {
+        }
+
+        int left = Math.max(roundedCornerInset, Math.max(0, rawLeft - occupiedLeft));
+        int top = Math.max(roundedCornerInset, Math.max(0, rawTop - occupiedTop));
+        int right = Math.max(roundedCornerInset, Math.max(0, rawRight - occupiedRight));
+        int bottom = Math.max(roundedCornerInset, Math.max(0, rawBottom - occupiedBottom));
+
+        boolean paddingChanged = view.getPaddingLeft() != left
+                || view.getPaddingTop() != top
+                || view.getPaddingRight() != right
+                || view.getPaddingBottom() != bottom;
+        if (paddingChanged) {
+            view.setPadding(left, top, right, bottom);
+            reapplyCenteredPortraitLayoutAfterInsets();
+        }
+
+        LauncherLogManager.append(
+                "DroidBridgeCutout: ignoreNotch=" + ignoreDisplayCutout
+                        + " raw=" + rawLeft + "," + rawTop + "," + rawRight + "," + rawBottom
+                        + " alreadySafe=" + occupiedLeft + "," + occupiedTop + ","
+                        + occupiedRight + "," + occupiedBottom
+                        + " applied=" + left + "," + top + "," + right + "," + bottom
+                        + " forceFullscreen=" + LauncherPreferences.isForceFullscreenMode(this)
+                        + " sdk=" + Build.VERSION.SDK_INT
+        );
+    }
+
+    private void reapplyCenteredPortraitLayoutAfterInsets() {
+        if (!shouldUseCenteredPortraitGameViewport() || minecraftSurface == null) return;
+        minecraftSurface.post(() -> applyGameSurfaceLayoutMode(minecraftSurface));
     }
 
     @Override
@@ -7234,6 +8450,14 @@ public class GameActivity extends AppCompatActivity {
 
     @Override
     protected void onStop() {
+        // Screen capture is scoped to the running DroidBridge game experience. If the game
+        // leaves the foreground, finalize immediately instead of allowing a foreground
+        // recorder to outlive Minecraft and strand an IS_PENDING MediaStore entry.
+        if (GameRecordingService.isRecordingOrStarting()) {
+            LauncherLogManager.append("RecordingLifecycle: GameActivity onStop -> finalize recording");
+            GameRecordingService.stop(this);
+            applyRecordingTouchControlVisibility(false);
+        }
         setVulkanPresentationPausedFromLifecycle(true, "GameActivity onStop");
         DroidBridgeSDL3Bootstrap.onStop();
         super.onStop();
@@ -7802,6 +9026,106 @@ public class GameActivity extends AppCompatActivity {
         return true;
     }
 
+    private boolean handleInGameMenuKeyboardShortcut(@NonNull KeyEvent event) {
+        int source = event.getSource();
+        boolean keyboardSource = source == 0
+                || (source & InputDevice.SOURCE_KEYBOARD) == InputDevice.SOURCE_KEYBOARD;
+        if (!keyboardSource || isControllerOnlyShortcutKey(event)) return false;
+
+        int eventKeyCode = normalizeInGameMenuShortcutKeyCode(event);
+        int action = event.getAction();
+
+        // Once the shortcut primary key is accepted, consume its complete key edge even if
+        // the user releases Ctrl/Alt/Shift/Meta before releasing the primary key. This keeps
+        // an orphaned Escape/Insert/etc. release from leaking into Minecraft.
+        if (activeInGameMenuShortcutKeyCode != KeyEvent.KEYCODE_UNKNOWN
+                && eventKeyCode == activeInGameMenuShortcutKeyCode
+                && (activeInGameMenuShortcutDeviceId < 0
+                || event.getDeviceId() == activeInGameMenuShortcutDeviceId)) {
+            if (action == KeyEvent.ACTION_UP || action == KeyEvent.ACTION_MULTIPLE) {
+                activeInGameMenuShortcutKeyCode = KeyEvent.KEYCODE_UNKNOWN;
+                activeInGameMenuShortcutDeviceId = -1;
+            }
+            return true;
+        }
+
+        int configuredKeyCode = LauncherPreferences.getInGameMenuKeyboardShortcutKeyCode(this);
+        if (configuredKeyCode <= 0 || eventKeyCode != configuredKeyCode) return false;
+
+        int configuredModifiers = LauncherPreferences.getInGameMenuKeyboardShortcutModifiers(this);
+        int eventModifiers = normalizedInGameMenuShortcutModifiers(event.getMetaState());
+        if (eventModifiers != configuredModifiers) return false;
+
+        if (action == KeyEvent.ACTION_DOWN) {
+            activeInGameMenuShortcutKeyCode = eventKeyCode;
+            activeInGameMenuShortcutDeviceId = event.getDeviceId();
+            if (event.getRepeatCount() == 0 && !event.isCanceled()) {
+                LauncherLogManager.append(
+                        "GameActivity: physical keyboard launcher-menu shortcut pressed keyCode="
+                                + configuredKeyCode + " modifiers=0x"
+                                + Integer.toHexString(configuredModifiers));
+                openInGameLauncherMenuFromBackShortcut();
+            }
+            // Consume repeats too so the shortcut primary key never enters SDL/GLFW.
+            return true;
+        }
+        return action == KeyEvent.ACTION_UP || action == KeyEvent.ACTION_MULTIPLE;
+    }
+
+    /**
+     * Shortcut routing deliberately does not use the broad isGamepadKeyEvent() test. USB/DeX
+     * keyboard+mouse receivers can expose multiple HID sources under one Android InputDevice,
+     * including a joystick source, even though Insert/End/Escape/letters are genuine keyboard
+     * keys. Only reject actual controller button keycodes here so composite keyboards remain
+     * bindable while Controlify/Legacy4J/controller buttons keep their existing route.
+     */
+    private static boolean isControllerOnlyShortcutKey(@NonNull KeyEvent event) {
+        if (GamepadButton.fromAndroidKeyEvent(event) != null) return true;
+        switch (event.getKeyCode()) {
+            case KeyEvent.KEYCODE_BUTTON_A:
+            case KeyEvent.KEYCODE_BUTTON_B:
+            case KeyEvent.KEYCODE_BUTTON_C:
+            case KeyEvent.KEYCODE_BUTTON_X:
+            case KeyEvent.KEYCODE_BUTTON_Y:
+            case KeyEvent.KEYCODE_BUTTON_Z:
+            case KeyEvent.KEYCODE_BUTTON_L1:
+            case KeyEvent.KEYCODE_BUTTON_R1:
+            case KeyEvent.KEYCODE_BUTTON_L2:
+            case KeyEvent.KEYCODE_BUTTON_R2:
+            case KeyEvent.KEYCODE_BUTTON_THUMBL:
+            case KeyEvent.KEYCODE_BUTTON_THUMBR:
+            case KeyEvent.KEYCODE_BUTTON_START:
+            case KeyEvent.KEYCODE_BUTTON_SELECT:
+            case KeyEvent.KEYCODE_BUTTON_MODE:
+            case KeyEvent.KEYCODE_DPAD_UP:
+            case KeyEvent.KEYCODE_DPAD_DOWN:
+            case KeyEvent.KEYCODE_DPAD_LEFT:
+            case KeyEvent.KEYCODE_DPAD_RIGHT:
+            case KeyEvent.KEYCODE_DPAD_CENTER:
+                return true;
+            default:
+                return false;
+        }
+    }
+
+    private static int normalizeInGameMenuShortcutKeyCode(@NonNull KeyEvent event) {
+        // Several Android HID stacks expose a physical keyboard Esc as KEYCODE_BACK with
+        // Linux scan code 1. Match it as Escape without changing genuine Android Back.
+        if (event.getKeyCode() == KeyEvent.KEYCODE_BACK
+                && MinecraftGLSurface.isKeyboardEscapeKey(event)) {
+            return KeyEvent.KEYCODE_ESCAPE;
+        }
+        return event.getKeyCode();
+    }
+
+    private static int normalizedInGameMenuShortcutModifiers(int metaState) {
+        int normalized = KeyEvent.normalizeMetaState(metaState);
+        return normalized & (KeyEvent.META_CTRL_ON
+                | KeyEvent.META_ALT_ON
+                | KeyEvent.META_SHIFT_ON
+                | KeyEvent.META_META_ON);
+    }
+
     @Override
     public boolean dispatchKeyEvent(@NonNull KeyEvent event) {
         InputEventDiagnosticLogger.logKeyEvent(
@@ -7812,6 +9136,13 @@ public class GameActivity extends AppCompatActivity {
             return true;
         }
         event = normalizeControllerBackAsButtonB(event);
+
+        // Optional user-selected physical keyboard shortcut. Check it before SDL/GLFW so
+        // only the reserved key is consumed; every unbound key keeps the existing route.
+        if (handleInGameMenuKeyboardShortcut(event)) {
+            return true;
+        }
+
         // Record the physical R2 key edge before SDL consumes it. Some OEM
         // controller drivers deliver the matching bogus right-stick sample in a
         // later MotionEvent, so the shared SDL axis filter needs this timestamp.
@@ -8059,6 +9390,13 @@ public class GameActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         exiting = true;
+        if (GameRecordingService.isRecordingOrStarting()) {
+            GameRecordingService.stop(this);
+        }
+        DualScreenRecordingSession.stopAsync();
+        applyRecordingTouchControlVisibility(false);
+        unregisterRecordingFrameBridgeReceiver();
+        unregisterGameRecordingStateReceiver();
         if (androidBackPressedCallback != null) {
             androidBackPressedCallback.remove();
             androidBackPressedCallback = null;
@@ -8071,6 +9409,7 @@ public class GameActivity extends AppCompatActivity {
             // VkSurfaceKHR during the Activity's final teardown.
             minecraftSurface.releaseRetainedSdlSurfaceForShutdown();
             minecraftSurface.setSpecialKeyEventListener(null);
+            minecraftSurface.setAndroidVirtualMouseUiRouter(null);
         }
         GameResolutionSettings.clearRuntimeProfileOverride();
         stopDroidBridgeAndroidMicProxy();

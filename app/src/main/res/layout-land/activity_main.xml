@@ -37,7 +37,7 @@
                     android:layout_marginEnd="10dp"
                     app:cardBackgroundColor="?attr/colorSurface"
                     app:cardCornerRadius="20dp"
-                    app:cardElevation="2dp"
+                    app:cardElevation="0dp"
                     app:cardUseCompatPadding="false"
                     app:strokeColor="?attr/colorOutlineVariant"
                     app:strokeWidth="1dp">
@@ -72,13 +72,17 @@
                             android:background="@android:color/transparent"
                             app:tabGravity="start"
                             app:tabIndicatorFullWidth="false"
-                            app:tabMinWidth="66dp"
+                            app:tabMinWidth="60dp"
                             app:tabMode="scrollable"
                             app:tabPaddingEnd="12dp"
                             app:tabPaddingStart="12dp" />
                         <com.google.android.material.button.MaterialButton
                             android:id="@+id/buttonMultiSelectInstances"
                             style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:elevation="0dp"
+                            android:stateListAnimator="@null"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp"
                             android:layout_width="48dp"
                             android:layout_height="44dp"
                             android:layout_marginEnd="6dp"
@@ -95,9 +99,13 @@
                         <com.google.android.material.button.MaterialButton
                             android:id="@+id/buttonStorageLocations"
                             style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:stateListAnimator="@null"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp"
                             android:layout_width="48dp"
                             android:layout_height="44dp"
                             android:contentDescription="@string/storage_locations_title"
+                            android:elevation="0dp"
                             android:minWidth="48dp"
                             android:minHeight="44dp"
                             android:padding="0dp"
@@ -113,9 +121,13 @@
                         <com.google.android.material.button.MaterialButton
                             android:id="@+id/buttonOpenSettings"
                             style="@style/Widget.Material3.Button.OutlinedButton"
+                            android:stateListAnimator="@null"
+                            android:insetTop="0dp"
+                            android:insetBottom="0dp"
                             android:layout_width="48dp"
                             android:layout_height="44dp"
                             android:contentDescription="@string/button_settings"
+                            android:elevation="0dp"
                             android:minWidth="48dp"
                             android:minHeight="44dp"
                             android:padding="0dp"
@@ -182,7 +194,7 @@
                     android:layout_marginBottom="10dp"
                     app:cardBackgroundColor="?attr/colorSurface"
                     app:cardCornerRadius="20dp"
-                    app:cardElevation="2dp"
+                    app:cardElevation="0dp"
                     app:cardUseCompatPadding="false"
                     app:strokeColor="?attr/colorOutlineVariant"
                     app:strokeWidth="1dp">
@@ -235,14 +247,18 @@
                                     <com.google.android.material.button.MaterialButton
                                         android:id="@+id/buttonShareLatestLog"
                                         style="@style/Widget.Material3.Button.OutlinedButton"
+                                        android:elevation="0dp"
+                                        android:stateListAnimator="@null"
+                                        android:insetTop="0dp"
+                                        android:insetBottom="0dp"
                                         android:layout_width="wrap_content"
                                         android:textStyle="bold"
                                         android:layout_height="44dp"
-                                        android:contentDescription="@string/button_share_latest_log"
+                                        android:contentDescription="@string/button_share_logs"
                                         android:minWidth="48dp"
                                         android:minHeight="44dp"
                                         android:padding="8dp"
-                                        android:text="Share Logs"
+                                        android:text="@string/button_share_logs"
                                         app:icon="@drawable/ic_share_24"
                                         app:iconGravity="textStart"
                                         app:iconPadding="0dp" />
@@ -256,6 +272,10 @@
                                     <com.google.android.material.button.MaterialButton
                                         android:id="@+id/buttonBrowseContentMain"
                                         style="@style/Widget.Material3.Button.OutlinedButton"
+                                        android:elevation="0dp"
+                                        android:stateListAnimator="@null"
+                                        android:insetTop="0dp"
+                                        android:insetBottom="0dp"
                                         android:layout_width="wrap_content"
                                         android:layout_height="44dp"
                                         android:ellipsize="end"
@@ -274,6 +294,10 @@
                                     <com.google.android.material.button.MaterialButton
                                         android:id="@+id/buttonImportModpackMain"
                                         style="@style/Widget.Material3.Button.OutlinedButton"
+                                        android:elevation="0dp"
+                                        android:stateListAnimator="@null"
+                                        android:insetTop="0dp"
+                                        android:insetBottom="0dp"
                                         android:layout_width="wrap_content"
                                         android:layout_height="44dp"
                                         android:ellipsize="end"
@@ -293,6 +317,10 @@
                                     <com.google.android.material.button.MaterialButton
                                         android:id="@+id/buttonRefreshVersions"
                                         style="@style/Widget.Material3.Button.OutlinedButton"
+                                        android:elevation="0dp"
+                                        android:stateListAnimator="@null"
+                                        android:insetTop="0dp"
+                                        android:insetBottom="0dp"
                                         android:layout_width="48dp"
                                         android:layout_height="44dp"
                                         android:contentDescription="@string/button_refresh_versions"
@@ -317,10 +345,10 @@
                                 android:contentDescription="@string/create_instance_button"
                                 app:backgroundTint="?attr/colorPrimary"
                                 app:borderWidth="0dp"
-                                app:elevation="2dp"
+                                app:elevation="0dp"
                                 app:fabCustomSize="44dp"
                                 app:maxImageSize="24dp"
-                                app:pressedTranslationZ="4dp"
+                                app:pressedTranslationZ="0dp"
                                 app:srcCompat="@drawable/ic_add_24"
                                 app:tint="?attr/colorOnPrimary" />
                         </LinearLayout>
@@ -359,12 +387,20 @@
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/buttonLaunchVersion"
+            android:elevation="0dp"
+            android:stateListAnimator="@null"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="@string/button_launch_version" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/buttonOpenFolder"
+            android:elevation="0dp"
+            android:stateListAnimator="@null"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="@string/button_open_folder" />
@@ -383,12 +419,20 @@
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/buttonSignIn"
+            android:elevation="0dp"
+            android:stateListAnimator="@null"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="@string/button_sign_in" />
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/buttonSignOut"
+            android:elevation="0dp"
+            android:stateListAnimator="@null"
+            android:insetTop="0dp"
+            android:insetBottom="0dp"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="@string/button_sign_out" />

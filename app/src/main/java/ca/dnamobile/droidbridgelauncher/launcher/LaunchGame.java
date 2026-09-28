@@ -21,6 +21,8 @@ import androidx.annotation.Nullable;
 
 import ca.dnamobile.droidbridgelauncher.modcompat.ControlifySDL;
 import ca.dnamobile.droidbridgelauncher.modcompat.DistantHorizonsIrisConfigMitigation;
+import ca.dnamobile.droidbridgelauncher.modcompat.DistantHorizonsZstdCompat;
+import ca.dnamobile.droidbridgelauncher.modcompat.DistantHorizonsSqliteCompat;
 import ca.dnamobile.droidbridgelauncher.modcompat.AndroidModpackCrashMitigation;
 import ca.dnamobile.droidbridgelauncher.modcompat.ControllerModCompat;
 import ca.dnamobile.droidbridgelauncher.modcompat.TouchControllerModCompat;
@@ -48,6 +50,7 @@ import ca.dnamobile.droidbridgelauncher.modcompat.SodiumMobileGluesShaderPatch;
 import ca.dnamobile.droidbridgelauncher.data.AccountStore;
 import ca.dnamobile.droidbridgelauncher.feature.log.Logging;
 import ca.dnamobile.droidbridgelauncher.logs.LauncherLogManager;
+import ca.dnamobile.droidbridgelauncher.logs.ForgeNeoForgeModList;
 import ca.dnamobile.droidbridgelauncher.instance.LauncherInstance;
 import ca.dnamobile.droidbridgelauncher.instance.LauncherInstanceManager;
 import ca.dnamobile.droidbridgelauncher.modcompat.VulkanModConfigMitigation;
@@ -57,12 +60,19 @@ import ca.dnamobile.droidbridgelauncher.modcompat.VulkanMod262QueueMitigation;
 import ca.dnamobile.droidbridgelauncher.modcompat.NotEnoughVulkanMonitorMitigation;
 import ca.dnamobile.droidbridgelauncher.modcompat.PodiumAutoDisableMitigation;
 import ca.dnamobile.droidbridgelauncher.modcompat.PreLaunchModScan;
+import ca.dnamobile.droidbridgelauncher.modcompat.VoxyCompat;
 import ca.dnamobile.droidbridgelauncher.modcompat.ReplayModNeoForgeMixinMitigation;
 import ca.dnamobile.droidbridgelauncher.renderer.BtaRendererPolicy;
+import ca.dnamobile.droidbridgelauncher.renderer.Driver;
+import ca.dnamobile.droidbridgelauncher.renderer.DriverPluginManager;
+import ca.dnamobile.droidbridgelauncher.renderer.MesaZinkTurnipDriver;
+import ca.dnamobile.droidbridgelauncher.renderer.MobileGluesConfigHelper;
 import ca.dnamobile.droidbridgelauncher.renderer.RendererInterface;
 import ca.dnamobile.droidbridgelauncher.renderer.Renderers;
 import ca.dnamobile.droidbridgelauncher.renderer.RendererVersionRules;
 import ca.dnamobile.droidbridgelauncher.security.LauncherSecurity;
+import ca.dnamobile.droidbridgelauncher.settings.LauncherPreferences;
+import ca.dnamobile.droidbridgelauncher.settings.GameResolutionSettings;
 import ca.dnamobile.droidbridgelauncher.ui.version.CleanroomSupport;
 import ca.dnamobile.droidbridgelauncher.ui.version.MinecraftVersionInstaller;
 import ca.dnamobile.droidbridgelauncher.utils.path.PathManager;
@@ -186,6 +196,7 @@ public final class LaunchGame {
                     InstanceLaunchSettings.resolveEffectiveSystemVulkanDriver(context, perInstanceSettings);
 
             ensureInstalled(launchVersionId);
+            PreLaunchModScan modScan = PreLaunchModScan.scan(gameDirectory);
             Renderers.reload(context);
             RendererInterface renderer = resolveRendererForLaunch(
                     context,
@@ -194,9 +205,9 @@ public final class LaunchGame {
                     instance,
                     perInstanceSettings
             );
+            renderer = VoxyCompat.selectRendererForLaunch(context, renderer, modScan);
 
             JSONObject versionJson = readVersionJson(launchVersionId);
-            PreLaunchModScan modScan = PreLaunchModScan.scan(gameDirectory);
             boolean vulkanMod262Compatibility =
                     modScan.hasVulkanMod
                             && effectiveSystemVulkan
@@ -214,23 +225,24 @@ public final class LaunchGame {
             int targetJava = resolveTargetJava(launchVersionId, versionJson);
             File defaultRuntime = resolveRuntimeDirectory(targetJava);
             File runtime = InstanceLaunchSettings.resolveRuntimeDirectory(perInstanceSettings, defaultRuntime);
-            if (CleanroomSupport.isCleanroomProfile(launchVersionId, versionJson)) {
-                int selectedRuntimeJava = RuntimeCompat.javaMajorForRuntimeName(runtime.getName());
-                if (selectedRuntimeJava < targetJava) {
-                    safeAppendLog("Warning: Ignoring incompatible per-instance Java runtime "
-                            + runtime.getName() + " for Cleanroom; Java " + targetJava + " is required.");
-                    runtime = defaultRuntime;
-                }
+            int selectedRuntimeJava = RuntimeCompat.javaMajorForRuntimeName(runtime.getName());
+            if (selectedRuntimeJava > 0 && selectedRuntimeJava < targetJava) {
+                safeAppendLog("Warning: Ignoring incompatible per-instance Java runtime "
+                        + runtime.getName() + "; Java " + targetJava + " is required by "
+                        + launchVersionId + ".");
+                runtime = defaultRuntime;
             }
 
             safeAppendSection("Launch configuration");
-            safeAppendLog("Renderer: " + renderer.getRendererName() + " (" + renderer.getRendererId() + ")");
-            if (renderer.isExternalPlugin()) {
-                safeAppendLog("Renderer plugin: " + renderer.getUniqueIdentifier());
-            }
-            safeAppendLog("Graphics: API=" + effectiveGraphicsApiMode
-                    + ", system Vulkan=" + (effectiveSystemVulkan ? "on" : "off")
-                    + (perInstanceSettings.hasGraphicsApiOverride() ? ", per-instance override" : ""));
+            appendRendererSettingsSummary(
+                    context,
+                    renderer,
+                    perInstanceSettings,
+                    effectiveGraphicsApiMode,
+                    effectiveSystemVulkan,
+                    width,
+                    height
+            );
             if (skipVanillaGraphicsApiOverride) {
                 safeAppendLog("VulkanMod 26.2 detected: leaving Minecraft's Graphics API option "
                         + "untouched; VulkanMod compatibility manages its own backend"
@@ -254,6 +266,9 @@ public final class LaunchGame {
             if (perInstanceSettings.hasAnyOverride()) {
                 safeAppendLog("Instance overrides: active");
             }
+
+            appendForgeNeoForgeModSummary(gameDirectory, launchVersionId, versionJson);
+
             Logging.i(TAG, "Runtime path=" + runtime.getAbsolutePath()
                     + ", exists=" + runtime.isDirectory());
 
@@ -272,6 +287,14 @@ public final class LaunchGame {
                 if (!detectedMods.isEmpty()) {
                     safeAppendLog("Detected: " + detectedMods);
                 }
+                if (modScan.hasVoxy) {
+                    if (VoxyCompat.isUsingRequiredRenderer(renderer)) {
+                        safeAppendLog("Voxy: Kopper Zink desktop OpenGL compatibility enabled");
+                    } else {
+                        safeAppendLog("Warning: Voxy requires Kopper Zink on DroidBridge, but it is unavailable on this device");
+                    }
+                    safeAppendLog("Voxy: Android native fallback enabled (JavaSafe LZ4 + session memory storage)");
+                }
             }
 
             runPreLaunchModMitigations(
@@ -280,7 +303,8 @@ public final class LaunchGame {
                     launchVersionId,
                     renderer,
                     modScan,
-                    vulkanMod262Compatibility
+                    vulkanMod262Compatibility,
+                    effectiveGraphicsApiMode
             );
 
             String launchVulkanCompatibilityMode = perInstanceSettings.vulkanCompatibilityMode;
@@ -305,6 +329,17 @@ public final class LaunchGame {
                     .setVulkanCompatibilityMode(launchVulkanCompatibilityMode)
                     .build();
 
+            plan = applyDistantHorizonsWorldgenShutdownRuntimeCompatibility(
+                    plan,
+                    modScan
+            );
+
+            plan = applyDistantHorizonsIrisVulkanRuntimeCompatibility(
+                    plan,
+                    modScan,
+                    effectiveGraphicsApiMode
+            );
+
             plan = appendQuickPlayArgs(
                     plan,
                     quickPlayWorldName,
@@ -316,9 +351,15 @@ public final class LaunchGame {
             );
             plan = appendMethodInjectorAgentIfNeeded(context, plan, targetJava, gameDirectory);
             plan = InstanceLaunchSettings.applyJvmOverrides(context, plan, perInstanceSettings);
+            plan = VoxyCompat.applyLaunchPlanCompatibility(plan, modScan);
             plan = ControllerModCompat.applyLaunchPlanCompatibility(context, plan, gameDirectory);
 
-            if (modScan.hasDistantHorizons) {
+            boolean dhDetectedForGc = modScan.hasDistantHorizons
+                    || DistantHorizonsGcMitigation.hasDistantHorizons(gameDirectory);
+            if (dhDetectedForGc) {
+                if (!modScan.hasDistantHorizons) {
+                    safeAppendLog("Distant Horizons: detected by jar class marker fallback");
+                }
                 DistantHorizonsGcMitigation.Result dhGcResult = DistantHorizonsGcMitigation.applyIfNeeded(
                         context,
                         plan,
@@ -335,7 +376,9 @@ public final class LaunchGame {
                             + " (" + selectionSource + ")");
                 }
                 for (String message : dhGcResult.messages) {
-                    if (message.startsWith("Failed:") || message.startsWith("Fell back")) {
+                    if (message.startsWith("ZGC probe") || message.startsWith("ZGC external")) {
+                        safeAppendLog("Distant Horizons GC: " + message);
+                    } else if (message.startsWith("Failed:") || message.startsWith("Fell back")) {
                         safeAppendLog("Warning: Distant Horizons GC: " + message);
                     }
                 }
@@ -769,19 +812,24 @@ public final class LaunchGame {
             @Nullable LauncherInstance instance,
             @NonNull InstanceLaunchSettings.Settings settings
     ) {
-        if (BtaRendererPolicy.isBtaLaunch(requestedVersionId, instance)
-                || BtaRendererPolicy.isBtaLaunch(launchVersionId, instance)) {
+        boolean btaLaunch = BtaRendererPolicy.isBtaLaunch(requestedVersionId, instance)
+                || BtaRendererPolicy.isBtaLaunch(launchVersionId, instance);
+        boolean modernBta = BtaRendererPolicy.isBta8OrNewer(requestedVersionId, instance)
+                || BtaRendererPolicy.isBta8OrNewer(launchVersionId, instance);
+        if (btaLaunch && !modernBta) {
             RendererInterface krypton = BtaRendererPolicy.findKryptonRenderer(context);
             if (krypton != null) {
                 if (settings.hasRendererOverride()) {
-                    Logging.i(TAG, "BTA renderer lock ignored per-instance renderer override "
+                    Logging.i(TAG, "Legacy BTA renderer lock ignored per-instance renderer override "
                             + settings.rendererIdentifier);
                 }
-                Logging.i(TAG, "BTA renderer lock selected " + krypton.getRendererName()
+                Logging.i(TAG, "Legacy BTA renderer lock selected " + krypton.getRendererName()
                         + " (" + krypton.getUniqueIdentifier() + ")");
                 return krypton;
             }
-            safeAppendLog("Warning: Better Than Adventure requested Krypton, but Krypton was unavailable; using the normal renderer selection.");
+            safeAppendLog("Warning: Legacy Better Than Adventure requested Krypton, but Krypton was unavailable; using the normal renderer selection.");
+        } else if (btaLaunch) {
+            Logging.i(TAG, "BTA 8+ renderer policy: respecting normal/per-instance renderer selection");
         }
 
         if (settings.hasRendererOverride()) {
@@ -1102,7 +1150,8 @@ public final class LaunchGame {
             @NonNull String launchVersionId,
             @NonNull RendererInterface renderer,
             @NonNull PreLaunchModScan modScan,
-            boolean vulkanMod262Compatibility
+            boolean vulkanMod262Compatibility,
+            @NonNull String effectiveGraphicsApiMode
     ) {
         if (modScan.hasVulkanMod) {
             // Run after the LWJGL cleanup because that mitigation may rewrite the
@@ -1152,8 +1201,25 @@ public final class LaunchGame {
             NativeMesaSodiumExtraMixinMitigation.prepare(gameDirectory, launchVersionId, renderer);
         }
 
+        if (modScan.hasDistantHorizons) {
+            DistantHorizonsZstdCompat.Result zstd =
+                    DistantHorizonsZstdCompat.prepare(context, gameDirectory);
+            if (zstd.detected) {
+                safeAppendLog("Distant Horizons Zstd: " + zstd.summary);
+            }
+
+            DistantHorizonsSqliteCompat.Result sqlite =
+                    DistantHorizonsSqliteCompat.prepare(context, gameDirectory);
+            if (sqlite.detected) {
+                safeAppendLog("Distant Horizons SQLite: " + sqlite.summary);
+            }
+        }
+
         if (modScan.hasDistantHorizonsIrisPair()) {
-            ArrayList<String> messages = DistantHorizonsIrisConfigMitigation.prepare(gameDirectory);
+            ArrayList<String> messages = DistantHorizonsIrisConfigMitigation.prepare(
+                    gameDirectory,
+                    effectiveGraphicsApiMode
+            );
             int updates = 0;
             boolean failed = false;
             for (String message : messages) {
@@ -1165,10 +1231,59 @@ public final class LaunchGame {
                 }
             }
             if (!failed) {
-                safeAppendLog("Distant Horizons + Iris: OpenGL config "
+                boolean vulkan = effectiveGraphicsApiMode.toLowerCase(java.util.Locale.ROOT).contains("vulkan");
+                String dhRenderingEngine = vulkan ? "BLAZE_3D" : "OPEN_GL";
+                safeAppendLog("Distant Horizons + Iris: renderingEngine=" + dhRenderingEngine + " config "
                         + (updates > 0 ? "updated" : "verified"));
             }
         }
+    }
+
+    @NonNull
+    private static LaunchPlan applyDistantHorizonsWorldgenShutdownRuntimeCompatibility(
+            @NonNull LaunchPlan plan,
+            @NonNull PreLaunchModScan modScan
+    ) {
+        if (!modScan.hasDistantHorizons) {
+            return plan;
+        }
+
+        ArrayList<String> jvmArgs = new ArrayList<>(plan.getJvmArgs());
+        final String propertyPrefix = "-Ddroidbridge.dh.worldgen_shutdown_compat=";
+        for (int i = jvmArgs.size() - 1; i >= 0; i--) {
+            String arg = jvmArgs.get(i);
+            if (arg != null && arg.startsWith(propertyPrefix)) {
+                jvmArgs.remove(i);
+            }
+        }
+        jvmArgs.add("-Ddroidbridge.dh.worldgen_shutdown_compat=true");
+        safeAppendLog("Distant Horizons: Android worldgen shutdown guard enabled");
+        return plan.copyWithJvmArgs(jvmArgs);
+    }
+
+    @NonNull
+    private static LaunchPlan applyDistantHorizonsIrisVulkanRuntimeCompatibility(
+            @NonNull LaunchPlan plan,
+            @NonNull PreLaunchModScan modScan,
+            @NonNull String effectiveGraphicsApiMode
+    ) {
+        boolean vulkan = effectiveGraphicsApiMode.toLowerCase(java.util.Locale.ROOT).contains("vulkan");
+        if (!vulkan || !modScan.hasDistantHorizonsIrisPair()) {
+            return plan;
+        }
+
+        ArrayList<String> jvmArgs = new ArrayList<>(plan.getJvmArgs());
+        final String propertyPrefix = "-Ddroidbridge.dh.iris_vulkan_compat=";
+        for (int i = jvmArgs.size() - 1; i >= 0; i--) {
+            String arg = jvmArgs.get(i);
+            if (arg != null && arg.startsWith(propertyPrefix)) {
+                jvmArgs.remove(i);
+            }
+        }
+        jvmArgs.add("-Ddroidbridge.dh.iris_vulkan_compat=true");
+        safeAppendLog("Distant Horizons + Iris: Vulkan runtime renderer bridge enabled "
+                + "(DH OPEN_GL override -> BLAZE_3D)");
+        return plan.copyWithJvmArgs(jvmArgs);
     }
 
     private static void ensureInstalled(@NonNull String versionId) {
@@ -1231,6 +1346,11 @@ public final class LaunchGame {
     }
 
     private static int resolveTargetJava(@NonNull String versionId, @NonNull JSONObject versionJson) {
+        if (BtaRendererPolicy.isBta8OrNewer(versionId, null)) {
+            Logging.i(TAG, "BTA 8+ requires Java 17 for " + versionId);
+            return 17;
+        }
+
         int cleanroomJava = CleanroomSupport.resolveRequiredJava(versionId, versionJson);
         if (cleanroomJava > 0) {
             Logging.i(TAG, "Cleanroom requires Java " + cleanroomJava);
@@ -1268,6 +1388,202 @@ public final class LaunchGame {
     private static void notify(@Nullable StatusListener listener, @NonNull String status) {
         if (listener != null) listener.onStatus(status);
         Logging.i(TAG, status);
+    }
+
+    private static void appendRendererSettingsSummary(
+            @NonNull Context context,
+            @NonNull RendererInterface renderer,
+            @NonNull InstanceLaunchSettings.Settings perInstanceSettings,
+            @NonNull String effectiveGraphicsApiMode,
+            boolean effectiveSystemVulkan,
+            int width,
+            int height
+    ) {
+        safeAppendLog("Renderer: " + renderer.getRendererName() + " (" + renderer.getRendererId() + ")"
+                + (perInstanceSettings.hasRendererOverride() ? " / per-instance override" : ""));
+        if (renderer.isExternalPlugin()) {
+            safeAppendLog("Renderer plugin: " + renderer.getUniqueIdentifier());
+        }
+
+        safeAppendLog("Graphics API: " + friendlyGraphicsApi(effectiveGraphicsApiMode)
+                + (perInstanceSettings.hasGraphicsApiOverride() ? " / per-instance override" : ""));
+        safeAppendLog("System Vulkan driver (effective): " + onOff(effectiveSystemVulkan));
+        safeAppendLog("Use System Vulkan Driver setting: "
+                + onOff(LauncherPreferences.isUseSystemVulkanDriver(context)));
+        safeAppendLog("Use OpenGL for Minecraft 26+: "
+                + onOff(LauncherPreferences.isUseOpenGlForMinecraft26Plus(context)));
+        int activeRendererRules = RendererVersionRules.countEnabledRules(context);
+        safeAppendLog("Version-specific renderer defaults: "
+                + (activeRendererRules == 0
+                ? "off"
+                : activeRendererRules + (activeRendererRules == 1 ? " active rule" : " active rules")));
+        safeAppendLog("Vulkan VSync: "
+                + (LauncherPreferences.isVulkanVsyncEnabled(context)
+                ? "on (FIFO present mode)"
+                : "off (mailbox/unlimited present mode)"));
+
+        if (DriverPluginManager.isVulkanZinkRenderer(renderer)) {
+            appendVulkanZinkDriverSummary(context, effectiveSystemVulkan);
+        }
+
+        boolean alternativeSurfaceRendering = LauncherPreferences.isUseNativeSurfaceView(context);
+        safeAppendLog("Alternative surface rendering: "
+                + (alternativeSurfaceRendering ? "on (SurfaceView)" : "off (TextureView)"));
+        safeAppendLog("Sustained performance: "
+                + onOff(LauncherPreferences.isSustainedPerformanceEnabled(context)));
+
+        GameResolutionSettings.Profile resolutionOverride =
+                InstanceLaunchSettings.resolveResolutionProfileOverride(perInstanceSettings);
+        GameResolutionSettings.Profile resolutionProfile = resolutionOverride != null
+                ? resolutionOverride
+                : GameResolutionSettings.getProfile(context);
+        safeAppendLog("Game resolution: " + describeResolutionProfile(resolutionProfile)
+                + (resolutionOverride != null ? " / per-instance override" : " / global"));
+        safeAppendLog("Resolution scale: "
+                + LauncherPreferences.getGameResolutionScalePercent(context) + "%");
+        safeAppendLog("Surface size at launch: " + Math.max(1, width) + "x" + Math.max(1, height));
+
+        safeAppendLog("Force fullscreen: "
+                + onOff(LauncherPreferences.isForceFullscreenMode(context)));
+        safeAppendLog("Ignore notch: "
+                + onOff(LauncherPreferences.isIgnoreDisplayCutout(context)));
+        safeAppendLog("Avoid rounded display corners: "
+                + onOff(LauncherPreferences.isAvoidRoundedDisplayCorners(context)));
+
+        if (MobileGluesConfigHelper.isMobileGluesRenderer(renderer)) {
+            appendMobileGluesSettings(context, renderer);
+        }
+    }
+
+    private static void appendVulkanZinkDriverSummary(
+            @NonNull Context context,
+            boolean effectiveSystemVulkan
+    ) {
+        if (effectiveSystemVulkan) {
+            safeAppendLog("Vulkan Zink driver: Android system Vulkan driver");
+            return;
+        }
+
+        Driver selected = DriverPluginManager.getSelectedDriver(context);
+        Driver effective = selected;
+        boolean resolvedDefault = false;
+        if (selected.getType() == Driver.Type.DEFAULT_MESA) {
+            Driver bundledTurnip = MesaZinkTurnipDriver.createDriverIfAvailable(context);
+            if (bundledTurnip != null) {
+                effective = bundledTurnip;
+                resolvedDefault = true;
+            }
+        }
+
+        StringBuilder line = new StringBuilder("Vulkan Zink driver: ")
+                .append(effective.getName());
+        if (resolvedDefault) {
+            line.append(" (selected ").append(selected.getName()).append(')');
+        }
+        if (effective.getVulkanLibrary() != null) {
+            line.append(" / ").append(effective.getVulkanLibrary().getName());
+        }
+        safeAppendLog(line.toString());
+    }
+
+    private static void appendMobileGluesSettings(
+            @NonNull Context context,
+            @NonNull RendererInterface renderer
+    ) {
+        safeAppendLog("MobileGlues: active");
+        String summary;
+        try {
+            summary = MobileGluesConfigHelper.buildSettingsSummary(context, renderer);
+        } catch (Throwable throwable) {
+            safeAppendLog("MobileGlues: config unavailable: " + throwable.getClass().getSimpleName());
+            Logging.e(TAG, "Unable to read MobileGlues settings for latestlog", throwable);
+            return;
+        }
+
+        if (summary == null || summary.trim().isEmpty()) {
+            safeAppendLog("MobileGlues: config unavailable");
+            return;
+        }
+
+        String[] lines = summary.replace("\r\n", "\n").replace('\r', '\n').split("\n");
+        for (String raw : lines) {
+            String line = raw == null ? "" : raw.trim();
+            if (line.isEmpty() || "Other values:".equalsIgnoreCase(line)) continue;
+            if (line.startsWith("Selected MG folder config:")) {
+                safeAppendLog("MobileGlues config source: selected MG folder");
+                continue;
+            }
+            if (line.startsWith("Direct config:")) {
+                safeAppendLog("MobileGlues config source: direct MG/config.json");
+                continue;
+            }
+            if (line.startsWith("Mirrored launch config:")) {
+                safeAppendLog("MobileGlues config source: DroidBridge mirrored config");
+                continue;
+            }
+            if (line.startsWith("Launch MG_DIR_PATH:")) {
+                continue;
+            }
+            if (line.startsWith("•")) line = line.substring(1).trim();
+            safeAppendLog("MobileGlues: " + line);
+        }
+    }
+
+    private static void appendForgeNeoForgeModSummary(
+            @NonNull File gameDirectory,
+            @NonNull String launchVersionId,
+            @NonNull JSONObject versionJson
+    ) {
+        ForgeNeoForgeModList.Summary summary = ForgeNeoForgeModList.scan(
+                gameDirectory,
+                launchVersionId,
+                versionJson
+        );
+        if (summary == null) return;
+
+        safeAppendSection(summary.loader.label + " mods");
+        safeAppendLog("Mods: " + summary.entries.size()
+                + " mod entr" + (summary.entries.size() == 1 ? "y" : "ies")
+                + " from " + summary.jarCount
+                + " JAR" + (summary.jarCount == 1 ? "" : "s"));
+        for (ForgeNeoForgeModList.Entry entry : summary.entries) {
+            safeAppendLog("Mod: " + entry.toLogLine());
+        }
+        if (summary.jarsWithoutReadableMetadata > 0) {
+            safeAppendLog("Mods: " + summary.jarsWithoutReadableMetadata
+                    + " JAR" + (summary.jarsWithoutReadableMetadata == 1 ? "" : "s")
+                    + " had no readable Forge/NeoForge metadata; filename fallback used");
+        }
+    }
+
+    @NonNull
+    private static String friendlyGraphicsApi(@Nullable String mode) {
+        if (InstanceLaunchSettings.GRAPHICS_API_VULKAN.equals(mode)) return "Vulkan";
+        if (InstanceLaunchSettings.GRAPHICS_API_OPENGL.equals(mode)) return "OpenGL";
+        if (InstanceLaunchSettings.GRAPHICS_API_DEFAULT.equals(mode)) return "Default";
+        return mode == null || mode.trim().isEmpty() ? "OpenGL" : mode;
+    }
+
+    @NonNull
+    private static String describeResolutionProfile(@NonNull GameResolutionSettings.Profile profile) {
+        if (GameResolutionSettings.MODE_1920_1080.equals(profile.mode)) {
+            return "1920x1080";
+        }
+        if (GameResolutionSettings.MODE_BEST_4_3.equals(profile.mode)) {
+            return "4:3 best fit";
+        }
+        if (GameResolutionSettings.MODE_MCSX.equals(profile.mode)) {
+            return GameResolutionSettings.MCSX_WIDTH + "x" + GameResolutionSettings.MCSX_HEIGHT + " (MCSX)";
+        }
+        if (GameResolutionSettings.MODE_CUSTOM.equals(profile.mode)) {
+            return profile.customWidth + "x" + profile.customHeight + " (custom)";
+        }
+        return "native";
+    }
+
+    @NonNull
+    private static String onOff(boolean enabled) {
+        return enabled ? "on" : "off";
     }
 
     private static void appendLaunchHeader(

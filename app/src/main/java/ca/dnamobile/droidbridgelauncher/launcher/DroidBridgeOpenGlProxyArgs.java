@@ -10,6 +10,8 @@
 
 package ca.dnamobile.droidbridgelauncher.launcher;
 
+import android.os.Build;
+
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
 
@@ -18,6 +20,8 @@ import java.util.Locale;
 
 import ca.dnamobile.droidbridgelauncher.feature.log.Logging;
 import ca.dnamobile.droidbridgelauncher.renderer.DroidBridgeMesaSupport;
+import ca.dnamobile.droidbridgelauncher.renderer.DroidBridgeRenderSpec;
+import ca.dnamobile.droidbridgelauncher.renderer.KopperZinkRenderer;
 import ca.dnamobile.droidbridgelauncher.renderer.RendererInterface;
 import ca.dnamobile.droidbridgelauncher.runtime.Logger;
 
@@ -33,13 +37,19 @@ public final class DroidBridgeOpenGlProxyArgs {
             @NonNull LaunchPlan plan,
             @NonNull RendererInterface renderer
     ) {
-        if (DroidBridgeMesaSupport.isMesaZinkTurnipRenderer(renderer)) {
+        final boolean kopperZink = KopperZinkRenderer.isRenderer(renderer);
+        final boolean droidBridgeMesa = DroidBridgeMesaSupport.isDroidBridgeMesaRenderer(renderer);
+        final boolean android10ModernWrappedOpenGl = Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q
+                && DroidBridgeRenderSpec.isWrappedOpenGlRenderer(renderer)
+                && isMinecraft26_2OrNewer(plan);
+
+        if (!kopperZink && DroidBridgeMesaSupport.isMesaZinkTurnipRenderer(renderer)) {
             appendLog("DroidBridgeGLProxy: skipped for Vulkan Zink rollback path renderer="
                     + renderer.getRendererId());
             return plan;
         }
 
-        if (!DroidBridgeMesaSupport.isDroidBridgeMesaRenderer(renderer)) {
+        if (!kopperZink && !droidBridgeMesa && !android10ModernWrappedOpenGl) {
             appendLog("DroidBridgeGLProxy: skipped for renderer=" + renderer.getRendererId());
             return plan;
         }
@@ -50,6 +60,7 @@ public final class DroidBridgeOpenGlProxyArgs {
         removeManagedArg(args, "-Dorg.lwjgl.opengles.libname=");
         removeManagedArg(args, "-Dorg.lwjgl.opengl.contextAPI=");
         removeManagedArg(args, "-Dorg.lwjgl.opengles.contextAPI=");
+        removeManagedArg(args, "-Dorg.lwjgl.egl.libname=");
         removeManagedArg(args, "-Dorg.lwjgl.util.Debug=");
         removeManagedArg(args, "-Dorg.lwjgl.util.DebugLoader=");
 
@@ -58,12 +69,33 @@ public final class DroidBridgeOpenGlProxyArgs {
         args.add(2, "-Dorg.lwjgl.opengl.libname=" + OPENGL_PROXY_SONAME);
         args.add(3, "-Dorg.lwjgl.opengles.libname=" + OPENGL_PROXY_SONAME);
 
-        appendLog("DroidBridgeGLProxy: enabled DroidBridge Mesa LWJGL OpenGL proxy="
+        appendLog("DroidBridgeGLProxy: enabled LWJGL OpenGL RenderSpec proxy="
                 + OPENGL_PROXY_SONAME
                 + " renderer="
-                + renderer.getRendererId());
-        appendLog("DroidBridgeGLProxy: expecting native hook line containing 'DroidBridge RenderSpec request'");
+                + renderer.getRendererId()
+                + (kopperZink ? " kopperGlxToEgl=1" : "")
+                + (android10ModernWrappedOpenGl ? " android10WrappedOpenGl=1" : ""));
+        appendLog("DroidBridgeGLProxy: expecting native hook line containing 'replacing OpenGL with configured RenderSpec driver'");
         return plan.copyWithJvmArgs(args);
+    }
+
+    private static boolean isMinecraft26_2OrNewer(@NonNull LaunchPlan plan) {
+        return isMinecraft26_2OrNewer(plan.getEffectiveMinecraftVersionId())
+                || isMinecraft26_2OrNewer(plan.getVersionId());
+    }
+
+    private static boolean isMinecraft26_2OrNewer(@Nullable String value) {
+        if (value == null) return false;
+        String normalized = value.trim().toLowerCase(Locale.ROOT);
+        java.util.regex.Matcher matcher = java.util.regex.Pattern
+                .compile("^26\\.(\\d+)")
+                .matcher(normalized);
+        if (!matcher.find()) return false;
+        try {
+            return Integer.parseInt(matcher.group(1)) >= 2;
+        } catch (NumberFormatException ignored) {
+            return false;
+        }
     }
 
     private static void removeManagedArg(@NonNull ArrayList<String> args, @NonNull String prefix) {

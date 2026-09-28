@@ -16,6 +16,7 @@
 // Created by maks on 21.09.2022.
 //
 #include <EGL/egl.h>
+#include <stdbool.h>
 #ifndef DROIDBRIDGE_RUNTIME_EGL_LOADER_H
 #define DROIDBRIDGE_RUNTIME_EGL_LOADER_H
 
@@ -46,5 +47,6 @@ extern __eglMustCastToProperFunctionPointerType (*eglGetProcAddress_p) (const ch
 void dlsym_EGL();
 void* droidbridge_egl_get_handle(void);
 const char* droidbridge_egl_get_loaded_name(void);
+bool droidbridge_egl_adopt_handle(void* handle, const char* loaded_name);
 
 #endif //DROIDBRIDGE_RUNTIME_EGL_LOADER_H

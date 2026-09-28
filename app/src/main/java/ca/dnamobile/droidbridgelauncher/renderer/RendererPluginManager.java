@@ -226,6 +226,44 @@ public final class RendererPluginManager {
     private static File extractInstalledNativeLibDir(@NonNull PackageInfo info) {
         ApplicationInfo appInfo = info.applicationInfo;
         File nativeDir = getInstalledNativeLibraryDir(appInfo);
+
+        /*
+         * Android 10 keeps native libraries from separately installed APKs in a
+         * linker namespace that the embedded OpenJDK process cannot reliably
+         * reopen by absolute path. LTW works when Android/ART preloads it, but
+         * Minecraft 26.3/LWJGL 3.4 initializes org.lwjgl.opengl.GL before the
+         * SDL3 bridge and attempts to dlopen the renderer again from OpenJDK.
+         * On the LG G7 that cross-APK reopen fails and LWJGL reports that no
+         * OpenGL context-management API is available.
+         *
+         * DroidBridge already has a renderer-plugin extraction path for APKs
+         * whose nativeLibraryDir is unavailable. Reuse that same local staging
+         * path for the installed LTW plugin on API 29 and older so every launch
+         * layer (LWJGL, SDL3 and the native bridge) resolves one DroidBridge-
+         * owned libltw.so instead of crossing the plugin APK namespace.
+         */
+        boolean android10LtwNamespaceCompat = Build.VERSION.SDK_INT <= Build.VERSION_CODES.Q
+                && info.packageName != null
+                && info.packageName.toLowerCase(Locale.ROOT).contains("ltw");
+        if (android10LtwNamespaceCompat && appInfo != null) {
+            for (File apkFile : getPackageApkFiles(appInfo)) {
+                try {
+                    File extracted = extractNativeLibraries(apkFile, info.packageName);
+                    if (hasSharedLibraries(extracted)) {
+                        Logging.i(TAG, "Android 10 LTW namespace compatibility using extracted plugin natives: "
+                                + extracted.getAbsolutePath());
+                        return extracted;
+                    }
+                } catch (Throwable throwable) {
+                    Logging.e(TAG, "Android 10 LTW plugin extraction failed from "
+                            + apkFile.getAbsolutePath(), throwable);
+                }
+            }
+            Logging.i(TAG, "Android 10 LTW namespace compatibility could not extract plugin; "
+                    + "falling back to installed nativeLibraryDir="
+                    + (nativeDir != null ? nativeDir.getAbsolutePath() : "<none>"));
+        }
+
         if (hasSharedLibraries(nativeDir)) return nativeDir;
 
         if (appInfo == null) return nativeDir;

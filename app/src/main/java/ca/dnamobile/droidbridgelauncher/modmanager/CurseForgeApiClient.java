@@ -166,6 +166,88 @@ public final class CurseForgeApiClient {
         return data.trim();
     }
 
+
+    /**
+     * Resolve a CurseForge file download URL even when the API intentionally leaves
+     * downloadUrl blank or the /download-url endpoint refuses the request.
+     *
+     * CurseForge's public CDN layout is deterministic from the file id and filename.
+     * DroidBridge already uses this same fallback for CurseForge modpacks; keeping it
+     * here as well makes single-mod installs behave consistently instead of failing
+     * with "No downloadable CurseForge file found" for otherwise public files.
+     */
+    @NonNull
+    public String resolveDownloadUrl(
+            @NonNull String projectId,
+            @NonNull String fileId,
+            @NonNull String fileName,
+            @Nullable String directUrl
+    ) {
+        String direct = cleanDownloadUrl(directUrl);
+        if (isHttpUrl(direct)) return direct;
+
+        long numericFileId = parsePositiveLong(fileId);
+        if (numericFileId > 0L && !isBlank(fileName)) {
+            return buildCurseForgeCdnUrl(numericFileId, fileName);
+        }
+
+        if (!isBlank(projectId) && !isBlank(fileId)) {
+            try {
+                String endpoint = getDownloadUrl(projectId, fileId);
+                if (isHttpUrl(endpoint)) return endpoint;
+            } catch (Throwable ignored) {
+            }
+        }
+        return "";
+    }
+
+    @NonNull
+    private static String buildCurseForgeCdnUrl(long fileId, @NonNull String fileName) {
+        long firstFolder = fileId / 1000L;
+        long secondFolder = fileId % 1000L;
+        String encodedName;
+        try {
+            encodedName = encodePath(fileName);
+        } catch (Throwable ignored) {
+            encodedName = fileName.replace(" ", "%20");
+        }
+        return "https://edge.forgecdn.net/files/"
+                + firstFolder
+                + "/"
+                + String.format(Locale.US, "%03d", secondFolder)
+                + "/"
+                + encodedName;
+    }
+
+    private static long parsePositiveLong(@Nullable String value) {
+        if (isBlank(value)) return -1L;
+        try {
+            long parsed = Long.parseLong(value.trim());
+            return parsed > 0L ? parsed : -1L;
+        } catch (Throwable ignored) {
+            return -1L;
+        }
+    }
+
+    @NonNull
+    private static String cleanDownloadUrl(@Nullable String rawValue) {
+        if (rawValue == null) return "";
+        String value = rawValue.trim();
+        if (value.isEmpty()) return "";
+        if ("null".equalsIgnoreCase(value) || "<null>".equalsIgnoreCase(value)) return "";
+        if ("\"null\"".equalsIgnoreCase(value) || "'null'".equalsIgnoreCase(value)) return "";
+        if ((value.startsWith("\"") && value.endsWith("\""))
+                || (value.startsWith("'") && value.endsWith("'"))) {
+            value = value.substring(1, value.length() - 1).trim();
+        }
+        return "null".equalsIgnoreCase(value) ? "" : value;
+    }
+
+    private static boolean isHttpUrl(@Nullable String value) {
+        String url = cleanDownloadUrl(value);
+        return url.startsWith("http://") || url.startsWith("https://");
+    }
+
     public void downloadToFile(@NonNull String url, @NonNull File target) throws Exception {
         File parent = target.getParentFile();
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
@@ -265,17 +347,22 @@ public final class CurseForgeApiClient {
         String id = String.valueOf(object.optLong("id", 0L));
         String displayName = object.optString("displayName", object.optString("fileName", id));
         String fileName = object.optString("fileName", displayName);
-        String downloadUrl = object.optString("downloadUrl", "");
-        if (isBlank(downloadUrl)) {
-            try {
-                downloadUrl = getDownloadUrl(projectId, id);
-            } catch (Throwable ignored) {
-                downloadUrl = "";
-            }
-        }
+        String downloadUrl = resolveDownloadUrl(
+                projectId,
+                id,
+                fileName,
+                object.optString("downloadUrl", "")
+        );
 
         ArrayList<String> gameVersions = readStringArray(object.optJSONArray("gameVersions"));
         ArrayList<String> loaders = new ArrayList<>();
+        // Older CurseForge files often put the loader label in gameVersions rather
+        // than sortableGameVersions.modLoader. Preserve that metadata so dependency
+        // selection can reject Forge/Fabric mismatches locally as well as server-side.
+        for (String gameVersionLabel : gameVersions) {
+            String normalized = normalizeLoaderLabel(gameVersionLabel);
+            if (!normalized.isEmpty() && !loaders.contains(normalized)) loaders.add(normalized);
+        }
         JSONArray indexes = object.optJSONArray("sortableGameVersions");
         if (indexes != null) {
             for (int i = 0; i < indexes.length(); i++) {
@@ -294,7 +381,11 @@ public final class CurseForgeApiClient {
                 JSONObject dep = depArray.optJSONObject(i);
                 if (dep == null) continue;
                 String relation = dep.optInt("relationType", 0) == 3 ? "required" : "optional";
-                dependencies.add(new ModrinthDependency(null, String.valueOf(dep.optLong("modId", 0L)), null, relation));
+                long dependencyModId = dep.optLong("modId", 0L);
+                dependencies.add(new ModrinthDependency(null,
+                        dependencyModId > 0L ? String.valueOf(dependencyModId) : null,
+                        null,
+                        relation));
             }
         }
 
@@ -366,6 +457,8 @@ public final class CurseForgeApiClient {
         switch (type) {
             case RESOURCEPACKS:
                 return 12;
+            case DATAPACKS:
+                return 6945;
             case SHADERPACKS:
                 return 6552;
             case MODS:
@@ -377,8 +470,21 @@ public final class CurseForgeApiClient {
     @NonNull
     private static String getProjectType(int classId) {
         if (classId == 12) return "resourcepack";
+        if (classId == 6945) return "datapack";
         if (classId == 6552) return "shader";
         return "mod";
+    }
+
+
+    @NonNull
+    private static String normalizeLoaderLabel(@Nullable String raw) {
+        if (raw == null) return "";
+        String value = raw.trim().toLowerCase(Locale.US);
+        if (value.equals("forge") || value.startsWith("forge ") || value.endsWith(" forge")) return "forge";
+        if (value.equals("fabric") || value.startsWith("fabric ") || value.endsWith(" fabric")) return "fabric";
+        if (value.equals("quilt") || value.startsWith("quilt ") || value.endsWith(" quilt")) return "quilt";
+        if (value.equals("neoforge") || value.equals("neo forge") || value.startsWith("neoforge ") || value.endsWith(" neoforge")) return "neoforge";
+        return "";
     }
 
     private static int getSortField(@NonNull String sort) {

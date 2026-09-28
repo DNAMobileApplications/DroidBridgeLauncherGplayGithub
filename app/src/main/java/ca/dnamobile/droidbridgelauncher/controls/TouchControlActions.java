@@ -24,6 +24,8 @@ public final class TouchControlActions {
     public static final String JOYSTICK = "joystick";
     public static final String VIRTUAL_MOUSE = "virtual_mouse";
     public static final String DUAL_SCREEN_SWAP = "dual_screen_swap";
+    /** Expand/collapse a user-defined group of touch controls. */
+    public static final String DRAWER = "drawer";
 
     private TouchControlActions() {
     }

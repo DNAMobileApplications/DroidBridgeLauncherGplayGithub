@@ -35,6 +35,7 @@ import java.util.Locale;
 import java.util.UUID;
 
 import ca.dnamobile.droidbridgelauncher.feature.log.Logging;
+import ca.dnamobile.droidbridgelauncher.modmanager.ModManagerContentType;
 import ca.dnamobile.droidbridgelauncher.modmanager.ModManagerVersionResolver;
 import ca.dnamobile.droidbridgelauncher.storage.StorageLocationStore;
 import ca.dnamobile.droidbridgelauncher.utils.path.PathManager;
@@ -128,13 +129,17 @@ public final class LauncherInstanceManager {
         if (cleanMinecraftVersionId.isEmpty()) cleanMinecraftVersionId = baseVersionId;
 
         String name = cleanDisplayName(requestedName, loader, baseVersionId);
-        String id = uniqueIdForName(name);
-        File root = createUniqueInstanceRoot(id);
+        String baseId = uniqueIdForName(name);
+        File root = createUniqueInstanceRoot(baseId);
+        // The root name is guaranteed unique inside the instances directory. Persist that
+        // exact unique value as the instance id; using baseId here caused two same-named
+        // instances (for example two Fabric 1.21.11 installs) to share per-instance prefs.
+        String id = root.getName();
 
         File gameDir = new File(root, "game");
         ensureDirectory(gameDir);
         ensureDirectory(new File(gameDir, "saves"));
-        ensureDirectory(new File(gameDir, "resourcepacks"));
+        ensureDirectory(new File(gameDir, ModManagerContentType.getResourcePackFolderName(cleanMinecraftVersionId)));
         ensureDirectory(new File(gameDir, "shaderpacks"));
         ensureDirectory(new File(gameDir, "mods"));
         ensureDirectory(new File(gameDir, "config"));
@@ -164,7 +169,7 @@ public final class LauncherInstanceManager {
         json.put("storageMode", "storage_location");
         json.put("launcherHome", PathManager.DIR_GAME_HOME);
         json.put("minecraftHome", PathManager.DIR_MINECRAFT_HOME);
-        json.put("note", "Shared game files live under this storage location's .minecraft/versions/libraries/assets. This directory isolates saves/options/mods/resourcepacks for this launcher instance.");
+        json.put("note", "Shared game files live under this storage location's .minecraft/versions/libraries/assets. This directory isolates saves/options/mods/" + ModManagerContentType.getResourcePackFolderName(cleanMinecraftVersionId) + " for this launcher instance.");
 
         writeString(new File(root, METADATA_FILE), json.toString(2));
 
@@ -632,7 +637,16 @@ public final class LauncherInstanceManager {
         JSONObject json = new JSONObject(readString(jsonFile));
         File actualRoot = requireParent(jsonFile);
 
-        String id = json.optString("id", actualRoot.getName());
+        String storedId = json.optString("id", actualRoot.getName());
+        String id = actualRoot.getName();
+        if (!id.equals(storedId)) {
+            // Older builds could create foo-2 while still storing id=foo. Repair that
+            // collision in place so settings/favorites/shortcuts remain instance-specific.
+            json.put("id", id);
+            writeString(jsonFile, json.toString(2));
+            Logging.i(TAG, "Repaired duplicate instance id " + storedId + " -> " + id
+                    + " root=" + actualRoot.getAbsolutePath());
+        }
         String name = json.optString("name", id);
         String loader = json.optString("loader", "Vanilla");
         String baseVersionId = json.optString("baseVersionId", "");

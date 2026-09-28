@@ -125,8 +125,10 @@ public class UnpackComponentsTask extends AbstractUnpackTask {
                     throw new IOException("Unable to recover previous component backup: "
                             + backupDir.getAbsolutePath());
                 }
-                PathManager.deleteQuietly(stagingDir);
-                if (targetDir.exists()) PathManager.deleteQuietly(backupDir);
+                PathManager.deleteRecursivelyChecked(stagingDir);
+                if (targetDir.exists()) {
+                    PathManager.deleteRecursivelyChecked(backupDir);
+                }
                 if (!stagingDir.mkdirs()) {
                     throw new IOException("Unable to create staging directory: " + stagingDir.getAbsolutePath());
                 }
@@ -154,12 +156,27 @@ public class UnpackComponentsTask extends AbstractUnpackTask {
                         }
                         throw new IOException("Unable to activate staged component: " + targetDir.getAbsolutePath());
                     }
-                    PathManager.deleteQuietly(backupDir);
+                    try {
+                        PathManager.deleteRecursivelyChecked(backupDir);
+                    } catch (IOException cleanupFailure) {
+                        // The new component is already active and was verified
+                        // byte-for-byte in staging. Keep it usable; the next
+                        // reinstall will retry stale-backup cleanup.
+                        Logging.e("UnpackComponents", "Installed component but could not remove backup "
+                                + backupDir.getAbsolutePath(), cleanupFailure);
+                    }
                 } catch (Throwable throwable) {
-                    PathManager.deleteQuietly(stagingDir);
-                    if (!targetDir.exists() && backupDir.exists()) {
-                        //noinspection ResultOfMethodCallIgnored
-                        backupDir.renameTo(targetDir);
+                    try {
+                        PathManager.deleteRecursivelyChecked(stagingDir);
+                    } catch (IOException cleanupFailure) {
+                        throwable.addSuppressed(cleanupFailure);
+                    }
+                    if (!targetDir.exists() && backupDir.exists() && !backupDir.renameTo(targetDir)) {
+                        IOException restoreFailure = new IOException(
+                                "Unable to restore previous component after install failure: "
+                                        + backupDir.getAbsolutePath());
+                        restoreFailure.addSuppressed(throwable);
+                        throw restoreFailure;
                     }
                     throw throwable;
                 }
@@ -181,6 +198,7 @@ public class UnpackComponentsTask extends AbstractUnpackTask {
             case LWJGL3:
             case LWJGL333_BTA:
             case LWJGL341:
+            case OTHER_LOGIN:
             case CACIOCAVALLO:
             case CACIOCAVALLO17:
                 return PathManager.DIR_FILE.getAbsolutePath();

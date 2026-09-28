@@ -27,6 +27,7 @@ import androidx.annotation.Nullable;
 import androidx.appcompat.app.AlertDialog;
 
 import ca.dnamobile.droidbridgelauncher.BuildConfig;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 public final class LauncherUpdateDialogs {
     private LauncherUpdateDialogs() {
@@ -71,7 +72,7 @@ public final class LauncherUpdateDialogs {
             @Override
             public void onError(@NonNull String message, @Nullable Throwable throwable) {
                 if (!manual || !isActivityAlive(activity)) return;
-                new AlertDialog.Builder(activity)
+                new MaterialAlertDialogBuilder(activity)
                         .setTitle("Update check failed")
                         .setMessage(message)
                         .setPositiveButton(android.R.string.ok, null)
@@ -98,7 +99,7 @@ public final class LauncherUpdateDialogs {
             message.append('\n').append(trimReleaseNotes(info.releaseNotes));
         }
 
-        AlertDialog.Builder builder = new AlertDialog.Builder(activity)
+        AlertDialog.Builder builder = new MaterialAlertDialogBuilder(activity)
                 .setTitle("Launcher update available")
                 .setMessage(message.toString())
                 .setNegativeButton("Later", null)

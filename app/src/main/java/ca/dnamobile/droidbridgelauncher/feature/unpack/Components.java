@@ -17,6 +17,7 @@ import androidx.annotation.Nullable;
 import ca.dnamobile.droidbridgelauncher.R;
 
 public enum Components {
+    OTHER_LOGIN("other_login", "authlib-injector", R.string.splash_screen_authlib_injector, false),
     CACIOCAVALLO("caciocavallo", "caciocavallo", R.string.splash_screen_cacio, false),
     CACIOCAVALLO17("caciocavallo17", "caciocavallo 17", R.string.splash_screen_cacio, false),
 

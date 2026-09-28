@@ -21,6 +21,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.zip.ZipFile;
 
 /**
  * One inexpensive filename scan shared by the pre-launch compatibility path.
@@ -41,6 +42,7 @@ public final class PreLaunchModScan {
     public final boolean hasVulkanMod;
     public final boolean hasNotEnoughVulkan;
     public final boolean hasDistantHorizons;
+    public final boolean hasVoxy;
     public final boolean hasIris;
     public final boolean hasOculus;
     public final boolean hasSodiumLike;
@@ -55,6 +57,7 @@ public final class PreLaunchModScan {
             boolean hasVulkanMod,
             boolean hasNotEnoughVulkan,
             boolean hasDistantHorizons,
+            boolean hasVoxy,
             boolean hasIris,
             boolean hasOculus,
             boolean hasSodiumLike,
@@ -68,6 +71,7 @@ public final class PreLaunchModScan {
         this.hasVulkanMod = hasVulkanMod;
         this.hasNotEnoughVulkan = hasNotEnoughVulkan;
         this.hasDistantHorizons = hasDistantHorizons;
+        this.hasVoxy = hasVoxy;
         this.hasIris = hasIris;
         this.hasOculus = hasOculus;
         this.hasSodiumLike = hasSodiumLike;
@@ -88,6 +92,7 @@ public final class PreLaunchModScan {
         boolean vulkanMod = false;
         boolean notEnoughVulkan = false;
         boolean distantHorizons = false;
+        boolean voxy = false;
         boolean iris = false;
         boolean oculus = false;
         boolean sodiumLike = false;
@@ -125,8 +130,13 @@ public final class PreLaunchModScan {
                 if (normalized.contains("notenoughvulkan")) {
                     notEnoughVulkan = true;
                 }
-                if (normalized.contains("distanthorizons")) {
+                if (!distantHorizons
+                        && (normalized.contains("distanthorizons")
+                        || isDistantHorizonsJar(file))) {
                     distantHorizons = true;
+                }
+                if (normalized.startsWith("voxy") || normalized.contains("cortexvoxy")) {
+                    voxy = true;
                 }
                 if (normalized.contains("iris")) {
                     iris = true;
@@ -187,6 +197,7 @@ public final class PreLaunchModScan {
                 vulkanMod,
                 notEnoughVulkan,
                 distantHorizons,
+                voxy,
                 iris,
                 oculus,
                 sodiumLike,
@@ -213,6 +224,7 @@ public final class PreLaunchModScan {
         return hasVulkanMod
                 || hasNotEnoughVulkan
                 || hasDistantHorizons
+                || hasVoxy
                 || hasSodiumExtraLike;
     }
 
@@ -241,6 +253,7 @@ public final class PreLaunchModScan {
         if (hasVulkanMod) names.add("VulkanMod");
         if (hasNotEnoughVulkan) names.add("Not Enough Vulkan");
         if (hasDistantHorizons) names.add("Distant Horizons");
+        if (hasVoxy) names.add("Voxy");
         if (hasIris) names.add("Iris");
         if (hasOculus) names.add("Oculus");
         if (hasSodiumExtraLike) names.add("Sodium/Embeddium/Rubidium Extra");
@@ -257,7 +270,7 @@ public final class PreLaunchModScan {
     @NonNull
     private static PreLaunchModScan empty() {
         return new PreLaunchModScan(
-                false, false, false, false, false, false,
+                false, false, false, false, false, false, false,
                 false, false, false, false, false, false
         );
     }
@@ -319,6 +332,22 @@ public final class PreLaunchModScan {
             cursor = cursor.getParentFile();
         }
         return null;
+    }
+
+
+    /**
+     * Distant Horizons can replace/update its own jar on shutdown.  The replacement
+     * filename is not guaranteed to keep the words "DistantHorizons", which made
+     * the old filename-only pre-launch scan silently miss a mod Fabric could still
+     * load.  Use an exact DH API class marker as a fallback so GC/SQLite/Zstd and
+     * shutdown compatibility remain active even after a self-update or manual rename.
+     */
+    private static boolean isDistantHorizonsJar(@NonNull File file) {
+        try (ZipFile zip = new ZipFile(file)) {
+            return zip.getEntry("com/seibel/distanthorizons/api/DhApi.class") != null;
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     @NonNull

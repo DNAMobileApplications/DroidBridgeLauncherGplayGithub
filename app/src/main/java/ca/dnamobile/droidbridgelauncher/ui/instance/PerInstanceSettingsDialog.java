@@ -13,7 +13,6 @@
 package ca.dnamobile.droidbridgelauncher.ui.instance;
 
 import android.app.Activity;
-import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
 import android.text.InputType;
@@ -48,11 +47,13 @@ import java.util.List;
 import java.util.Locale;
 
 import ca.dnamobile.droidbridgelauncher.R;
+import ca.dnamobile.droidbridgelauncher.ui.LauncherDialogStyle;
 import ca.dnamobile.droidbridgelauncher.launcher.DistantHorizonsGcMitigation;
 import ca.dnamobile.droidbridgelauncher.launcher.InstanceLaunchSettings;
 import ca.dnamobile.droidbridgelauncher.renderer.RendererInterface;
 import ca.dnamobile.droidbridgelauncher.renderer.Renderers;
 import ca.dnamobile.droidbridgelauncher.settings.GameResolutionSettings;
+import ca.dnamobile.droidbridgelauncher.settings.LauncherPreferences;
 import ca.dnamobile.droidbridgelauncher.settings.MemoryAllocationUtils;
 import ca.dnamobile.droidbridgelauncher.shortcuts.InstanceShortcutHelper;
 
@@ -65,14 +66,6 @@ import ca.dnamobile.droidbridgelauncher.shortcuts.InstanceShortcutHelper;
  * replacement from breaking the button callbacks.
  */
 public final class PerInstanceSettingsDialog {
-    private static final int COLOR_DIALOG_BG = Color.rgb(30, 34, 42);
-    private static final int COLOR_CARD_BG = Color.rgb(38, 43, 53);
-    private static final int COLOR_CARD_STROKE = Color.rgb(54, 61, 74);
-    private static final int COLOR_TEXT_PRIMARY = Color.rgb(238, 241, 248);
-    private static final int COLOR_TEXT_SECONDARY = Color.rgb(198, 204, 216);
-    private static final int COLOR_ACCENT = Color.rgb(37, 211, 128);
-    private static final int COLOR_ACCENT_MUTED = Color.rgb(86, 135, 110);
-    private static final float DIALOG_DIM_NORMAL = 0.58f;
 
     private final Activity activity;
     private final String settingsKey;
@@ -148,6 +141,7 @@ public final class PerInstanceSettingsDialog {
     }
 
     public void show() {
+        LauncherDialogStyle.syncTheme(activity);
         InstanceLaunchSettings.Settings settings = InstanceLaunchSettings.load(activity, settingsKey);
         prepareRendererChoices(settings);
         prepareRamBounds(settings);
@@ -157,8 +151,11 @@ public final class PerInstanceSettingsDialog {
 
         MaterialCardView card = new MaterialCardView(activity);
         card.setRadius(dp(26));
-        card.setCardElevation(dp(8));
-        card.setUseCompatPadding(true);
+        card.setCardBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
+        card.setStrokeColor(LauncherDialogStyle.COLOR_CARD_STROKE);
+        card.setStrokeWidth(dp(1));
+        card.setCardElevation(0f);
+        card.setUseCompatPadding(false);
         card.setPreventCornerOverlap(true);
 
         LinearLayout content = new LinearLayout(activity);
@@ -248,7 +245,7 @@ public final class PerInstanceSettingsDialog {
 
         GradientDrawable iconBackground = new GradientDrawable();
         iconBackground.setCornerRadius(dp(18));
-        iconBackground.setColor(0xFF20242B);
+        iconBackground.setColor(LauncherDialogStyle.COLOR_CARD_BG);
         icon.setBackground(iconBackground);
         row.addView(icon, new LinearLayout.LayoutParams(dp(72), dp(72)));
 
@@ -260,11 +257,13 @@ public final class PerInstanceSettingsDialog {
         title.setText("Per Instance Settings");
         title.setTextSize(22);
         title.setTypeface(title.getTypeface(), Typeface.BOLD);
+        title.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         textColumn.addView(title, matchWrap());
 
         TextView subtitle = new TextView(activity);
         subtitle.setText("Grid play action, renderer, Graphics API, Vulkan compatibility, Java runtime, garbage collection, JVM arguments, and RAM for this instance only.");
         subtitle.setTextSize(13);
+        subtitle.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         subtitle.setPadding(0, dp(4), 0, 0);
         textColumn.addView(subtitle, matchWrap());
 
@@ -314,7 +313,13 @@ public final class PerInstanceSettingsDialog {
         selectedRendererIndex = resolveRendererSelectionIndex(settings.rendererIdentifier);
         rendererDropdown.setText(rendererLabels.get(selectedRendererIndex), false);
         rendererDropdown.setOnItemClickListener((parent, view, position, id) -> {
-            selectedRendererIndex = Math.max(0, Math.min(position, rendererLabels.size() - 1));
+            // AutoCompleteTextView positions belong to the currently filtered adapter.
+            // Resolve the actual clicked label back to the stable full renderer list so
+            // selecting MobileGlues/Krypton/Default cannot silently save another item.
+            Object clickedItem = parent.getItemAtPosition(position);
+            String clickedLabel = clickedItem != null ? clickedItem.toString() : "";
+            int resolvedIndex = rendererLabels.indexOf(clickedLabel);
+            selectedRendererIndex = resolvedIndex >= 0 ? resolvedIndex : 0;
             rendererDropdown.setText(rendererLabels.get(selectedRendererIndex), false);
         });
 
@@ -329,7 +334,7 @@ public final class PerInstanceSettingsDialog {
         addSectionTitle(
                 section,
                 "Minecraft 26.2+ Graphics API",
-                "Default uses OpenGL. Use System Vulkan Driver forces Vulkan. VulkanMod 26.2 keeps its own compatibility path."
+                "Default uses OpenGL. Use System Vulkan Driver forces Minecraft Vulkan through Android's system Vulkan driver. Use OpenGL forces OpenGL. VulkanMod 26.2 keeps its own compatibility path."
         );
 
         String[] graphicsApiLabels = InstanceLaunchSettings.getGraphicsApiModeLabels();
@@ -344,7 +349,18 @@ public final class PerInstanceSettingsDialog {
         }
         graphicsApiDropdown.setText(graphicsApiLabels[selectedGraphicsApiModeIndex], false);
         graphicsApiDropdown.setOnItemClickListener((parent, view, position, id) -> {
-            selectedGraphicsApiModeIndex = Math.max(0, Math.min(position, graphicsApiLabels.length - 1));
+            // Do not use the filtered adapter position as the Graphics API index.
+            // After a previous System Vulkan selection that can turn a click on
+            // "Default" into index 0 ("Use launcher default"), resurrecting stale
+            // global Vulkan state. Resolve the clicked label to its stable mode first.
+            Object clickedItem = parent.getItemAtPosition(position);
+            String clickedLabel = clickedItem != null ? clickedItem.toString() : "";
+            String clickedMode = InstanceLaunchSettings.graphicsApiModeForLabel(clickedLabel);
+            selectedGraphicsApiModeIndex = InstanceLaunchSettings.graphicsApiModeIndex(clickedMode);
+            if (selectedGraphicsApiModeIndex < 0
+                    || selectedGraphicsApiModeIndex >= graphicsApiLabels.length) {
+                selectedGraphicsApiModeIndex = 0;
+            }
             graphicsApiDropdown.setText(graphicsApiLabels[selectedGraphicsApiModeIndex], false);
         });
 
@@ -701,6 +717,7 @@ public final class PerInstanceSettingsDialog {
     }
 
     private void showRamUnlockDialog() {
+        LauncherDialogStyle.syncTheme(activity);
         boolean unlocked = MemoryAllocationUtils.isRamUnlocked(activity);
         int titleRes = unlocked
                 ? R.string.memory_relock_dialog_title
@@ -714,13 +731,13 @@ public final class PerInstanceSettingsDialog {
 
         ScrollView scrollView = new ScrollView(activity);
         scrollView.setFillViewport(false);
-        scrollView.setBackgroundColor(COLOR_DIALOG_BG);
+        scrollView.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
         scrollView.setVerticalScrollBarEnabled(true);
         scrollView.setScrollbarFadingEnabled(false);
 
         LinearLayout root = new LinearLayout(activity);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(COLOR_DIALOG_BG);
+        root.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
         int padding = dp(18);
         root.setPadding(padding, padding, padding, dp(8));
         scrollView.addView(root, new ScrollView.LayoutParams(
@@ -732,21 +749,21 @@ public final class PerInstanceSettingsDialog {
         title.setText(activity.getString(titleRes));
         title.setTextSize(24f);
         title.setTypeface(Typeface.DEFAULT_BOLD);
-        title.setTextColor(COLOR_TEXT_PRIMARY);
+        title.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         title.setPadding(dp(2), 0, dp(2), dp(6));
         root.addView(title, matchWrap());
 
         TextView summary = new TextView(activity);
         summary.setText(activity.getString(messageRes));
         summary.setTextSize(14f);
-        summary.setTextColor(COLOR_TEXT_SECONDARY);
+        summary.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         summary.setPadding(dp(2), 0, dp(2), dp(12));
         root.addView(summary, matchWrap());
 
         LinearLayout card = new LinearLayout(activity);
         card.setOrientation(LinearLayout.VERTICAL);
         card.setPadding(dp(14), dp(14), dp(14), dp(14));
-        card.setBackground(roundedDialogDrawable(COLOR_CARD_BG, COLOR_CARD_STROKE, 18));
+        card.setBackground(roundedDialogDrawable(LauncherDialogStyle.COLOR_CARD_BG, LauncherDialogStyle.COLOR_CARD_STROKE, 18));
         LinearLayout.LayoutParams cardParams = matchWrap();
         cardParams.setMargins(0, 0, 0, dp(12));
         root.addView(card, cardParams);
@@ -755,7 +772,7 @@ public final class PerInstanceSettingsDialog {
         cardTitle.setText(unlocked ? "Available RAM limit" : "Maximum RAM access");
         cardTitle.setTextSize(18f);
         cardTitle.setTypeface(Typeface.DEFAULT_BOLD);
-        cardTitle.setTextColor(COLOR_TEXT_PRIMARY);
+        cardTitle.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         cardTitle.setPadding(0, 0, 0, dp(8));
         card.addView(cardTitle, matchWrap());
 
@@ -764,7 +781,7 @@ public final class PerInstanceSettingsDialog {
                 ? "This will return the global and per-instance RAM sliders to Android's currently available RAM limit. The saved default is not reset."
                 : "This lets the global and per-instance RAM sliders use the device-reported installed RAM instead of only the currently available RAM. Use this only when you understand the risk of starving Android or the GPU driver.");
         cardInfo.setTextSize(13f);
-        cardInfo.setTextColor(COLOR_TEXT_SECONDARY);
+        cardInfo.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         cardInfo.setPadding(0, 0, 0, dp(8));
         card.addView(cardInfo, matchWrap());
 
@@ -776,8 +793,8 @@ public final class PerInstanceSettingsDialog {
         MaterialButton cancel = new MaterialButton(activity, null, com.google.android.material.R.attr.materialButtonOutlinedStyle);
         cancel.setText(android.R.string.cancel);
         cancel.setAllCaps(false);
-        cancel.setTextColor(COLOR_ACCENT);
-        cancel.setBackground(roundedDialogDrawable(COLOR_CARD_BG, COLOR_ACCENT_MUTED, 14));
+        cancel.setTextColor(LauncherDialogStyle.COLOR_ACCENT);
+        cancel.setBackground(roundedDialogDrawable(LauncherDialogStyle.COLOR_CARD_BG, LauncherDialogStyle.COLOR_ACCENT_MUTED, 14));
         actions.addView(cancel, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
         MaterialButton confirm = new MaterialButton(activity);
@@ -788,7 +805,7 @@ public final class PerInstanceSettingsDialog {
         actions.addView(confirm, confirmParams);
         card.addView(actions, matchWrap());
 
-        AlertDialog ramDialog = new AlertDialog.Builder(activity)
+        AlertDialog ramDialog = new MaterialAlertDialogBuilder(activity)
                 .setView(scrollView)
                 .create();
 
@@ -805,8 +822,8 @@ public final class PerInstanceSettingsDialog {
         ramDialog.setOnShowListener(dialogInterface -> {
             Window window = ramDialog.getWindow();
             if (window != null) {
-                window.setBackgroundDrawable(roundedDialogDrawable(COLOR_DIALOG_BG, COLOR_DIALOG_BG, 22));
-                window.setDimAmount(DIALOG_DIM_NORMAL);
+                window.setBackgroundDrawable(roundedDialogDrawable(LauncherDialogStyle.COLOR_DIALOG_BG, LauncherDialogStyle.COLOR_DIALOG_BG, 22));
+                window.setDimAmount(LauncherDialogStyle.DIALOG_DIM_NORMAL);
             }
         });
         ramDialog.show();
@@ -905,8 +922,27 @@ public final class PerInstanceSettingsDialog {
         }
 
         saveAllAliases(settings);
+        synchronizeExplicitGraphicsApiSelection(settings.graphicsApiMode);
         Toast.makeText(activity, "Per-instance settings saved.", Toast.LENGTH_SHORT).show();
         dismiss();
+    }
+
+    /**
+     * Keep the launcher-wide graphics mode in sync with an explicit per-instance
+     * OpenGL/Vulkan choice. This prevents older global state from disagreeing with
+     * the dropdown and also makes subsystems that initialize before LaunchGame see
+     * the same API selection. "Use launcher default" and "Default" do not change
+     * the global switches.
+     */
+    private void synchronizeExplicitGraphicsApiSelection(@Nullable String graphicsApiMode) {
+        String mode = graphicsApiMode == null
+                ? InstanceLaunchSettings.GRAPHICS_API_INHERIT
+                : graphicsApiMode.trim().toLowerCase(Locale.ROOT);
+        if (InstanceLaunchSettings.GRAPHICS_API_VULKAN.equals(mode)) {
+            LauncherPreferences.setSystemVulkanMode(activity, true);
+        } else if (InstanceLaunchSettings.GRAPHICS_API_OPENGL.equals(mode)) {
+            LauncherPreferences.setUseOpenGlForMinecraft26Plus(activity, true);
+        }
     }
 
     private void saveAllAliases(@NonNull InstanceLaunchSettings.Settings settings) {
@@ -1040,11 +1076,13 @@ public final class PerInstanceSettingsDialog {
         title.setText(titleText);
         title.setTypeface(title.getTypeface(), Typeface.BOLD);
         title.setTextSize(15);
+        title.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         root.addView(title, matchWrap());
 
         TextView summary = new TextView(activity);
         summary.setText(summaryText);
         summary.setTextSize(12);
+        summary.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         summary.setPadding(0, dp(2), 0, dp(8));
         root.addView(summary, matchWrap());
     }

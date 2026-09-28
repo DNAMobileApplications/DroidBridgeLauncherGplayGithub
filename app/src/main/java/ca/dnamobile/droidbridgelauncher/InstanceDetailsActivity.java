@@ -13,7 +13,7 @@
 package ca.dnamobile.droidbridgelauncher;
 
 import android.annotation.SuppressLint;
-import android.app.AlertDialog;
+import androidx.appcompat.app.AlertDialog;
 import android.app.Dialog;
 import android.content.ActivityNotFoundException;
 import android.content.ClipData;
@@ -161,6 +161,7 @@ import ca.dnamobile.droidbridgelauncher.modmanager.ModpackExportManager;
 import ca.dnamobile.droidbridgelauncher.modmanager.ModpackInstallManager;
 import ca.dnamobile.droidbridgelauncher.modmanager.ModpackUpdateManager;
 import ca.dnamobile.droidbridgelauncher.modmanager.CurseForgeApiKeyProvider;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 public final class InstanceDetailsActivity extends AppCompatActivity {
     public static final String EXTRA_INSTANCE_ID = "ca.dnamobile.droidbridgelauncher.extra.INSTANCE_ID";
@@ -182,14 +183,6 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
     private static final int REQUEST_EXPORT_WORLD = 9128;
     private static final int REQUEST_UPDATE_MODPACK = 9129;
     private static final String TAG = "InstanceDetails";
-    private static final int MODPACK_DIALOG_BG = Color.rgb(30, 34, 42);
-    private static final int MODPACK_CARD_BG = Color.rgb(38, 43, 53);
-    private static final int MODPACK_CARD_BG_PRESSED = Color.rgb(43, 49, 60);
-    private static final int MODPACK_CARD_STROKE = Color.rgb(54, 61, 74);
-    private static final int MODPACK_TEXT_PRIMARY = Color.rgb(238, 241, 248);
-    private static final int MODPACK_TEXT_SECONDARY = Color.rgb(198, 204, 216);
-    private static final int MODPACK_TEXT_MUTED = Color.rgb(150, 159, 176);
-    private static final int MODPACK_ACCENT = Color.rgb(37, 211, 128);
 
     private static final int MENU_VIEW_FOLDER = 1;
     private static final int MENU_DELETE_INSTANCE = 2;
@@ -548,7 +541,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         bindImportButtonForCategory(selectedCategory);
         updateContentFilterButtonUi();
         updateContentPagerUi();
-        binding.textModsHint.setText("Preparing " + getString(selectedCategory.pluralLabelRes).toLowerCase(Locale.US) + "...");
+        binding.textModsHint.setText("Preparing " + getCategoryPluralLabel(selectedCategory).toLowerCase(Locale.US) + "...");
         // Large CurseForge packs can contain hundreds of files. Starting the folder scan during
         // Activity creation competes with the first focus/layout pass and can trip Android's input
         // timeout. Let the details screen draw first, then scan the folder on the background worker.
@@ -610,6 +603,26 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         mainHandler.postDelayed(this::enableFullscreen, 80L);
     }
 
+    private boolean usesLegacyTexturePacks() {
+        return ModManagerContentType.usesLegacyTexturePacks(getGameVersionIdForContent());
+    }
+
+    @NonNull
+    private CharSequence getCategoryTabTitle(@NonNull ResourceCategory category) {
+        if (category == ResourceCategory.RESOURCEPACKS && usesLegacyTexturePacks()) {
+            return getString(R.string.instance_tab_texturepacks);
+        }
+        return getString(category.tabTitleRes);
+    }
+
+    @NonNull
+    private String getCategoryPluralLabel(@NonNull ResourceCategory category) {
+        if (category == ResourceCategory.RESOURCEPACKS && usesLegacyTexturePacks()) {
+            return getString(R.string.instance_content_texturepacks_plural);
+        }
+        return getString(category.pluralLabelRes);
+    }
+
     @SuppressLint("ClickableViewAccessibility")
     private void setupContentTabs() {
         contentAdapter = new InstanceContentAdapter();
@@ -631,7 +644,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         ResourceCategory[] categories = ResourceCategory.values();
         for (ResourceCategory category : categories) {
             binding.tabResourceCategories.addTab(
-                    binding.tabResourceCategories.newTab().setText(category.tabTitleRes)
+                    binding.tabResourceCategories.newTab().setText(getCategoryTabTitle(category))
             );
         }
 
@@ -741,7 +754,9 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         }
 
         binding.buttonAddMods.setVisibility(View.VISIBLE);
-        binding.buttonAddMods.setText(category.uploadButtonTextRes);
+        binding.buttonAddMods.setText(category == ResourceCategory.RESOURCEPACKS && usesLegacyTexturePacks()
+                ? R.string.button_upload_texturepacks
+                : category.uploadButtonTextRes);
         if (category == ResourceCategory.WORLDS) {
             binding.buttonAddMods.setIconResource(R.drawable.ic_arrow_downward_24);
             binding.buttonAddMods.setContentDescription("Import World");
@@ -783,7 +798,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
                 break;
         }
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.instance_content_filter_title)
                 .setSingleChoiceItems(filterOptions, checkedItem, (dialogInterface, which) -> {
                     ContentVisibilityFilter selectedFilter;
@@ -845,6 +860,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
 
     private void showInstanceSettingsMenu(@NonNull View anchor) {
         enableFullscreen();
+        LauncherDialogStyle.syncTheme(this);
 
         int screenWidth = getResources().getDisplayMetrics().widthPixels;
         int screenHeight = getResources().getDisplayMetrics().heightPixels;
@@ -856,7 +872,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         int dialogWidth = Math.min(Math.max(dp(300), screenWidth - dp(32)), dp(560));
 
         FrameLayout dialogFrame = new FrameLayout(this);
-        dialogFrame.setBackgroundColor(MODPACK_DIALOG_BG);
+        dialogFrame.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
         dialogFrame.setLayoutParams(new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dialogHeight
@@ -864,7 +880,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
 
         LinearLayout dialogRoot = new LinearLayout(this);
         dialogRoot.setOrientation(LinearLayout.VERTICAL);
-        dialogRoot.setBackgroundColor(MODPACK_DIALOG_BG);
+        dialogRoot.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
         dialogFrame.addView(dialogRoot, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dialogHeight
@@ -876,11 +892,11 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         scrollView.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
         scrollView.setVerticalScrollBarEnabled(false);
         scrollView.setHorizontalScrollBarEnabled(false);
-        scrollView.setBackgroundColor(MODPACK_DIALOG_BG);
+        scrollView.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(MODPACK_DIALOG_BG);
+        root.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
         int padding = dp(18);
         root.setPadding(padding, padding, padding, dp(4));
         scrollView.addView(root, new ScrollView.LayoutParams(
@@ -892,7 +908,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         title.setText("Instance Settings");
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
         title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
-        title.setTextColor(MODPACK_TEXT_PRIMARY);
+        title.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         title.setPadding(dp(2), 0, dp(2), dp(6));
         root.addView(title, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -902,7 +918,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         TextView info = new TextView(this);
         info.setText("Choose an action for this instance. Crash sharing uses the newest file from the instance game/crash-reports folder.");
         info.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        info.setTextColor(MODPACK_TEXT_SECONDARY);
+        info.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         info.setPadding(dp(2), 0, dp(2), dp(12));
         info.setSingleLine(false);
         root.addView(info, new LinearLayout.LayoutParams(
@@ -947,7 +963,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         LinearLayout footer = new LinearLayout(this);
         footer.setOrientation(LinearLayout.HORIZONTAL);
         footer.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
-        footer.setBackgroundColor(MODPACK_DIALOG_BG);
+        footer.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
         footer.setPadding(dp(18), dp(4), dp(18), dp(12));
 
         TextView cancelButton = createModpackFooterButton("Cancel", false);
@@ -964,7 +980,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(dialogFrame)
                 .create();
         dialogRef[0] = dialog;
@@ -997,7 +1013,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         row.setMinHeight(dp(52));
         row.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         row.setTypeface(row.getTypeface(), android.graphics.Typeface.BOLD);
-        row.setTextColor(MODPACK_TEXT_PRIMARY);
+        row.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         row.setPadding(dp(14), 0, dp(14), 0);
         row.setSingleLine(true);
         row.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -1005,8 +1021,8 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         row.setFocusable(true);
 
         GradientDrawable rowBackground = new GradientDrawable();
-        rowBackground.setColor(MODPACK_CARD_BG_PRESSED);
-        rowBackground.setStroke(dp(1), MODPACK_CARD_STROKE);
+        rowBackground.setColor(LauncherDialogStyle.COLOR_CARD_BG_PRESSED);
+        rowBackground.setStroke(dp(1), LauncherDialogStyle.COLOR_CARD_STROKE);
         rowBackground.setCornerRadius(dp(14));
         row.setBackground(rowBackground);
 
@@ -1123,7 +1139,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         scrollView.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
         scrollView.setVerticalScrollBarEnabled(false);
         scrollView.setClipToPadding(false);
-        scrollView.setBackgroundColor(MODPACK_DIALOG_BG);
+        scrollView.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
         scrollView.setPadding(0, 0, 0, dp(4));
 
         LinearLayout root = createModpackDialogRoot(
@@ -1137,7 +1153,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         addModpackCardText(
                 noteCard,
                 "Only upload a pack publicly when every included mod, resource pack, shader, config, and file is allowed on the platform you choose.",
-                MODPACK_TEXT_SECONDARY,
+                LauncherDialogStyle.COLOR_TEXT_SECONDARY,
                 13,
                 false
         );
@@ -1147,7 +1163,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         addModpackCardText(
                 formatCard,
                 "Pick the format that matches where this pack will be imported or published.",
-                MODPACK_TEXT_SECONDARY,
+                LauncherDialogStyle.COLOR_TEXT_SECONDARY,
                 13,
                 false
         );
@@ -1184,7 +1200,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
                 }
         );
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .create();
@@ -1217,7 +1233,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         TextView titleView = new TextView(this);
         titleView.setText(title);
         titleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
-        titleView.setTextColor(MODPACK_TEXT_PRIMARY);
+        titleView.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         titleView.setTypeface(titleView.getTypeface(), android.graphics.Typeface.BOLD);
         titleView.setSingleLine(true);
         titleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
@@ -1229,7 +1245,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         TextView subtitleView = new TextView(this);
         subtitleView.setText(subtitle);
         subtitleView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        subtitleView.setTextColor(MODPACK_TEXT_SECONDARY);
+        subtitleView.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         subtitleView.setSingleLine(true);
         subtitleView.setEllipsize(android.text.TextUtils.TruncateAt.END);
         LinearLayout.LayoutParams subtitleParams = new LinearLayout.LayoutParams(
@@ -1250,8 +1266,8 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
     @NonNull
     private GradientDrawable createExportPlatformRowBackground() {
         GradientDrawable background = new GradientDrawable();
-        background.setColor(MODPACK_CARD_BG_PRESSED);
-        background.setStroke(dp(1), MODPACK_CARD_STROKE);
+        background.setColor(LauncherDialogStyle.COLOR_CARD_BG_PRESSED);
+        background.setStroke(dp(1), LauncherDialogStyle.COLOR_CARD_STROKE);
         background.setCornerRadius(dp(14));
         return background;
     }
@@ -1538,7 +1554,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         listParams.topMargin = dp(8);
         layout.addView(listView, listParams);
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle(title)
                 .setView(layout)
                 .setNegativeButton(android.R.string.cancel, null)
@@ -1564,7 +1580,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
             message = "Update this vanilla instance to Minecraft " + targetMinecraftVersion + "?";
         }
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Update Version")
                 .setMessage(message)
                 .setNegativeButton(android.R.string.cancel, null)
@@ -1666,7 +1682,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
 
         ScrollView scrollView = new ScrollView(this);
         scrollView.setFillViewport(false);
-        scrollView.setBackgroundColor(MODPACK_DIALOG_BG);
+        scrollView.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
 
         LinearLayout root = createModpackDialogRoot(
                 scrollView,
@@ -1676,10 +1692,10 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
 
         LinearLayout installedCard = addModpackDialogCard(root);
         addModpackCardTitle(installedCard, "Installed pack");
-        addModpackCardText(installedCard, installed.displayTitle, MODPACK_TEXT_SECONDARY, 14, false);
+        addModpackCardText(installedCard, installed.displayTitle, LauncherDialogStyle.COLOR_TEXT_SECONDARY, 14, false);
         addModpackCardText(installedCard,
                 "Current source: " + installed.platform.displayName + " • Current version: " + installed.currentVersionLabel,
-                MODPACK_TEXT_MUTED,
+                LauncherDialogStyle.COLOR_TEXT_MUTED,
                 12,
                 false
         );
@@ -1696,7 +1712,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
             });
         }
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .create();
@@ -1791,12 +1807,12 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         int dialogWidth = Math.max(dp(340), Math.min(screenWidth - dp(72), dp(860)));
 
         FrameLayout dialogFrame = new FrameLayout(this);
-        dialogFrame.setBackgroundColor(MODPACK_DIALOG_BG);
+        dialogFrame.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
         dialogFrame.setLayoutParams(new ViewGroup.LayoutParams(dialogWidth, dialogHeight));
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(MODPACK_DIALOG_BG);
+        root.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
         int padding = dp(18);
         root.setPadding(padding, padding, padding, dp(12));
         dialogFrame.addView(root, new FrameLayout.LayoutParams(
@@ -1808,7 +1824,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         title.setText(project.title);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
         title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
-        title.setTextColor(MODPACK_TEXT_PRIMARY);
+        title.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         title.setSingleLine(false);
         title.setPadding(dp(2), 0, dp(2), dp(6));
         root.addView(title, new LinearLayout.LayoutParams(
@@ -1819,7 +1835,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         TextView info = new TextView(this);
         info.setText("Pick the latest version or any specific version of this modpack. The list is not locked to the current Minecraft version, so a 1.16.5 pack can migrate to a 1.20.1 pack when the project provides one.");
         info.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        info.setTextColor(MODPACK_TEXT_SECONDARY);
+        info.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         info.setPadding(dp(2), 0, dp(2), dp(12));
         info.setSingleLine(false);
         root.addView(info, new LinearLayout.LayoutParams(
@@ -1831,7 +1847,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         addModpackCardTitle(selectedCard, "Selected version");
         TextView selectedText = new TextView(this);
         selectedText.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-        selectedText.setTextColor(MODPACK_TEXT_SECONDARY);
+        selectedText.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         selectedText.setPadding(0, 0, 0, dp(4));
         selectedText.setSingleLine(false);
         selectedCard.addView(selectedText, new LinearLayout.LayoutParams(
@@ -1841,7 +1857,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
 
         LinearLayout versionsCard = createModpackDialogCard();
         addModpackCardTitle(versionsCard, "Available versions");
-        addModpackCardText(versionsCard, "Tap a version, then press Install selected. The first row is the latest version returned by the platform.", MODPACK_TEXT_MUTED, 12, false);
+        addModpackCardText(versionsCard, "Tap a version, then press Install selected. The first row is the latest version returned by the platform.", LauncherDialogStyle.COLOR_TEXT_MUTED, 12, false);
 
         final int[] selectedIndex = new int[]{0};
         updateSelectedModpackVersionText(selectedText, versions.get(0));
@@ -1924,7 +1940,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(dialogFrame)
                 .create();
         dialogRef[0] = dialog;
@@ -1956,7 +1972,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         name.setText((latest ? "Latest available: " : "") + version.versionLabel);
         name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 15);
         name.setTypeface(name.getTypeface(), android.graphics.Typeface.BOLD);
-        name.setTextColor(MODPACK_TEXT_PRIMARY);
+        name.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         name.setSingleLine(false);
         row.addView(name, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1966,7 +1982,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         TextView meta = new TextView(this);
         meta.setText("Minecraft " + version.getMinecraftVersionsLabel() + " • " + version.getLoadersLabel());
         meta.setTextSize(TypedValue.COMPLEX_UNIT_SP, 12);
-        meta.setTextColor(MODPACK_TEXT_SECONDARY);
+        meta.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         meta.setSingleLine(false);
         LinearLayout.LayoutParams metaParams = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -1979,7 +1995,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
             TextView date = new TextView(this);
             date.setText(version.datePublished);
             date.setTextSize(TypedValue.COMPLEX_UNIT_SP, 11);
-            date.setTextColor(MODPACK_TEXT_MUTED);
+            date.setTextColor(LauncherDialogStyle.COLOR_TEXT_MUTED);
             date.setSingleLine(false);
             LinearLayout.LayoutParams dateParams = new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2003,9 +2019,9 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
             View row = rowViews.get(i);
             boolean selected = i == selectedIndex;
             GradientDrawable background = new GradientDrawable();
-            background.setColor(selected ? MODPACK_CARD_BG_PRESSED : MODPACK_CARD_BG);
+            background.setColor(selected ? LauncherDialogStyle.COLOR_CARD_BG_PRESSED : LauncherDialogStyle.COLOR_CARD_BG);
             background.setCornerRadius(dp(16));
-            background.setStroke(dp(selected ? 2 : 1), selected ? MODPACK_ACCENT : MODPACK_CARD_STROKE);
+            background.setStroke(dp(selected ? 2 : 1), selected ? LauncherDialogStyle.COLOR_ACCENT : LauncherDialogStyle.COLOR_CARD_STROKE);
             row.setBackground(background);
         }
     }
@@ -2029,7 +2045,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
 
         ScrollView scrollView = new ScrollView(this);
         scrollView.setFillViewport(false);
-        scrollView.setBackgroundColor(MODPACK_DIALOG_BG);
+        scrollView.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
 
         LinearLayout root = createModpackDialogRoot(
                 scrollView,
@@ -2039,22 +2055,22 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
 
         LinearLayout targetCard = addModpackDialogCard(root);
         addModpackCardTitle(targetCard, "Selected update");
-        addModpackCardText(targetCard, project.platform.displayName + " • " + project.title, MODPACK_TEXT_SECONDARY, 14, false);
-        addModpackCardText(targetCard, "Current: " + installed.currentVersionLabel, MODPACK_TEXT_MUTED, 12, false);
-        addModpackCardText(targetCard, "Selected: " + selectedVersion.versionLabel, MODPACK_TEXT_MUTED, 12, false);
-        addModpackCardText(targetCard, "Minecraft: " + selectedVersion.getMinecraftVersionsLabel(), MODPACK_TEXT_MUTED, 12, false);
-        addModpackCardText(targetCard, "Loader: " + selectedVersion.getLoadersLabel(), MODPACK_TEXT_MUTED, 12, false);
+        addModpackCardText(targetCard, project.platform.displayName + " • " + project.title, LauncherDialogStyle.COLOR_TEXT_SECONDARY, 14, false);
+        addModpackCardText(targetCard, "Current: " + installed.currentVersionLabel, LauncherDialogStyle.COLOR_TEXT_MUTED, 12, false);
+        addModpackCardText(targetCard, "Selected: " + selectedVersion.versionLabel, LauncherDialogStyle.COLOR_TEXT_MUTED, 12, false);
+        addModpackCardText(targetCard, "Minecraft: " + selectedVersion.getMinecraftVersionsLabel(), LauncherDialogStyle.COLOR_TEXT_MUTED, 12, false);
+        addModpackCardText(targetCard, "Loader: " + selectedVersion.getLoadersLabel(), LauncherDialogStyle.COLOR_TEXT_MUTED, 12, false);
 
         LinearLayout savesCard = addModpackDialogCard(root);
         addModpackCardTitle(savesCard, "World/saves behavior");
         addModpackCardText(savesCard,
                 "DroidBridge keeps your existing saves folder. If the selected modpack includes saves, those saves are installed too. If a bundled world conflicts with an existing world folder, the bundled world is copied with a Pack World suffix instead of deleting your existing world.",
-                MODPACK_TEXT_SECONDARY,
+                LauncherDialogStyle.COLOR_TEXT_SECONDARY,
                 13,
                 false
         );
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton("Update", (d, which) -> runModpackUpdate(installed, project, selectedVersion))
@@ -2203,7 +2219,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
     ) {
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(MODPACK_DIALOG_BG);
+        root.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
         int padding = dp(18);
         root.setPadding(padding, padding, padding, dp(8));
         scrollView.addView(root, new ScrollView.LayoutParams(
@@ -2215,7 +2231,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         title.setText(titleText);
         title.setTextSize(TypedValue.COMPLEX_UNIT_SP, 24);
         title.setTypeface(title.getTypeface(), android.graphics.Typeface.BOLD);
-        title.setTextColor(MODPACK_TEXT_PRIMARY);
+        title.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         title.setPadding(dp(2), 0, dp(2), dp(6));
         root.addView(title, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2225,7 +2241,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         TextView info = new TextView(this);
         info.setText(infoText);
         info.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
-        info.setTextColor(MODPACK_TEXT_SECONDARY);
+        info.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
         info.setPadding(dp(2), 0, dp(2), dp(12));
         root.addView(info, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2242,9 +2258,9 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         card.setPadding(padding, padding, padding, padding);
 
         GradientDrawable bg = new GradientDrawable();
-        bg.setColor(MODPACK_CARD_BG);
+        bg.setColor(LauncherDialogStyle.COLOR_CARD_BG);
         bg.setCornerRadius(dp(18));
-        bg.setStroke(dp(1), MODPACK_CARD_STROKE);
+        bg.setStroke(dp(1), LauncherDialogStyle.COLOR_CARD_STROKE);
         card.setBackground(bg);
         return card;
     }
@@ -2272,7 +2288,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         card.setFocusable(true);
         card.setOnClickListener(view -> action.run());
         addModpackCardTitle(card, title);
-        addModpackCardText(card, subtitle, MODPACK_TEXT_SECONDARY, 13, false);
+        addModpackCardText(card, subtitle, LauncherDialogStyle.COLOR_TEXT_SECONDARY, 13, false);
     }
 
     private void addModpackCardTitle(@NonNull LinearLayout root, @NonNull String title) {
@@ -2280,7 +2296,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         view.setText(title);
         view.setTextSize(TypedValue.COMPLEX_UNIT_SP, 18);
         view.setTypeface(view.getTypeface(), android.graphics.Typeface.BOLD);
-        view.setTextColor(MODPACK_TEXT_PRIMARY);
+        view.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         view.setPadding(0, 0, 0, dp(6));
         root.addView(view, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
@@ -2314,7 +2330,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         button.setText(label);
         button.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         button.setTypeface(button.getTypeface(), android.graphics.Typeface.BOLD);
-        button.setTextColor(filled ? MODPACK_DIALOG_BG : MODPACK_ACCENT);
+        button.setTextColor(filled ? LauncherDialogStyle.COLOR_DIALOG_BG : LauncherDialogStyle.COLOR_ACCENT);
         button.setGravity(Gravity.CENTER);
         button.setMinHeight(dp(44));
         button.setPadding(dp(18), 0, dp(18), 0);
@@ -2323,8 +2339,8 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
 
         GradientDrawable bg = new GradientDrawable();
         bg.setCornerRadius(dp(16));
-        bg.setColor(filled ? MODPACK_ACCENT : Color.TRANSPARENT);
-        bg.setStroke(dp(1), MODPACK_ACCENT);
+        bg.setColor(filled ? LauncherDialogStyle.COLOR_ACCENT : Color.TRANSPARENT);
+        bg.setStroke(dp(1), LauncherDialogStyle.COLOR_ACCENT);
         button.setBackground(bg);
         return button;
     }
@@ -2356,10 +2372,10 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
     }
 
     private void styleModpackListText(@NonNull View view) {
-        view.setBackgroundColor(MODPACK_CARD_BG_PRESSED);
+        view.setBackgroundColor(LauncherDialogStyle.COLOR_CARD_BG_PRESSED);
         if (view instanceof TextView) {
             TextView textView = (TextView) view;
-            textView.setTextColor(MODPACK_TEXT_PRIMARY);
+            textView.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
             textView.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
             textView.setSingleLine(false);
             textView.setPadding(dp(14), dp(10), dp(14), dp(10));
@@ -2367,6 +2383,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
     }
 
     private void showStyledModpackDialog(@NonNull AlertDialog dialog) {
+        LauncherDialogStyle.syncTheme(this);
         showFullscreenSafeDialog(dialog);
         styleModpackDialogChrome(dialog);
     }
@@ -2375,9 +2392,9 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         Window window = dialog.getWindow();
         if (window != null) {
             GradientDrawable background = new GradientDrawable();
-            background.setColor(MODPACK_DIALOG_BG);
+            background.setColor(LauncherDialogStyle.COLOR_DIALOG_BG);
             background.setCornerRadius(dp(22));
-            background.setStroke(dp(1), MODPACK_DIALOG_BG);
+            background.setStroke(dp(1), LauncherDialogStyle.COLOR_DIALOG_BG);
             window.setBackgroundDrawable(background);
             window.setDimAmount(0.58f);
         }
@@ -2388,7 +2405,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
 
     private void tintModpackDialogButton(@NonNull AlertDialog dialog, int whichButton) {
         TextView button = dialog.getButton(whichButton);
-        if (button != null) button.setTextColor(MODPACK_ACCENT);
+        if (button != null) button.setTextColor(LauncherDialogStyle.COLOR_ACCENT);
     }
 
     private void showUpdateLoaderDialog() {
@@ -2473,7 +2490,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
                 + selectedLoader.minecraftVersion
                 + "?";
 
-        AlertDialog.Builder builder = new AlertDialog.Builder(this)
+        AlertDialog.Builder builder = new MaterialAlertDialogBuilder(this)
                 .setTitle("Update Loader")
                 .setMessage(message)
                 .setNegativeButton(android.R.string.cancel, null);
@@ -2580,7 +2597,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         message.append("Active launcher home:\n").append(activeHome == null ? "(unknown)" : activeHome).append("\n\n");
         message.append("This does not delete saves, mods, shaderpacks, or resource packs.");
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Repair Instance")
                 .setMessage(message.toString())
                 .setNegativeButton(android.R.string.cancel, null)
@@ -2730,7 +2747,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         int dialogWidth = Math.min(Math.max(dp(300), screenWidth - dp(32)), dp(560));
 
         FrameLayout dialogFrame = new FrameLayout(this);
-        dialogFrame.setBackgroundColor(MODPACK_DIALOG_BG);
+        dialogFrame.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
         dialogFrame.setLayoutParams(new ViewGroup.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dialogHeight
@@ -2738,7 +2755,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
 
         LinearLayout dialogRoot = new LinearLayout(this);
         dialogRoot.setOrientation(LinearLayout.VERTICAL);
-        dialogRoot.setBackgroundColor(MODPACK_DIALOG_BG);
+        dialogRoot.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
         dialogFrame.addView(dialogRoot, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT,
                 dialogHeight
@@ -2750,7 +2767,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         scrollView.setOverScrollMode(View.OVER_SCROLL_IF_CONTENT_SCROLLS);
         scrollView.setVerticalScrollBarEnabled(false);
         scrollView.setHorizontalScrollBarEnabled(false);
-        scrollView.setBackgroundColor(MODPACK_DIALOG_BG);
+        scrollView.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
 
         LinearLayout root = createModpackDialogRoot(
                 scrollView,
@@ -2773,7 +2790,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         LinearLayout footer = new LinearLayout(this);
         footer.setOrientation(LinearLayout.HORIZONTAL);
         footer.setGravity(Gravity.END | Gravity.CENTER_VERTICAL);
-        footer.setBackgroundColor(MODPACK_DIALOG_BG);
+        footer.setBackgroundColor(LauncherDialogStyle.COLOR_DIALOG_BG);
         footer.setPadding(dp(18), dp(4), dp(18), dp(12));
 
         TextView cancelButton = createModpackFooterButton(getString(android.R.string.cancel), false);
@@ -2790,7 +2807,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(dialogFrame)
                 .create();
         dialogRef[0] = dialog;
@@ -2816,8 +2833,8 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         row.setFocusable(true);
 
         GradientDrawable rowBackground = new GradientDrawable();
-        rowBackground.setColor(MODPACK_CARD_BG_PRESSED);
-        rowBackground.setStroke(dp(1), MODPACK_CARD_STROKE);
+        rowBackground.setColor(LauncherDialogStyle.COLOR_CARD_BG_PRESSED);
+        rowBackground.setStroke(dp(1), LauncherDialogStyle.COLOR_CARD_STROKE);
         rowBackground.setCornerRadius(dp(14));
         row.setBackground(rowBackground);
 
@@ -2825,7 +2842,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         name.setText(server.name);
         name.setTextSize(TypedValue.COMPLEX_UNIT_SP, 16);
         name.setTypeface(name.getTypeface(), android.graphics.Typeface.BOLD);
-        name.setTextColor(MODPACK_TEXT_PRIMARY);
+        name.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
         name.setSingleLine(true);
         name.setEllipsize(android.text.TextUtils.TruncateAt.END);
         row.addView(name, new LinearLayout.LayoutParams(
@@ -2837,7 +2854,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
             TextView address = new TextView(this);
             address.setText(server.address);
             address.setTextSize(TypedValue.COMPLEX_UNIT_SP, 13);
-            address.setTextColor(MODPACK_TEXT_SECONDARY);
+            address.setTextColor(LauncherDialogStyle.COLOR_TEXT_SECONDARY);
             address.setSingleLine(true);
             address.setEllipsize(android.text.TextUtils.TruncateAt.END);
             address.setPadding(0, dp(3), 0, 0);
@@ -2932,7 +2949,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
     }
 
     private void showRendererPluginStorageDialog(@NonNull RendererInterface renderer, @Nullable String quickPlayWorldFolderName, @Nullable String quickPlayServerAddress) {
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.renderer_plugin_storage_title)
                 .setMessage(renderer.getRendererName()
                         + " needs the MobileGlues folder selected before launch.\n\n"
@@ -3508,7 +3525,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
 
     private void showFolderPathFallback(@NonNull File folder) {
         String path = folder.getAbsolutePath();
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.instance_folder_open_failed_title)
                 .setMessage(getString(R.string.instance_folder_open_failed_message, path))
                 .setNegativeButton(android.R.string.ok, null)
@@ -3545,7 +3562,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
                 FrameLayout.LayoutParams.WRAP_CONTENT
         ));
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.instance_settings_edit_name)
                 .setView(container)
                 .setNegativeButton(android.R.string.cancel, null)
@@ -3633,7 +3650,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
     private void resetContentDirectories() {
         modsDirectory = new File(gameDirectory, "mods");
         shaderpacksDirectory = new File(gameDirectory, "shaderpacks");
-        resourcepacksDirectory = new File(gameDirectory, "resourcepacks");
+        resourcepacksDirectory = new File(gameDirectory, ModManagerContentType.getResourcePackFolderName(getGameVersionIdForContent()));
         worldsDirectory = new File(gameDirectory, "saves");
         screenshotsDirectory = new File(gameDirectory, "screenshots");
     }
@@ -3865,10 +3882,10 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         // RecyclerView can start binding rows before the user sees any progress UI.
         setContentLoadingOverlayVisible(
                 true,
-                getString(refreshCategory.pluralLabelRes),
+                getCategoryPluralLabel(refreshCategory),
                 visibleBeforeRefresh == 0
-                        ? "Loading " + getString(refreshCategory.pluralLabelRes).toLowerCase(Locale.US) + "..."
-                        : "Refreshing " + getString(refreshCategory.pluralLabelRes).toLowerCase(Locale.US) + "..."
+                        ? "Loading " + getCategoryPluralLabel(refreshCategory).toLowerCase(Locale.US) + "..."
+                        : "Refreshing " + getCategoryPluralLabel(refreshCategory).toLowerCase(Locale.US) + "..."
         );
 
         // Keep the first screen draw responsive while large folders are scanned in the background.
@@ -3878,8 +3895,8 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         bindImportButtonForCategory(refreshCategory);
         binding.buttonAddMods.setEnabled(canUploadSelectedCategory() && !contentOperationRunning);
         binding.textModsHint.setText(visibleBeforeRefresh == 0
-                ? "Loading " + getString(refreshCategory.pluralLabelRes).toLowerCase(Locale.US) + "..."
-                : "Refreshing " + getString(refreshCategory.pluralLabelRes).toLowerCase(Locale.US) + "...");
+                ? "Loading " + getCategoryPluralLabel(refreshCategory).toLowerCase(Locale.US) + "..."
+                : "Refreshing " + getCategoryPluralLabel(refreshCategory).toLowerCase(Locale.US) + "...");
         updateContentUpdateButtons();
 
         contentRefreshExecutor.execute(() -> {
@@ -4092,7 +4109,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
     private void updateContentHint(@NonNull File directory) {
         int totalCount = countContentItemsMatchingVisibilityFilter();
         int filteredCount = filteredContentItems.size();
-        String pluralLabel = getString(selectedCategory.pluralLabelRes);
+        String pluralLabel = getCategoryPluralLabel(selectedCategory);
 
         String countText;
         if (filteredCount == 0) {
@@ -4786,7 +4803,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
 
     private void showDeleteContentItemDialog(@NonNull InstanceContentItem item) {
         InstanceContentItem actionItem = resolveContentItemForAction(item);
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(getString(R.string.instance_content_delete_title, actionItem.title))
                 .setMessage(getString(R.string.instance_content_delete_message, actionItem.file.getAbsolutePath()))
                 .setNegativeButton(android.R.string.cancel, null)
@@ -5254,7 +5271,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
     private void showDeleteSelectedContentDialog() {
         ArrayList<InstanceContentItem> selected = getSelectedContentItems();
         if (selected.isEmpty()) return;
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.instance_content_delete_selected_title)
                 .setMessage(getString(R.string.instance_content_delete_selected_message, selected.size()))
                 .setNegativeButton(android.R.string.cancel, null)
@@ -5479,7 +5496,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
             Toast.makeText(this, R.string.instance_content_no_updates_found, Toast.LENGTH_SHORT).show();
             return;
         }
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.instance_content_update_all_title)
                 .setMessage(getString(R.string.instance_content_update_all_message, updates.size()))
                 .setNegativeButton(android.R.string.cancel, null)
@@ -5745,7 +5762,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
 
         String latestFileName = resolveLatestFileName(plan.candidate);
         if (!isBlank(latestFileName) && gameDirectory != null) {
-            File targetDirectory = plan.contentType.getTargetDirectory(gameDirectory);
+            File targetDirectory = plan.contentType.getTargetDirectory(gameDirectory, getGameVersionIdForContent());
             File candidate = new File(targetDirectory, latestFileName);
             if (candidate.isFile()) return candidate;
             File disabledCandidate = new File(targetDirectory, latestFileName + ".disabled");
@@ -5778,7 +5795,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
     @Nullable
     private File findNewestNewFileInTargetDirectory(@NonNull UpdateCleanupPlan plan) {
         if (gameDirectory == null) return null;
-        File directory = plan.contentType.getTargetDirectory(gameDirectory);
+        File directory = plan.contentType.getTargetDirectory(gameDirectory, getGameVersionIdForContent());
         File[] files = directory.listFiles(file -> file.isFile() && !file.isHidden());
         if (files == null) return null;
 
@@ -6013,7 +6030,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
 
         String fileName = entry.optString("fileName", "");
         if (!isBlank(fileName)) {
-            File targetDirectory = type.getTargetDirectory(gameDirectory);
+            File targetDirectory = type.getTargetDirectory(gameDirectory, getGameVersionIdForContent());
             File candidate = new File(targetDirectory, fileName);
             if (candidate.isFile()) return candidate;
             File disabledCandidate = new File(targetDirectory, fileName + ".disabled");
@@ -6354,7 +6371,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         LinearLayout.LayoutParams progressParams = new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         progressParams.topMargin = dp(12);
         layout.addView(updateProgressBar, progressParams);
-        updateProgressDialog = new AlertDialog.Builder(this).setTitle(title).setView(layout).setCancelable(cancelable).create();
+        updateProgressDialog = new MaterialAlertDialogBuilder(this).setTitle(title).setView(layout).setCancelable(cancelable).create();
         updateProgressDialog.setOnDismissListener(dialog -> getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON));
         updateProgressDialog.show();
     }
@@ -6380,7 +6397,11 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
 
         try {
             startActivityForResult(
-                    Intent.createChooser(intent, getString(pendingImportCategory.pickerTitleRes)),
+                    Intent.createChooser(intent, getString(
+                            pendingImportCategory == ResourceCategory.RESOURCEPACKS && usesLegacyTexturePacks()
+                                    ? R.string.texturepacks_picker_title
+                                    : pendingImportCategory.pickerTitleRes
+                    )),
                     REQUEST_PICK_CONTENT
             );
         } catch (ActivityNotFoundException throwable) {
@@ -6486,7 +6507,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
                 refreshContentList();
                 Toast.makeText(
                         this,
-                        getString(R.string.instance_content_imported_value, finalAdded, getString(category.pluralLabelRes)),
+                        getString(R.string.instance_content_imported_value, finalAdded, getCategoryPluralLabel(category)),
                         Toast.LENGTH_SHORT
                 ).show();
             });
@@ -6494,7 +6515,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
             Logging.e(TAG, "Unable to import " + category.name(), throwable);
             runOnUiThread(() -> Toast.makeText(
                     this,
-                    getString(R.string.instance_content_import_failed, getString(category.pluralLabelRes), throwable.getMessage() != null ? throwable.getMessage() : throwable.getClass().getSimpleName()),
+                    getString(R.string.instance_content_import_failed, getCategoryPluralLabel(category), throwable.getMessage() != null ? throwable.getMessage() : throwable.getClass().getSimpleName()),
                     Toast.LENGTH_LONG
             ).show());
         }
@@ -7910,7 +7931,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
     }
 
     private void confirmDeleteScreenshot(@NonNull File screenshotFile, @NonNull Dialog viewerDialog) {
-        AlertDialog confirmation = new AlertDialog.Builder(this)
+        AlertDialog confirmation = new MaterialAlertDialogBuilder(this)
                 .setTitle(R.string.instance_screenshot_delete_title)
                 .setMessage(getString(R.string.instance_screenshot_delete_message, screenshotFile.getName()))
                 .setNegativeButton(android.R.string.cancel, null)
@@ -8539,13 +8560,6 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
         addPerInstanceSettingsAlias(keys, settingsKey);
         addPerInstanceSettingsAlias(keys, InstanceLaunchSettings.resolveInstanceKey(instanceId, instanceName));
         addPerInstanceSettingsAlias(keys, instanceId);
-        addPerInstanceSettingsAlias(keys, instanceName);
-        addPerInstanceSettingsAlias(keys, baseVersionId);
-        if (isolated) {
-            addPerInstanceSettingsAlias(keys, instanceName);
-        } else {
-            addPerInstanceSettingsAlias(keys, baseVersionId);
-        }
         return keys;
     }
 
@@ -8653,7 +8667,7 @@ public final class InstanceDetailsActivity extends AppCompatActivity {
                 ? selectedRamMb[0]
                 : MemoryAllocationUtils.resolveAllocatedMemoryMb(this)));
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle("Custom RAM")
                 .setMessage("Enter RAM in MB. Allowed range: " + minMemoryMb + " - " + maxMemoryMb + " MB.")
                 .setView(input)

@@ -12,6 +12,8 @@ package ca.dnamobile.droidbridgelauncher.runtime;
 import android.content.Context;
 import android.content.res.Configuration;
 import android.graphics.SurfaceTexture;
+import android.graphics.Bitmap;
+import android.view.PixelCopy;
 import android.graphics.Point;
 import android.graphics.Rect;
 import android.graphics.PixelFormat;
@@ -50,6 +52,7 @@ import ca.dnamobile.droidbridgelauncher.renderer.DroidBridgeMesaSupport;
 import ca.dnamobile.droidbridgelauncher.controls.TouchHotbarHitbox;
 import ca.dnamobile.droidbridgelauncher.controls.ControlsPreferences;
 import ca.dnamobile.droidbridgelauncher.controls.MinecraftTextInputKeyboardTrigger;
+import ca.dnamobile.droidbridgelauncher.controls.MinecraftGuiScaleResolver;
 import ca.dnamobile.droidbridgelauncher.controls.TouchKeyboardHelper;
 import ca.dnamobile.droidbridgelauncher.input.GamepadInputController;
 import ca.dnamobile.droidbridgelauncher.input.InputEventDiagnosticLogger;
@@ -60,6 +63,7 @@ import ca.dnamobile.droidbridgelauncher.runtime.utils.JREUtils;
 import org.libsdl.app.SDLControllerManager;
 import org.lwjgl.glfw.CallbackBridge;
 
+import java.io.File;
 import java.lang.reflect.Method;
 import java.util.HashSet;
 import java.util.Set;
@@ -90,9 +94,11 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
     private int imeViewportBottomInset = 0;
     private float inputScaleX = 1.0f;
     private float inputScaleY = 1.0f;
+    @Nullable private File minecraftOptionsFile;
 
     private int lastSentWindowWidth = -1;
     private int lastSentWindowHeight = -1;
+    private int lastLoggedRequestedScalePercent = -1;
     private int lastLoggedScalePercent = -1;
     private int lastLoggedViewWidth = -1;
     private int lastLoggedViewHeight = -1;
@@ -107,6 +113,7 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
     private SurfaceReadyListener surfaceReadyListener;
     private OnRenderingStartedListener renderingStartedListener;
     @Nullable private SpecialKeyEventListener specialKeyEventListener;
+    @Nullable private AndroidVirtualMouseUiRouter androidVirtualMouseUiRouter;
     private boolean renderingStarted = false;
     private volatile boolean bridgeWindowAttached = false;
     private volatile boolean grabbed = false;
@@ -192,7 +199,15 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
     private final Set<Integer> controllerFallbackMouseButtonsDown = new HashSet<>();
     private long suppressRelativeCursorUntilNanos;
     private long lastHardwarePointerEventNanos;
+    private boolean hardwarePointerInputMode;
+    private static volatile boolean sHardwareMenuSoftwareCursorActive;
+    // Android Virtual Mouse: release the real OS pointer only while a DroidBridge-owned
+    // Android UI (such as the in-game launcher menu) explicitly needs it. Minecraft
+    // GUIs keep pointer capture and use the centered DroidBridge software cursor.
+    private volatile boolean androidVirtualMouseUiInteractionMode;
     private long lastHardwareSecondaryMotionEventNanos;
+    private long lastHardwareBackButtonMotionEventNanos;
+    private long lastHardwareForwardButtonMotionEventNanos;
     private int lastHardwarePointerDeviceId = -1;
 
     // BTA / old LWJGL fallback input. BTA detects controllers, but DroidBridge
@@ -262,9 +277,18 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
 
 
     private boolean shouldForceDirectFreedrenoOpaqueRgbx8888() {
+        // v76: DROIDBRIDGE_EGL_FORCE_RGBX8888 is a visual/config request, not a
+        // general instruction to switch the Android window owner to SurfaceView.
+        // Kopper uses RGBX8888 too, but must remain on TextureView; otherwise the
+        // raw handheld panel transform can present the game 90 degrees sideways and
+        // the SurfaceView BufferQueue can be replaced while Mesa still owns it.
+        if (isKopperZinkRendererActive()) {
+            return false;
+        }
         // v69: do not force RGBX just because direct Freedreno is selected.
-        // the tested renderer path's working path lets Mesa/Android choose the visual. Only force RGBX
-        // when an explicit debug flag asks for it.
+        // The tested direct-renderer path lets Mesa/Android choose the visual. Only
+        // force native SurfaceView when an explicit direct-Freedreno flag asks for it,
+        // or when a legacy non-Kopper route still uses the old RGBX compatibility flag.
         return envEquals("DROIDBRIDGE_DIRECT_FREEDRENO_OPAQUE_RGBX8888", "1")
                 || envEquals("DROIDBRIDGE_EGL_FORCE_RGBX8888", "1");
     }
@@ -276,6 +300,19 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         // visual corruption rather than a context failure. Keep an explicit escape hatch.
         return envEquals("DROIDBRIDGE_DIRECT_FREEDRENO_NATIVE_SURFACE_V69", "1")
                 && !envEquals("DROIDBRIDGE_DIRECT_FREEDRENO_TEXTUREVIEW_V70", "1");
+    }
+
+    private boolean isKopperZinkRendererActive() {
+        // Kopper/Zink presents through Mesa EGL on an Android native window.
+        // Current FCL/Zalith-family builds require the composited TextureView path;
+        // handing Kopper a direct SurfaceView can expose the device panel transform
+        // (90-degree output on some Adreno handhelds/phones) and can destabilize the
+        // native window after the first world frames. Keep this independent from the
+        // user's global SurfaceView preference so other renderers are unaffected.
+        return envContains("DROIDBRIDGE_RENDERER", "opengles3_desktopgl_zink_kopper")
+                || envContains("POJAV_RENDERER", "opengles3_desktopgl_zink_kopper")
+                || envContains("DROIDBRIDGE_RENDERER_LIBRARY", "libglxshim.so")
+                || envEquals("DROIDBRIDGE_KOPPER_FORCE_TEXTUREVIEW", "1");
     }
 
     private boolean isNativeMesaFreedrenoRendererActive() {
@@ -324,7 +361,26 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
 
         renderingStarted = false;
         boolean useNativeSurfaceView = LauncherPreferences.isUseNativeSurfaceView(getContext());
-        if (sdlWindowBackendRequested) {
+        boolean kopperZink = isKopperZinkRendererActive();
+        if (kopperZink) {
+            // Do not allow the global Native SurfaceView toggle to leak into Kopper.
+            // Kopper's Android WSI is substantially more stable when SurfaceTexture
+            // owns composition/rotation instead of exposing the panel's raw transform.
+            useNativeSurfaceView = false;
+            Log.i("MinecraftGLSurface",
+                    "Kopper Zink forcing TextureView surface owner (SurfaceView disabled)");
+            LauncherLogManager.append(
+                    "KopperZinkSurface: forced TextureView owner; native SurfaceView disabled");
+        }
+
+        // v76: Kopper must have absolute priority over every legacy Mesa/FreeDreno
+        // native-surface compatibility branch below. In v75 the RGBX visual flag
+        // DROIDBRIDGE_EGL_FORCE_RGBX8888=1 re-enabled SurfaceView after the Kopper
+        // block above had disabled it, so the "force TextureView" fix never actually
+        // reached the final owner selection.
+        if (kopperZink) {
+            useNativeSurfaceView = false;
+        } else if (sdlWindowBackendRequested) {
             // Snapshot 4's Vulkan VkSurfaceKHR permanently owns the ANativeWindow
             // returned during startup. A SurfaceView receives a brand-new
             // BufferQueue when Android invalidates the Activity root surface, so
@@ -348,11 +404,19 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         }
 
         if (useNativeSurfaceView) {
+            LauncherLogManager.append(
+                    "MinecraftGLSurface: final surface owner=SurfaceView renderer="
+                            + String.valueOf(System.getenv("DROIDBRIDGE_RENDERER")));
             startNativeSurfaceView(isAlreadyRunning);
         } else {
             if (envEquals("DROIDBRIDGE_DIRECT_FREEDRENO_TEXTUREVIEW_V70", "1")) {
                 Log.i("ResolutionScale", "v70 using TextureView path for direct Freedreno Freedreno KGSL visual test");
             }
+            LauncherLogManager.append(
+                    "MinecraftGLSurface: final surface owner=TextureView renderer="
+                            + String.valueOf(System.getenv("DROIDBRIDGE_RENDERER"))
+                            + " kopper=" + kopperZink
+                            + " rgbx=" + envEquals("DROIDBRIDGE_EGL_FORCE_RGBX8888", "1"));
             startTextureView(isAlreadyRunning);
         }
     }
@@ -958,6 +1022,68 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
     }
 
     /**
+     * Reasserts only the retained SDL TextureView producer's current buffer size.
+     *
+     * Android can resume a retained TextureView with an EGL drawable sized to the
+     * physical display even though DroidBridge intentionally renders Minecraft at
+     * a smaller resolution. In that state Minecraft's GL viewport stays scaled and
+     * appears only in the lower-left corner. A live resolution change fixes it by
+     * touching SurfaceTexture.setDefaultBufferSize(...), so the resume repair needs
+     * to repeat that producer-side step without changing DroidBridge's logical SDL
+     * window size or replacing the retained Surface/ANativeWindow.
+     *
+     * This method deliberately does NOT call DroidBridgeSDL3Bootstrap.resizeSurface,
+     * send a Minecraft window-size callback, or alter the Surface object. The caller
+     * may safely follow it with SDLActivity.onNativeSurfaceChanged() on the wrapped
+     * OpenGL path so EGL rebinds the same retained window using these buffer bounds.
+     */
+    public boolean reassertRetainedSdlOpenGlBufferAfterResume() {
+        if (Looper.myLooper() != Looper.getMainLooper()) {
+            LauncherLogManager.append(
+                    "DroidBridgeSDL3: retained OpenGL buffer reassert skipped; not on main thread");
+            return false;
+        }
+        if (!sdlWindowBackendRequested || textureView == null
+                || textureSurface == null || !textureSurface.isValid()) {
+            return false;
+        }
+
+        SurfaceTexture producer = textureView.getSurfaceTexture();
+        if (producer == null || producer != retainedSdlSurfaceTexture) {
+            return false;
+        }
+
+        int targetWidth = Math.max(1, renderWidth);
+        int targetHeight = Math.max(1, renderHeight);
+        try {
+            producer.setDefaultBufferSize(targetWidth, targetHeight);
+
+            // Force TextureView's consumer/layer to apply the retained producer's
+            // geometry again. The view stays MATCH_PARENT; only its buffer remains
+            // at the user's selected render resolution.
+            textureView.requestLayout();
+            textureView.invalidate();
+            textureView.postInvalidateOnAnimation();
+            requestLayout();
+            invalidate();
+            postInvalidateOnAnimation();
+
+            LauncherLogManager.append(
+                    "DroidBridgeSDL3: retained OpenGL TextureView buffer reasserted"
+                            + " render=" + targetWidth + "x" + targetHeight
+                            + " view=" + Math.max(1, textureView.getWidth()) + "x"
+                            + Math.max(1, textureView.getHeight())
+                            + " sameProducer=true sameSurface=true");
+            return true;
+        } catch (Throwable throwable) {
+            LauncherLogManager.append(
+                    "DroidBridgeSDL3: retained OpenGL TextureView buffer reassert failed: "
+                            + throwable);
+            return false;
+        }
+    }
+
+    /**
      * Re-sends the current size even when the dimensions have not changed.
      *
      * Some renderer/loader combinations create the real GLFW window after the
@@ -1216,6 +1342,16 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         scheduleSurfaceResizeRefreshes();
     }
 
+    /**
+     * Active instance options.txt, used only to keep launcher framebuffer scaling
+     * from making Minecraft's GUI physically larger when the framebuffer becomes
+     * too small for the user's normal GUI scale.
+     */
+    public void setMinecraftOptionsFile(@Nullable File optionsFile) {
+        minecraftOptionsFile = optionsFile;
+        MinecraftGuiScaleResolver.clearCache();
+    }
+
     @NonNull
     private RenderSize updateScaledSizeFromView(int width, int height) {
         int callbackWidth = safeWidth(width);
@@ -1224,7 +1360,7 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         int ownHeight = getHeight();
         int candidateAvailableWidth = Math.max(1, ownWidth > 1 ? ownWidth : callbackWidth);
         int candidateAvailableHeight = Math.max(1, ownHeight > 1 ? ownHeight : callbackHeight);
-        int percent = clampResolutionScalePercent(
+        int requestedPercent = clampResolutionScalePercent(
                 LauncherPreferences.getGameResolutionScalePercent(getContext())
         );
 
@@ -1252,6 +1388,7 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                         safeAvailableWidth,
                         safeAvailableHeight
                 );
+        int percent = resolveAntiZoomResolutionScalePercent(base, requestedPercent);
         GameResolutionSettings.ResolvedResolution render;
         GameResolutionSettings.DisplayBounds bounds;
         String resolvedMode = base.mode;
@@ -1321,7 +1458,7 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                 renderWidth,
                 renderHeight
         );
-        logResolutionScaleIfChanged(size, percent, resolvedMode);
+        logResolutionScaleIfChanged(size, requestedPercent, percent, resolvedMode);
         updateSizeFields(size);
         applyImeViewportLayout();
         return size;
@@ -1333,12 +1470,42 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         return percent;
     }
 
+    /**
+     * Whole-framebuffer scaling also shrinks the framebuffer Minecraft uses to clamp
+     * guiScale. Once that clamp reaches 1, stretching the low-resolution buffer back
+     * to the Android view makes the GUI appear zoomed in. Do not let the selected
+     * percentage fall below the point where scale=1 has the same on-screen size as
+     * the normal full-resolution GUI. The world/framebuffer is still downscaled; we
+     * only prevent percentages that Minecraft cannot represent without GUI inflation.
+     */
+    private int resolveAntiZoomResolutionScalePercent(
+            @NonNull GameResolutionSettings.ResolvedResolution base,
+            int requestedPercent
+    ) {
+        if (GameResolutionSettings.MODE_MCSX.equals(base.mode) || requestedPercent >= 100) {
+            return requestedPercent;
+        }
+
+        int requestedGuiScale = MinecraftGuiScaleResolver.readGuiScaleCached(minecraftOptionsFile);
+        int fullResolutionGuiScale = MinecraftGuiScaleResolver.resolveRequestedScaleForFramebuffer(
+                requestedGuiScale,
+                Math.max(1, base.width),
+                Math.max(1, base.height)
+        );
+        fullResolutionGuiScale = Math.max(1, fullResolutionGuiScale);
+
+        int noZoomFloor = (int) Math.ceil(100.0 / fullResolutionGuiScale);
+        return Math.max(requestedPercent, Math.min(100, noZoomFloor));
+    }
+
     private void logResolutionScaleIfChanged(
             @NonNull RenderSize size,
+            int requestedPercent,
             int percent,
             @NonNull String mode
     ) {
-        if (lastLoggedScalePercent == percent
+        if (lastLoggedRequestedScalePercent == requestedPercent
+                && lastLoggedScalePercent == percent
                 && lastLoggedViewWidth == size.viewWidth
                 && lastLoggedViewHeight == size.viewHeight
                 && lastLoggedRenderWidth == size.renderWidth
@@ -1346,6 +1513,7 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
             return;
         }
 
+        lastLoggedRequestedScalePercent = requestedPercent;
         lastLoggedScalePercent = percent;
         lastLoggedViewWidth = size.viewWidth;
         lastLoggedViewHeight = size.viewHeight;
@@ -1356,7 +1524,9 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                 + " content=" + size.viewWidth + "x" + size.viewHeight
                 + "@" + size.viewLeft + "," + size.viewTop
                 + " mode=" + mode
-                + " percent=" + percent
+                + " requestedPercent=" + requestedPercent
+                + " effectivePercent=" + percent
+                + (percent != requestedPercent ? " antiZoomFloor=true" : "")
                 + " render=" + size.renderWidth + "x" + size.renderHeight
                 + " texture=" + (textureView != null)
                 + " nativeSurface=" + (nativeSurfaceView != null));
@@ -1694,16 +1864,21 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                     }
                 } else {
                     sendAbsoluteCursor(x, y);
+                    replayBtaDirectTouchCursor(x, y);
 
-                    if (controllerModTouchCoexistence) {
-                        // Controlify and Controllable keep their own last-input-mode state.
-                        // A cursor position followed only by a synthetic click on ACTION_UP
-                        // can be ignored while the mod still considers the controller active.
-                        // Mirror a normal desktop pointer stream: establish the left-button
-                        // press immediately on ACTION_DOWN, keep it held for menu dragging,
-                        // and release it on ACTION_UP/CANCEL. If this press closes a menu,
-                        // onGrabState()/finishMenuTouchThatRegrabbedGame() releases it and
-                        // recenters the grabbed baseline before the finger stream continues.
+                    if (controllerModTouchCoexistence || !allowAndroidViewFocus) {
+                        // Controlify/Controllable and cross-display dual-screen touch both
+                        // need a real desktop-style press/drag stream. On a secondary touch
+                        // panel (allowAndroidViewFocus == false), delaying mouse-down until
+                        // Android touch slop is crossed makes thin drag targets such as the
+                        // Flashback replay timeline feel dead: the first part of the drag is
+                        // only cursor movement and the mod never sees a held button.
+                        //
+                        // Send mouse-down immediately for cross-display GUI input, keep it
+                        // held through MOVE, and release on UP/CANCEL. The existing
+                        // finishMenuTouchThatRegrabbedGame()/onGrabState() path still releases
+                        // this press safely if a GUI action (for example Back to Game)
+                        // re-grabs the mouse while the finger is down.
                         sendMouseButton(LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_LEFT, true);
                         touchMenuMouseButtonDown = true;
                     } else {
@@ -1738,6 +1913,7 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                         }
                     } else {
                         sendAbsoluteCursor(x, y);
+                        replayBtaDirectTouchCursor(x, y);
                     }
                     return true;
                 }
@@ -2176,7 +2352,7 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
 
         requestFocusIfNeeded();
         markHardwarePointerInputMode(event);
-        noteHardwareSecondaryButtonMotionEvent(event);
+        noteHardwareMouseButtonMotionEvent(event);
 
         float x = safeEventX(event, pointerIndex);
         float y = safeEventY(event, pointerIndex);
@@ -2184,6 +2360,10 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
 
         switch (action) {
             case MotionEvent.ACTION_DOWN:
+                if (isHardwareMenuSoftwareCursorRouting()) {
+                    safeRequestPointerCapture();
+                    return sendHardwareMouseButtonsDownForEvent(event);
+                }
                 updateHardwareMousePositionIfUsable(event, x, y);
                 if (!grabbed) sendHardwareAbsoluteCursor(event, x, y);
                 return sendHardwareMouseButtonsDownForEvent(event);
@@ -2191,12 +2371,17 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
             case MotionEvent.ACTION_UP:
                 boolean keyboardWasShowingOnMouseUp = !grabbed && isAndroidKeyboardShiftActive();
                 boolean hardwareMenuClick = !grabbed;
-                if (!grabbed) sendHardwareAbsoluteCursor(event, x, y);
+                boolean softwareMenuMouseUp = isHardwareMenuSoftwareCursorRouting();
+                if (!grabbed && !softwareMenuMouseUp) sendHardwareAbsoluteCursor(event, x, y);
                 releaseMouseButtonsForEvent(event);
-                updateHardwareMousePositionIfUsable(event, x, y);
+                if (!softwareMenuMouseUp) {
+                    updateHardwareMousePositionIfUsable(event, x, y);
+                }
                 if (hardwareMenuClick) {
                     if (keyboardWasShowingOnMouseUp) {
                         closeAndroidKeyboardAfterMinecraftTapIfNeeded(true);
+                    } else if (softwareMenuMouseUp) {
+                        maybeOpenAndroidKeyboardFromCurrentSoftwareCursor();
                     } else {
                         maybeOpenAndroidKeyboardFromMenuTap(x, y);
                     }
@@ -2218,6 +2403,18 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                         relY = y - lastHardwareMouseY;
                     }
                     sendHardwareRelativeCursor(relX, relY);
+                } else if (isHardwareMenuSoftwareCursorRouting()) {
+                    safeRequestPointerCapture();
+                    // While Android is switching into pointer-capture mode, absolute
+                    // coordinates still describe the old OS pointer location. Ignore
+                    // them so the freshly centered Minecraft/software cursor cannot
+                    // jump back to that stale location before relative events begin.
+                    if (!hasActivePointerCapture()) return true;
+                    RelativeMouseDelta delta = collectRelativeMouseDelta(event, pointerIndex, true);
+                    if (delta.hasMovement) {
+                        sendHardwareMenuRelativeCursor(delta.dx, delta.dy);
+                    }
+                    return true;
                 } else {
                     sendHardwareAbsoluteCursor(event, x, y);
                 }
@@ -2225,6 +2422,10 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                 return true;
 
             case MotionEvent.ACTION_BUTTON_PRESS:
+                if (isHardwareMenuSoftwareCursorRouting()) {
+                    safeRequestPointerCapture();
+                    return sendMouseButtonUnconvertedTracked(event, true, pointerIndex);
+                }
                 if (!grabbed) sendHardwareAbsoluteCursor(event, x, y);
                 updateHardwareMousePositionIfUsable(event, x, y);
                 return sendMouseButtonUnconvertedTracked(event, true, pointerIndex);
@@ -2232,12 +2433,17 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
             case MotionEvent.ACTION_BUTTON_RELEASE:
                 boolean keyboardWasShowingOnHardwareButtonRelease = !grabbed && isAndroidKeyboardShiftActive();
                 boolean hardwareMenuButtonClick = !grabbed;
-                if (!grabbed) sendHardwareAbsoluteCursor(event, x, y);
-                updateHardwareMousePositionIfUsable(event, x, y);
+                boolean softwareMenuButtonRelease = isHardwareMenuSoftwareCursorRouting();
+                if (!grabbed && !softwareMenuButtonRelease) sendHardwareAbsoluteCursor(event, x, y);
+                if (!softwareMenuButtonRelease) {
+                    updateHardwareMousePositionIfUsable(event, x, y);
+                }
                 boolean handledRelease = sendMouseButtonUnconvertedTracked(event, false, pointerIndex);
                 if (hardwareMenuButtonClick) {
                     if (keyboardWasShowingOnHardwareButtonRelease) {
                         closeAndroidKeyboardAfterMinecraftTapIfNeeded(true);
+                    } else if (softwareMenuButtonRelease) {
+                        maybeOpenAndroidKeyboardFromCurrentSoftwareCursor();
                     } else {
                         maybeOpenAndroidKeyboardFromMenuTap(x, y);
                     }
@@ -2280,11 +2486,19 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
             handled |= sendHardwareMouseButtonTracked(
                     LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_MIDDLE, true);
         }
+        if ((buttonState & MotionEvent.BUTTON_BACK) != 0) {
+            handled |= sendHardwareMouseButtonTracked(
+                    LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_BACK, true);
+        }
+        if ((buttonState & MotionEvent.BUTTON_FORWARD) != 0) {
+            handled |= sendHardwareMouseButtonTracked(
+                    LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_FORWARD, true);
+        }
 
         if (handled) return true;
 
-        // Do not turn Android back/forward/extra buttons into a fake left click.
-        // They are currently unsupported by this bridge, but must remain distinct.
+        // Unknown extra buttons must remain distinct; never turn them into a fake
+        // primary click just because Android delivered a touch-style ACTION_DOWN.
         if (buttonState != 0) return true;
 
         // Some drivers omit buttonState but still provide actionButton. Prefer it
@@ -2327,6 +2541,10 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                 return (buttonState & MotionEvent.BUTTON_SECONDARY) != 0;
             case LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_MIDDLE:
                 return (buttonState & MotionEvent.BUTTON_TERTIARY) != 0;
+            case LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_BACK:
+                return (buttonState & MotionEvent.BUTTON_BACK) != 0;
+            case LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_FORWARD:
+                return (buttonState & MotionEvent.BUTTON_FORWARD) != 0;
             default:
                 return false;
         }
@@ -2424,7 +2642,7 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
 
         requestFocusIfNeeded();
         markHardwarePointerInputMode(event);
-        noteHardwareSecondaryButtonMotionEvent(event);
+        noteHardwareMouseButtonMotionEvent(event);
 
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_HOVER_MOVE:
@@ -2445,6 +2663,15 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                     }
                     sendHardwareRelativeCursor(relX, relY);
                     updateHardwareMousePositionIfUsable(event, x, y);
+                } else if (isHardwareMenuSoftwareCursorRouting()) {
+                    safeRequestPointerCapture();
+                    // Do not let the stale Android absolute pointer overwrite the
+                    // centered logical cursor while pointer capture is becoming live.
+                    if (!hasActivePointerCapture()) return true;
+                    RelativeMouseDelta delta = collectRelativeMouseDelta(event, pointerIndex, true);
+                    if (delta.hasMovement) {
+                        sendHardwareMenuRelativeCursor(delta.dx, delta.dy);
+                    }
                 } else {
                     sendHardwareAbsoluteCursor(event, x, y);
                     updateHardwareMousePositionIfUsable(event, x, y);
@@ -2459,6 +2686,10 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                 return true;
 
             case MotionEvent.ACTION_BUTTON_PRESS:
+                if (isHardwareMenuSoftwareCursorRouting()) {
+                    safeRequestPointerCapture();
+                    return sendMouseButtonUnconvertedTracked(event, true, pointerIndex);
+                }
                 if (!grabbed) sendHardwareAbsoluteCursor(event, safeEventX(event, pointerIndex), safeEventY(event, pointerIndex));
                 updateHardwareMousePositionIfUsable(event, safeEventX(event, pointerIndex), safeEventY(event, pointerIndex));
                 return sendMouseButtonUnconvertedTracked(event, true, pointerIndex);
@@ -2468,12 +2699,17 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                 float releaseY = safeEventY(event, pointerIndex);
                 boolean keyboardWasShowingOnGenericRelease = !grabbed && isAndroidKeyboardShiftActive();
                 boolean genericMenuButtonClick = !grabbed;
-                if (!grabbed) sendHardwareAbsoluteCursor(event, releaseX, releaseY);
-                updateHardwareMousePositionIfUsable(event, releaseX, releaseY);
+                boolean softwareGenericRelease = isHardwareMenuSoftwareCursorRouting();
+                if (!grabbed && !softwareGenericRelease) sendHardwareAbsoluteCursor(event, releaseX, releaseY);
+                if (!softwareGenericRelease) {
+                    updateHardwareMousePositionIfUsable(event, releaseX, releaseY);
+                }
                 boolean genericHandledRelease = sendMouseButtonUnconvertedTracked(event, false, pointerIndex);
                 if (genericMenuButtonClick) {
                     if (keyboardWasShowingOnGenericRelease) {
                         closeAndroidKeyboardAfterMinecraftTapIfNeeded(true);
+                    } else if (softwareGenericRelease) {
+                        maybeOpenAndroidKeyboardFromCurrentSoftwareCursor();
                     } else {
                         maybeOpenAndroidKeyboardFromMenuTap(releaseX, releaseY);
                     }
@@ -2485,10 +2721,40 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         }
     }
 
+    private boolean routeCapturedAndroidVirtualMouseUi(@NonNull MotionEvent event, int normalizedAction) {
+        if (!shouldUseAndroidVirtualPhysicalMouse() || grabbed) return false;
+        AndroidVirtualMouseUiRouter router = androidVirtualMouseUiRouter;
+        if (router == null) return false;
+
+        float localX = mapCursorXToViewX(CallbackBridge.mouseX);
+        float localY = mapCursorYToViewY(CallbackBridge.mouseY);
+        int[] location = new int[2];
+        try {
+            getLocationOnScreen(location);
+        } catch (Throwable ignored) {
+            location[0] = 0;
+            location[1] = 0;
+        }
+
+        try {
+            return router.onAndroidVirtualMouseUiEvent(
+                    normalizedAction,
+                    location[0] + localX,
+                    location[1] + localY,
+                    event.getActionButton(),
+                    event.getButtonState(),
+                    event.getEventTime()
+            );
+        } catch (Throwable throwable) {
+            Log.w("MinecraftGLSurface", "Android Virtual Mouse UI router failed", throwable);
+            return false;
+        }
+    }
+
     private boolean handleCapturedPointer(View view, MotionEvent event) {
         requestFocusIfNeeded();
         markHardwarePointerInputMode(event);
-        noteHardwareSecondaryButtonMotionEvent(event);
+        noteHardwareMouseButtonMotionEvent(event);
 
         switch (event.getActionMasked()) {
             case MotionEvent.ACTION_MOVE:
@@ -2499,9 +2765,17 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                     // 0,0 position on some devices after touch input or dialogs. Treat
                     // that as "no movement" instead of warping the virtual cursor to a
                     // screen corner.
+                    if (!grabbed) {
+                        routeCapturedAndroidVirtualMouseUi(event, MotionEvent.ACTION_MOVE);
+                    }
                     return true;
                 }
-                sendHardwareRelativeCursor(delta.dx, delta.dy);
+                if (grabbed) {
+                    sendHardwareRelativeCursor(delta.dx, delta.dy);
+                } else {
+                    sendHardwareMenuRelativeCursor(delta.dx, delta.dy);
+                    routeCapturedAndroidVirtualMouseUi(event, MotionEvent.ACTION_MOVE);
+                }
                 return true;
 
             case MotionEvent.ACTION_SCROLL:
@@ -2511,25 +2785,40 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                 );
                 return true;
 
+            case MotionEvent.ACTION_DOWN:
             case MotionEvent.ACTION_BUTTON_PRESS:
-                if (!grabbed) sendHardwareAbsoluteCursor(event, event.getX(), event.getY());
-                updateHardwareMousePositionIfUsable(event, event.getX(), event.getY());
+                // Pointer-capture coordinates are relative/synthetic. Never overwrite
+                // the menu cursor with event.getX()/getY() here; click exactly where
+                // the software/logical cursor is currently drawn. Android Virtual Mouse
+                // gets first chance to activate DroidBridge-owned Android UI at that
+                // logical position. If it consumes the click, do not click Minecraft too.
+                if (!grabbed && routeCapturedAndroidVirtualMouseUi(event, MotionEvent.ACTION_DOWN)) {
+                    return true;
+                }
                 return sendMouseButtonUnconvertedTracked(event, true, 0);
 
+            case MotionEvent.ACTION_UP:
             case MotionEvent.ACTION_BUTTON_RELEASE:
+                if (!grabbed && routeCapturedAndroidVirtualMouseUi(event, MotionEvent.ACTION_UP)) {
+                    return true;
+                }
                 boolean keyboardWasShowingOnCapturedRelease = !grabbed && isAndroidKeyboardShiftActive();
                 boolean capturedMenuButtonClick = !grabbed;
-                if (!grabbed) sendHardwareAbsoluteCursor(event, event.getX(), event.getY());
-                updateHardwareMousePositionIfUsable(event, event.getX(), event.getY());
                 boolean capturedHandledRelease = sendMouseButtonUnconvertedTracked(event, false, 0);
                 if (capturedMenuButtonClick) {
                     if (keyboardWasShowingOnCapturedRelease) {
                         closeAndroidKeyboardAfterMinecraftTapIfNeeded(true);
                     } else {
-                        maybeOpenAndroidKeyboardFromMenuTap(event.getX(), event.getY());
+                        maybeOpenAndroidKeyboardFromCurrentSoftwareCursor();
                     }
                 }
                 return capturedHandledRelease;
+
+            case MotionEvent.ACTION_CANCEL:
+                if (!grabbed && routeCapturedAndroidVirtualMouseUi(event, MotionEvent.ACTION_CANCEL)) {
+                    return true;
+                }
+                return false;
 
             default:
                 return false;
@@ -2761,6 +3050,33 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         CallbackBridge.sendCursorPos(CallbackBridge.mouseX, CallbackBridge.mouseY);
     }
 
+    /**
+     * BTA can consume the first absolute mouse move only as an input-mode switch
+     * (CONTROLLER -> keyboard/mouse), leaving its cursor at the previous virtual
+     * controller position until another move arrives. Virtual Mouse OFF means direct
+     * touch, so replay the same absolute coordinate on the next UI frames. No mouse
+     * button is generated here; ACTION_UP keeps the normal click semantics.
+     */
+    private void replayBtaDirectTouchCursor(float x, float y) {
+        if (!GamepadInputController.btaNativeControllerOwnsLauncherInput
+                || ControlsPreferences.isVirtualMouseEnabled(getContext())) {
+            return;
+        }
+
+        final float replayX = x;
+        final float replayY = y;
+        post(() -> {
+            if (!isMinecraftGrabbingNow()) {
+                sendAbsoluteCursor(replayX, replayY);
+            }
+        });
+        postDelayed(() -> {
+            if (!isMinecraftGrabbingNow()) {
+                sendAbsoluteCursor(replayX, replayY);
+            }
+        }, 24L);
+    }
+
     private void sendHardwareAbsoluteCursor(@NonNull MotionEvent event, float x, float y) {
         if (!isUsableHardwareAbsoluteCoordinate(event, x, y)) {
             return;
@@ -2771,10 +3087,17 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         float mappedY = mapViewYToCursorY(y);
         CallbackBridge.mouseX = mappedX;
         CallbackBridge.mouseY = mappedY;
-        CallbackBridge.sendCursorPos(mappedX, mappedY);
+        if (shouldUseAndroidVirtualPhysicalMouse()) {
+            // Older Android/absolute pointer behavior: less accurate for camera look,
+            // but it keeps the OS pointer available to Android-side launcher UI.
+            CallbackBridge.sendCursorPos(mappedX, mappedY);
+        } else {
+            CallbackBridge.sendHardwareCursorPos(mappedX, mappedY);
+        }
 
         long now = SystemClock.uptimeMillis();
         if (sdlWindowBackendRequested
+                && InputEventDiagnosticLogger.isEnabled()
                 && now - lastSdlHardwareCursorLogUptimeMs >= 750L) {
             lastSdlHardwareCursorLogUptimeMs = now;
             LauncherLogManager.append(
@@ -2807,7 +3130,9 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         if (x > HARDWARE_TOP_LEFT_EPSILON || y > HARDWARE_TOP_LEFT_EPSILON) return false;
         if ((event.getButtonState() & (MotionEvent.BUTTON_PRIMARY
                 | MotionEvent.BUTTON_SECONDARY
-                | MotionEvent.BUTTON_TERTIARY)) != 0) {
+                | MotionEvent.BUTTON_TERTIARY
+                | MotionEvent.BUTTON_BACK
+                | MotionEvent.BUTTON_FORWARD)) != 0) {
             return false;
         }
         long until = suppressSuspiciousHardwareAbsoluteUntilNanos;
@@ -2824,6 +3149,8 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         lastHardwareMouseY = 0f;
         lastHardwarePointerEventNanos = 0L;
         lastHardwareSecondaryMotionEventNanos = 0L;
+        lastHardwareBackButtonMotionEventNanos = 0L;
+        lastHardwareForwardButtonMotionEventNanos = 0L;
         lastHardwarePointerDeviceId = -1;
         if (suppressSuspiciousAbsolute) {
             suppressSuspiciousHardwareAbsoluteUntilNanos = System.nanoTime() + TOUCH_POINTER_MODE_RESET_NANOS;
@@ -2871,6 +3198,30 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         float maxBridge = Math.max(0f, bridgeSize - 1f);
         if (maxView <= 0f || maxBridge <= 0f) return 0f;
         return clamp(clamp(value, 0f, maxView) * maxBridge / maxView, 0f, maxBridge);
+    }
+
+    private float mapCursorXToViewX(float cursorX) {
+        float cursorWidth = Math.max(1f, sdlWindowBackendRequested
+                ? DroidBridgeSDL3Bootstrap.getSdlCursorCoordinateWidth()
+                : CallbackBridge.windowWidth);
+        float maxCursor = Math.max(0f, cursorWidth - 1f);
+        float maxView = Math.max(0f, Math.max(1f, viewWidth) - 1f);
+        float local = maxCursor <= 0f ? 0f
+                : clamp(cursorX, 0f, maxCursor) * maxView / maxCursor;
+        return contentLeft + local;
+    }
+
+    private float mapCursorYToViewY(float cursorY) {
+        float cursorHeight = Math.max(1f, sdlWindowBackendRequested
+                ? DroidBridgeSDL3Bootstrap.getSdlCursorCoordinateHeight()
+                : CallbackBridge.windowHeight);
+        float maxCursor = Math.max(0f, cursorHeight - 1f);
+        float maxView = Math.max(0f, Math.max(1f, viewHeight) - 1f);
+        float local = maxCursor <= 0f ? 0f
+                : clamp(cursorY, 0f, maxCursor) * maxView / maxCursor;
+        float y = contentTop + local;
+        if (imeViewportBottomInset > 0) y -= imeViewportBottomInset;
+        return y;
     }
 
     private void sendRelativeCursor(float dx, float dy) {
@@ -2923,7 +3274,53 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         // Physical mouse relative deltas are already camera movement. Do not
         // multiply them by the render-resolution scale, otherwise reducing the
         // game resolution makes hardware mouse look slower than touch/gamepad.
-        sendUnscaledRelativeCursor(dx * mouseDpiScale, dy * mouseDpiScale);
+        if (shouldSuppressRelativeCursor()) {
+            return;
+        }
+        CallbackBridge.setInputReady(true);
+        CallbackBridge.mouseX += dx * mouseDpiScale;
+        CallbackBridge.mouseY += dy * mouseDpiScale;
+        if (shouldUseAndroidVirtualPhysicalMouse()) {
+            CallbackBridge.sendCursorPos(CallbackBridge.mouseX, CallbackBridge.mouseY);
+        } else {
+            CallbackBridge.sendHardwareCursorPos(CallbackBridge.mouseX, CallbackBridge.mouseY);
+        }
+    }
+
+    /**
+     * Moves the captured physical mouse while a Minecraft GUI is open. Android
+     * cannot warp its system cursor to Minecraft's requested center, so menus use
+     * DroidBridge's software cursor and keep the real mouse captured. Relative
+     * Android pixels are converted into the current Minecraft cursor coordinate
+     * space so 50/75% render resolutions preserve desktop-like pointer speed.
+     */
+    private void sendHardwareMenuRelativeCursor(float dx, float dy) {
+        float mouseDpiScale = GamepadMappingStore.get(getContext())
+                .getHardwareMouseDpiScaleMultiplier();
+        float cursorWidth = Math.max(1f, sdlWindowBackendRequested
+                ? DroidBridgeSDL3Bootstrap.getSdlCursorCoordinateWidth()
+                : CallbackBridge.windowWidth);
+        float cursorHeight = Math.max(1f, sdlWindowBackendRequested
+                ? DroidBridgeSDL3Bootstrap.getSdlCursorCoordinateHeight()
+                : CallbackBridge.windowHeight);
+        float localViewWidth = Math.max(1f, viewWidth);
+        float localViewHeight = Math.max(1f, viewHeight);
+
+        float scaleX = Math.max(0f, cursorWidth - 1f)
+                / Math.max(1f, localViewWidth - 1f);
+        float scaleY = Math.max(0f, cursorHeight - 1f)
+                / Math.max(1f, localViewHeight - 1f);
+
+        float nextX = clamp(CallbackBridge.mouseX + dx * mouseDpiScale * scaleX,
+                0f, Math.max(0f, cursorWidth - 1f));
+        float nextY = clamp(CallbackBridge.mouseY + dy * mouseDpiScale * scaleY,
+                0f, Math.max(0f, cursorHeight - 1f));
+        CallbackBridge.setInputReady(true);
+        if (shouldUseAndroidVirtualPhysicalMouse()) {
+            CallbackBridge.sendCursorPos(nextX, nextY);
+        } else {
+            CallbackBridge.sendHardwareCursorPos(nextX, nextY);
+        }
     }
 
     public static boolean sendMouseButtonUnconverted(int button, boolean status) {
@@ -2956,6 +3353,14 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
             if ((buttonState & MotionEvent.BUTTON_TERTIARY) != 0) {
                 handled |= sendHardwareMouseButtonTracked(
                         LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_MIDDLE, true);
+            }
+            if ((buttonState & MotionEvent.BUTTON_BACK) != 0) {
+                handled |= sendHardwareMouseButtonTracked(
+                        LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_BACK, true);
+            }
+            if ((buttonState & MotionEvent.BUTTON_FORWARD) != 0) {
+                handled |= sendHardwareMouseButtonTracked(
+                        LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_FORWARD, true);
             }
             return handled;
         }
@@ -2993,6 +3398,10 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                 return LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_MIDDLE;
             case MotionEvent.BUTTON_SECONDARY:
                 return LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT;
+            case MotionEvent.BUTTON_BACK:
+                return LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_BACK;
+            case MotionEvent.BUTTON_FORWARD:
+                return LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_FORWARD;
             default:
                 return -1;
         }
@@ -3000,6 +3409,13 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
 
     private void maybeOpenAndroidKeyboardFromMenuTap(float x, float y) {
         MinecraftTextInputKeyboardTrigger.onMenuPointerConfirm(this, x, y, grabbed);
+    }
+
+    private void maybeOpenAndroidKeyboardFromCurrentSoftwareCursor() {
+        maybeOpenAndroidKeyboardFromMenuTap(
+                mapCursorXToViewX(CallbackBridge.mouseX),
+                mapCursorYToViewY(CallbackBridge.mouseY)
+        );
     }
 
     private boolean isAndroidKeyboardShiftActive() {
@@ -3089,6 +3505,7 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         grabbed = isGrabbing;
         post(() -> {
             if (isGrabbing) {
+                sHardwareMenuSoftwareCursorActive = false;
                 boolean hadMenuTouchInFlight = trackingTouch && !touchStartedWhileGrabbed;
                 // Do not globally suppress camera deltas after every re-grab.
                 // A timer here made the first fresh touch-look after Back to Game
@@ -3131,12 +3548,29 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
                 }
             } else {
                 suppressRelativeCursorUntilNanos = 0L;
-                safeReleasePointerCapture();
 
-                // Opening a menu/inventory should begin with a centered GUI cursor.
-                // Here the game is not grabbing input, so sending the absolute center
-                // position is safe and keeps the visible menu cursor predictable.
+                // A normal Android app cannot warp the OS hardware pointer. If the
+                // player was using a real mouse, keep pointer capture across the
+                // gameplay -> GUI transition and draw DroidBridge's own cursor instead.
+                // That gives Minecraft, hover text, clicks and the visible pointer one
+                // authoritative centered position on both GLFW (26.2) and SDL3 (26.3+).
+                if (shouldUseMenuPointerCapture()) {
+                    safeRequestPointerCapture();
+                } else {
+                    safeReleasePointerCapture();
+                }
+
                 recenterMouse(true);
+                refreshHardwareMenuSoftwareCursorState();
+
+                if (shouldUseMenuPointerCapture() && !hasActivePointerCapture()) {
+                    postDelayed(() -> {
+                        if (!grabbed && shouldUseMenuPointerCapture()) {
+                            safeRequestPointerCapture();
+                            refreshHardwareMenuSoftwareCursorState();
+                        }
+                    }, POINTER_REGRAB_SILENT_CURSOR_SYNC_DELAY_MS);
+                }
             }
         });
     }
@@ -3144,17 +3578,52 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
     @Override
     protected void onAttachedToWindow() {
         super.onAttachedToWindow();
-        if (grabbed && shouldUsePointerCapture()) safeRequestPointerCapture();
+        if ((grabbed && shouldUsePointerCapture())
+                || (!grabbed && shouldUseMenuPointerCapture())) {
+            safeRequestPointerCapture();
+        }
     }
 
     @Override
     public void onWindowFocusChanged(boolean hasWindowFocus) {
         super.onWindowFocusChanged(hasWindowFocus);
-        if (hasWindowFocus && grabbed && shouldUsePointerCapture()) {
+        if (hasWindowFocus && ((grabbed && shouldUsePointerCapture())
+                || (!grabbed && shouldUseMenuPointerCapture()))) {
             safeRequestPointerCapture();
-        } else if (!hasWindowFocus || !shouldUsePointerCapture()) {
+        } else if (!hasWindowFocus
+                || (grabbed && !shouldUsePointerCapture())
+                || (!grabbed && !shouldUseMenuPointerCapture())) {
             safeReleasePointerCapture();
         }
+    }
+
+    @Override
+    public void onPointerCaptureChange(boolean hasCapture) {
+        super.onPointerCaptureChange(hasCapture);
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+
+        // requestPointerCapture()/releasePointerCapture() are asynchronous. On
+        // several OEM Android builds the capture transition itself can restore
+        // an old hardware-pointer location after onGrabState() already centered
+        // Minecraft's cursor. Re-assert the correct launcher cursor only after
+        // Android confirms the capture state change.
+        post(() -> {
+            boolean currentlyGrabbed = grabbed || CallbackBridge.isGrabbing();
+            if (hasCapture) {
+                if (currentlyGrabbed) {
+                    sHardwareMenuSoftwareCursorActive = false;
+                    recenterMouse(false);
+                } else if (hardwarePointerInputMode) {
+                    sHardwareMenuSoftwareCursorActive = true;
+                    recenterMouse(true);
+                }
+            } else {
+                sHardwareMenuSoftwareCursorActive = false;
+                if (!currentlyGrabbed && shouldUseMenuPointerCapture()) {
+                    safeRequestPointerCapture();
+                }
+            }
+        });
     }
 
     private void markTouchInputMode() {
@@ -3162,37 +3631,63 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         // in a stale relative-input state on some devices. Reset the hardware-pointer
         // baseline and release capture so the next real mouse movement starts a fresh
         // mouse session instead of warping to 0,0/top-left.
+        hardwarePointerInputMode = false;
+        sHardwareMenuSoftwareCursorActive = false;
         resetHardwarePointerTracking(true);
         releaseAllHardwareMouseButtons();
         safeReleasePointerCapture();
     }
 
     private void markHardwarePointerInputMode(@Nullable MotionEvent event) {
+        hardwarePointerInputMode = true;
         lastHardwarePointerEventNanos = System.nanoTime();
         if (event != null) {
             lastHardwarePointerDeviceId = event.getDeviceId();
         }
-        if (grabbed) {
+        if ((grabbed && shouldUsePointerCapture()) || shouldUseMenuPointerCapture()) {
             safeRequestPointerCapture();
+        } else if (shouldUseAndroidVirtualPhysicalMouse()) {
+            // Compatibility mode deliberately leaves Android's OS pointer ungrabbed so
+            // it can click DroidBridge views/touch controls as well as the game surface.
+            safeReleasePointerCapture();
         }
+        refreshHardwareMenuSoftwareCursorState();
     }
 
-    private void noteHardwareSecondaryButtonMotionEvent(@NonNull MotionEvent event) {
+    private void noteHardwareMouseButtonMotionEvent(@NonNull MotionEvent event) {
         int action = event.getActionMasked();
-        boolean secondary = event.getActionButton() == MotionEvent.BUTTON_SECONDARY
-                || (event.getButtonState() & MotionEvent.BUTTON_SECONDARY) != 0;
-
-        if (!secondary
-                && (action == MotionEvent.ACTION_UP
+        int actionButton = event.getActionButton();
+        int buttonState = event.getButtonState();
+        boolean releaseLike = action == MotionEvent.ACTION_UP
                 || action == MotionEvent.ACTION_BUTTON_RELEASE
-                || action == MotionEvent.ACTION_CANCEL)) {
-            secondary = hardwareMouseButtonsDown.contains(
-                    LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT);
+                || action == MotionEvent.ACTION_CANCEL;
+
+        boolean secondary = actionButton == MotionEvent.BUTTON_SECONDARY
+                || (buttonState & MotionEvent.BUTTON_SECONDARY) != 0;
+        boolean back = actionButton == MotionEvent.BUTTON_BACK
+                || (buttonState & MotionEvent.BUTTON_BACK) != 0;
+        boolean forward = actionButton == MotionEvent.BUTTON_FORWARD
+                || (buttonState & MotionEvent.BUTTON_FORWARD) != 0;
+
+        if (releaseLike) {
+            if (!secondary) {
+                secondary = hardwareMouseButtonsDown.contains(
+                        LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT);
+            }
+            if (!back) {
+                back = hardwareMouseButtonsDown.contains(
+                        LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_BACK);
+            }
+            if (!forward) {
+                forward = hardwareMouseButtonsDown.contains(
+                        LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_FORWARD);
+            }
         }
 
-        if (secondary) {
-            lastHardwareSecondaryMotionEventNanos = System.nanoTime();
-        }
+        long now = System.nanoTime();
+        if (secondary) lastHardwareSecondaryMotionEventNanos = now;
+        if (back) lastHardwareBackButtonMotionEventNanos = now;
+        if (forward) lastHardwareForwardButtonMotionEventNanos = now;
     }
 
     private boolean hasRecentlySeenHardwarePointer() {
@@ -3200,8 +3695,90 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         return lastSeen > 0L && System.nanoTime() - lastSeen < HARDWARE_POINTER_KEEPALIVE_NANOS;
     }
 
+    private boolean shouldUseAndroidVirtualPhysicalMouse() {
+        return LauncherPreferences.isAndroidVirtualPhysicalMouse(getContext());
+    }
+
     private boolean shouldUsePointerCapture() {
+        // Both physical-mouse modes need Android relative pointer capture while
+        // Minecraft is grabbed. Minecraft GUIs also keep capture so their centered
+        // cursor stays authoritative. Android Virtual Mouse releases capture only for
+        // DroidBridge-owned Android UI. Disabling capture during gameplay makes the
+        // mouse hit the screen edge and breaks continuous camera movement/recentering.
         return hasRecentlySeenHardwarePointer() || hasRealExternalPointerDevice();
+    }
+
+    private boolean shouldUseMenuPointerCapture() {
+        // Minecraft GUI/menu mode must keep the same captured/software-cursor path for
+        // both physical mouse modes. Android cannot warp the real OS pointer to the
+        // center requested by Minecraft, so releasing capture here creates a split:
+        // Minecraft hovers the centered item while Android draws its pointer wherever
+        // it last existed. Android Virtual Mouse releases the OS pointer only when a
+        // DroidBridge-owned Android UI explicitly enables UI interaction mode below.
+        return Build.VERSION.SDK_INT >= Build.VERSION_CODES.O
+                && hardwarePointerInputMode
+                && !androidVirtualMouseUiInteractionMode
+                && shouldUsePointerCapture();
+    }
+
+    /**
+     * Lets a DroidBridge-owned Android overlay temporarily use the real Android OS
+     * pointer while Android Virtual Mouse is selected. Minecraft's own GUI is not an
+     * Android overlay, so it keeps pointer capture and the centered software cursor.
+     */
+    public void setAndroidVirtualMouseUiInteractionMode(boolean enabled) {
+        if (androidVirtualMouseUiInteractionMode == enabled) return;
+        androidVirtualMouseUiInteractionMode = enabled;
+
+        post(() -> {
+            if (!shouldUseAndroidVirtualPhysicalMouse()) {
+                androidVirtualMouseUiInteractionMode = false;
+                refreshHardwareMenuSoftwareCursorState();
+                return;
+            }
+
+            if (enabled) {
+                // DroidBridge Android UI owns the pointer: expose the real OS cursor.
+                sHardwareMenuSoftwareCursorActive = false;
+                safeReleasePointerCapture();
+                return;
+            }
+
+            // Returning from DroidBridge Android UI to Minecraft. If Minecraft is in
+            // a GUI, restore the centered captured/software cursor. If gameplay is
+            // grabbed, restore normal relative pointer capture with a silent baseline.
+            if (grabbed || CallbackBridge.isGrabbing()) {
+                recenterMouse(false);
+                if (shouldUsePointerCapture()) safeRequestPointerCapture();
+            } else {
+                recenterMouse(true);
+                if (shouldUseMenuPointerCapture()) safeRequestPointerCapture();
+            }
+            refreshHardwareMenuSoftwareCursorState();
+        });
+    }
+
+    private boolean isHardwareMenuSoftwareCursorRouting() {
+        return !grabbed && shouldUseMenuPointerCapture();
+    }
+
+    private boolean hasActivePointerCapture() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return false;
+        try {
+            return hasPointerCapture();
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private void refreshHardwareMenuSoftwareCursorState() {
+        sHardwareMenuSoftwareCursorActive = !grabbed
+                && hardwarePointerInputMode
+                && hasActivePointerCapture();
+    }
+
+    public static boolean isHardwareMenuSoftwareCursorActive() {
+        return sHardwareMenuSoftwareCursorActive;
     }
 
     private void safeRequestPointerCapture() {
@@ -3214,6 +3791,7 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
     }
 
     private void safeReleasePointerCapture() {
+        sHardwareMenuSoftwareCursorActive = false;
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
         try {
             releasePointerCapture();
@@ -3240,6 +3818,7 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
     protected void onDetachedFromWindow() {
         cancelTouchLongPressAttack(true);
         releaseActiveHardwareInput();
+        sHardwareMenuSoftwareCursorActive = false;
         safeReleasePointerCapture();
 
         boolean preserveRetainedSdlTexture = sdlWindowBackendRequested
@@ -3440,6 +4019,103 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         this.renderingStartedListener = listener;
     }
 
+    /** Callback used by the recording frame bridge. */
+    public interface RecordingFrameCallback {
+        void onFrameReady(boolean success);
+    }
+
+    /**
+     * True when the actual Minecraft render layer can be copied without including launcher
+     * overlays. TextureView uses its own composited texture; SurfaceView uses PixelCopy.
+     */
+    public boolean isRecordingFrameCaptureReady() {
+        if (!isAttachedToWindow()) return false;
+        if (textureView != null) {
+            return textureView.isAttachedToWindow()
+                    && textureView.isAvailable()
+                    && textureView.getWidth() > 1
+                    && textureView.getHeight() > 1;
+        }
+        if (nativeSurfaceView != null) {
+            SurfaceHolder holder = nativeSurfaceView.getHolder();
+            Surface surface = holder == null ? null : holder.getSurface();
+            return nativeSurfaceView.isAttachedToWindow()
+                    && nativeSurfaceView.getWidth() > 1
+                    && nativeSurfaceView.getHeight() > 1
+                    && surface != null
+                    && surface.isValid();
+        }
+        return false;
+    }
+
+    public int getRecordingFrameWidth() {
+        View view = renderView;
+        int width = view == null ? 0 : view.getWidth();
+        return Math.max(0, width);
+    }
+
+    public int getRecordingFrameHeight() {
+        View view = renderView;
+        int height = view == null ? 0 : view.getHeight();
+        return Math.max(0, height);
+    }
+
+    /**
+     * Copies only Minecraft's render layer into {@code bitmap}. Touch controls, floating launcher
+     * buttons, dialogs and other GameActivity overlays are deliberately outside this source.
+     */
+    public boolean requestRecordingFrame(
+            @NonNull Bitmap bitmap,
+            @NonNull Handler callbackHandler,
+            @NonNull RecordingFrameCallback callback
+    ) {
+        TextureView liveTexture = textureView;
+        if (liveTexture != null && liveTexture.isAvailable()) {
+            if (bitmap.getWidth() != liveTexture.getWidth()
+                    || bitmap.getHeight() != liveTexture.getHeight()) {
+                callback.onFrameReady(false);
+                return false;
+            }
+            try {
+                Bitmap result = liveTexture.getBitmap(bitmap);
+                callback.onFrameReady(result != null);
+                return result != null;
+            } catch (Throwable throwable) {
+                Log.w("MinecraftGLSurface", "TextureView recording frame copy failed", throwable);
+                callback.onFrameReady(false);
+                return false;
+            }
+        }
+
+        SurfaceView liveSurface = nativeSurfaceView;
+        if (liveSurface != null
+                && liveSurface.getHolder() != null
+                && liveSurface.getHolder().getSurface() != null
+                && liveSurface.getHolder().getSurface().isValid()) {
+            if (bitmap.getWidth() != liveSurface.getWidth()
+                    || bitmap.getHeight() != liveSurface.getHeight()) {
+                callback.onFrameReady(false);
+                return false;
+            }
+            try {
+                PixelCopy.request(
+                        liveSurface,
+                        bitmap,
+                        result -> callback.onFrameReady(result == PixelCopy.SUCCESS),
+                        callbackHandler
+                );
+                return true;
+            } catch (Throwable throwable) {
+                Log.w("MinecraftGLSurface", "SurfaceView recording PixelCopy failed", throwable);
+                callback.onFrameReady(false);
+                return false;
+            }
+        }
+
+        callback.onFrameReady(false);
+        return false;
+    }
+
     /**
      * Receives OEM/special key events before the focused Minecraft surface converts
      * them into ordinary game input. AYN Odin rear buttons also use this path so
@@ -3447,6 +4123,27 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
      */
     public interface SpecialKeyEventListener {
         boolean onSpecialKeyEvent(@NonNull KeyEvent event);
+    }
+
+    /**
+     * Android Virtual Mouse keeps relative capture in Minecraft menus so the visible
+     * centered cursor and Minecraft hover position stay identical. This callback lets
+     * that logical cursor still activate DroidBridge-owned Android controls (touch
+     * buttons / floating settings cog) without sending the same click into Minecraft.
+     */
+    public interface AndroidVirtualMouseUiRouter {
+        boolean onAndroidVirtualMouseUiEvent(
+                int action,
+                float screenX,
+                float screenY,
+                int actionButton,
+                int buttonState,
+                long eventTime
+        );
+    }
+
+    public void setAndroidVirtualMouseUiRouter(@Nullable AndroidVirtualMouseUiRouter router) {
+        this.androidVirtualMouseUiRouter = router;
     }
 
     public void setSpecialKeyEventListener(@Nullable SpecialKeyEventListener listener) {
@@ -3475,6 +4172,12 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         KeyEvent normalizedEvent = normalizeKeyboardEscapeEvent(event);
         if (normalizedEvent == null) {
             return false;
+        }
+        // Keep launcher-reserved keyboard shortcuts ahead of direct GLFW injection too.
+        // TouchControlsOverlay and OEM Back/Escape normalization can enter through this
+        // method without traversing the Activity's normal dispatchKeyEvent path.
+        if (dispatchSpecialKeyEvent(normalizedEvent)) {
+            return true;
         }
         MinecraftTextInputKeyboardTrigger.onPotentialControllerConfirm(
                 this, normalizedEvent, grabbed);
@@ -3512,10 +4215,67 @@ public class MinecraftGLSurface extends FrameLayout implements GrabListener {
         }
 
         requestFocusIfNeeded();
+        int glfwButton = isPointerSideBackScanCode(event)
+                ? LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_BACK
+                : LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT;
+        if (glfwButton == LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_BACK
+                && lastHardwareBackButtonMotionEventNanos > 0L
+                && now - lastHardwareBackButtonMotionEventNanos < SECONDARY_MOUSE_KEY_DEDUP_NANOS) {
+            return true;
+        }
         return sendHardwareMouseButtonTracked(
-                LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_RIGHT,
+                glfwButton,
                 action == KeyEvent.ACTION_DOWN
         );
+    }
+
+    /**
+     * Some Android mouse stacks expose the forward thumb button as KEYCODE_FORWARD
+     * instead of MotionEvent.BUTTON_FORWARD. Route it as GLFW mouse button 5.
+     */
+    public boolean handlePointerForwardKeyFromActivity(@Nullable KeyEvent event) {
+        if (!isPointerForwardKeyEvent(event) || event == null) return false;
+
+        int action = event.getAction();
+        if (action != KeyEvent.ACTION_DOWN && action != KeyEvent.ACTION_UP) return true;
+        if (action == KeyEvent.ACTION_DOWN && event.getRepeatCount() > 0) return true;
+
+        long now = System.nanoTime();
+        lastHardwarePointerEventNanos = now;
+        lastHardwarePointerDeviceId = event.getDeviceId();
+        if (lastHardwareForwardButtonMotionEventNanos > 0L
+                && now - lastHardwareForwardButtonMotionEventNanos < SECONDARY_MOUSE_KEY_DEDUP_NANOS) {
+            return true;
+        }
+
+        requestFocusIfNeeded();
+        return sendHardwareMouseButtonTracked(
+                LwjglGlfwKeycode.GLFW_MOUSE_BUTTON_FORWARD,
+                action == KeyEvent.ACTION_DOWN
+        );
+    }
+
+    public boolean isPointerForwardKeyEvent(@Nullable KeyEvent event) {
+        if (event == null || event.getKeyCode() != KeyEvent.KEYCODE_FORWARD) return false;
+        if ((event.getFlags() & KeyEvent.FLAG_SOFT_KEYBOARD) != 0) return false;
+        if (isGameControllerDevice(event.getDevice())) return false;
+
+        int source = event.getSource();
+        if (hasPointerSource(source)) return true;
+
+        InputDevice device = event.getDevice();
+        return deviceSupportsPointer(device)
+                || (event.getDeviceId() >= 0
+                && event.getDeviceId() == lastHardwarePointerDeviceId
+                && hasRecentlySeenHardwarePointer());
+    }
+
+    /** True for Linux mouse side/back scan codes, not Android navigation Back. */
+    private static boolean isPointerSideBackScanCode(@NonNull KeyEvent event) {
+        int scanCode = safeScanCode(event);
+        // Linux input-event BTN_SIDE and BTN_BACK. KEY_BACK (158) remains on
+        // DroidBridge's existing OEM right-click fallback so that fix is preserved.
+        return scanCode == 275 || scanCode == 278;
     }
 
     public boolean isPointerBackKeyEvent(@Nullable KeyEvent event) {

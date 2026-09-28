@@ -13,6 +13,7 @@
 package ca.dnamobile.droidbridgelauncher.input;
 
 import android.content.Context;
+import android.content.res.Resources;
 import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
@@ -21,6 +22,7 @@ import android.graphics.Paint;
 import android.graphics.Path;
 import android.graphics.PixelFormat;
 import android.graphics.Rect;
+import android.graphics.RectF;
 import android.graphics.drawable.Drawable;
 import android.os.SystemClock;
 import android.view.Choreographer;
@@ -35,7 +37,9 @@ import androidx.annotation.Nullable;
 import ca.dnamobile.droidbridgelauncher.controls.ControlsPreferences;
 import ca.dnamobile.droidbridgelauncher.modcompat.ControllerModCompat;
 import ca.dnamobile.droidbridgelauncher.settings.GameResolutionSettings;
+import ca.dnamobile.droidbridgelauncher.settings.LauncherPreferences;
 import ca.dnamobile.droidbridgelauncher.runtime.DroidBridgeSDL3Bootstrap;
+import ca.dnamobile.droidbridgelauncher.runtime.MinecraftGLSurface;
 
 import org.lwjgl.glfw.CallbackBridge;
 public final class GameCursorOverlay extends View {
@@ -46,11 +50,16 @@ public final class GameCursorOverlay extends View {
     private final Path cursorPath = new Path();
     private final GamepadMappingStore mappingStore;
     @Nullable private Bitmap cursorBitmap;
+    @Nullable private Drawable androidDefaultPointerDrawable;
+    private boolean androidDefaultPointerLookupAttempted;
+    private boolean useAndroidDefaultPointerVisual;
     @NonNull private String loadedCursorStyle = "";
     @Nullable private String loadedCustomCursorPath;
     private int loadedCursorSizePercent = -1;
 
     @Nullable private ViewGroup overlayParent;
+    /** The actual Minecraft child surface inside overlayParent, when available. */
+    @Nullable private View viewportTarget;
     private boolean drawableAdded;
     private boolean removed;
     private boolean cursorVisible;
@@ -68,6 +77,17 @@ public final class GameCursorOverlay extends View {
 
             Rect bounds = getBounds();
             if (bounds.width() <= 0 || bounds.height() <= 0) return;
+
+            Drawable androidPointer = useAndroidDefaultPointerVisual
+                    ? resolveAndroidDefaultPointerDrawable() : null;
+            if (androidPointer != null) {
+                canvas.save();
+                canvas.translate(bounds.left, bounds.top);
+                androidPointer.setBounds(0, 0, bounds.width(), bounds.height());
+                androidPointer.draw(canvas);
+                canvas.restore();
+                return;
+            }
 
             Bitmap bitmap = cursorBitmap;
             if (bitmap != null && !bitmap.isRecycled()) {
@@ -166,6 +186,11 @@ public final class GameCursorOverlay extends View {
         setMeasuredDimension(1, 1);
     }
 
+    public void setViewportTarget(@Nullable View target) {
+        viewportTarget = target;
+        cursorDrawable.invalidateSelf();
+    }
+
     public void removeSelf() {
         removed = true;
         cursorVisible = false;
@@ -232,7 +257,37 @@ public final class GameCursorOverlay extends View {
         canvas.drawCircle(x, y, ringRadius, paint);
     }
 
+    @Nullable
+    private Drawable resolveAndroidDefaultPointerDrawable() {
+        if (androidDefaultPointerLookupAttempted) return androidDefaultPointerDrawable;
+        androidDefaultPointerLookupAttempted = true;
+
+        // While a physical pointer is captured Android hides the real OS cursor.
+        // Use the framework's own default arrow artwork for Android Virtual Mouse
+        // instead of DroidBridge's configurable touch/controller cursor. OEMs that
+        // expose a themed framework pointer keep their device-specific appearance.
+        String[] candidates = {"pointer_arrow", "pointer_icon_arrow", "cursor_arrow"};
+        Resources resources = Resources.getSystem();
+        for (String name : candidates) {
+            try {
+                int id = resources.getIdentifier(name, "drawable", "android");
+                if (id == 0) continue;
+                Drawable drawable = getContext().getDrawable(id);
+                if (drawable != null) {
+                    androidDefaultPointerDrawable = drawable.mutate();
+                    break;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return androidDefaultPointerDrawable;
+    }
+
     private void reloadCursorBitmapIfNeeded(boolean force) {
+        // The physical-mouse software cursor is still the user's DroidBridge cursor.
+        // Do not force an arrow here: built-in styles (including crosshair/dot) and
+        // imported custom cursor images must remain authoritative regardless of
+        // whether the cursor is driven by touch, controller, or a captured mouse.
         String style = ControlsPreferences.getMouseCursorStyle(getContext());
         String customPath = ControlsPreferences.getCustomMouseCursorPath(getContext());
         int sizePercent = ControlsPreferences.getMouseCursorSizePercent(getContext());
@@ -258,7 +313,10 @@ public final class GameCursorOverlay extends View {
         attachDrawableToParent();
         reloadCursorBitmapIfNeeded(false);
 
-        if (ControllerModCompat.shouldHideLauncherCursorForControllerMod()) {
+        boolean physicalMouseSoftwareCursor = MinecraftGLSurface
+                .isHardwareMenuSoftwareCursorActive();
+        if (ControllerModCompat.shouldHideLauncherCursorForControllerMod()
+                && !physicalMouseSoftwareCursor) {
             hideCursorUntilLauncherOwnsInputAgain();
             return;
         }
@@ -275,7 +333,20 @@ public final class GameCursorOverlay extends View {
                 && !physicalPointerConnected;
         boolean showControllerMenuCursor = mappingStore.isShowCursorOverlay()
                 && menuMode;
-        boolean shouldShow = showTouchVirtualCursor || showControllerMenuCursor;
+        // Android applications cannot warp the OS hardware pointer to Minecraft's
+        // centered GUI position. When MinecraftGLSurface keeps a real mouse captured
+        // in menu mode, this overlay becomes the authoritative visible hardware cursor
+        // too. It follows the same CallbackBridge position Minecraft uses for hover
+        // and clicks, eliminating the old "center item highlighted, real cursor left"
+        // split on both GLFW and SDL3 versions.
+        boolean showPhysicalMouseCursor = menuMode
+                && physicalMouseSoftwareCursor;
+        useAndroidDefaultPointerVisual = showPhysicalMouseCursor
+                && LauncherPreferences.isAndroidVirtualPhysicalMouse(getContext())
+                && resolveAndroidDefaultPointerDrawable() != null;
+        boolean shouldShow = showTouchVirtualCursor
+                || showControllerMenuCursor
+                || showPhysicalMouseCursor;
         boolean sdlInputReady = DroidBridgeSDL3Bootstrap.isInputReady();
         int cursorCoordinateWidth = Math.max(1, sdlInputReady
                 ? DroidBridgeSDL3Bootstrap.getSdlCursorCoordinateWidth()
@@ -321,14 +392,28 @@ public final class GameCursorOverlay extends View {
 
         int rootWidth = Math.max(1, overlayParent.getWidth());
         int rootHeight = Math.max(1, overlayParent.getHeight());
+        RectF viewportBounds = resolveViewportBounds(rootWidth, rootHeight);
+        int viewportWidth = Math.max(1, Math.round(viewportBounds.width()));
+        int viewportHeight = Math.max(1, Math.round(viewportBounds.height()));
         int cursorExtent = Math.max(1, Math.round(
                 dp(CURSOR_CANVAS_DP)
                         * ControlsPreferences.getMouseCursorSizePercent(getContext())
                         / 100f
         ));
         Bitmap bitmap = cursorBitmap;
-        int cursorWidth = MouseCursorBitmapUtils.getDrawWidth(bitmap, cursorExtent);
-        int cursorHeight = MouseCursorBitmapUtils.getDrawHeight(bitmap, cursorExtent);
+        Drawable androidPointer = useAndroidDefaultPointerVisual
+                ? resolveAndroidDefaultPointerDrawable() : null;
+        int cursorWidth;
+        int cursorHeight;
+        if (androidPointer != null) {
+            int intrinsicWidth = androidPointer.getIntrinsicWidth();
+            int intrinsicHeight = androidPointer.getIntrinsicHeight();
+            cursorWidth = intrinsicWidth > 0 ? intrinsicWidth : Math.max(1, Math.round(dp(24f)));
+            cursorHeight = intrinsicHeight > 0 ? intrinsicHeight : Math.max(1, Math.round(dp(24f)));
+        } else {
+            cursorWidth = MouseCursorBitmapUtils.getDrawWidth(bitmap, cursorExtent);
+            cursorHeight = MouseCursorBitmapUtils.getDrawHeight(bitmap, cursorExtent);
+        }
 
         float bridgeWidth = Math.max(1f, CallbackBridge.windowWidth > 0
                 ? CallbackBridge.windowWidth : CallbackBridge.physicalWidth);
@@ -342,28 +427,27 @@ public final class GameCursorOverlay extends View {
         boolean sdlWindowActive = DroidBridgeSDL3Bootstrap.isRequested();
         if (sdlWindowActive) {
             /*
-             * Snapshot 4 SDL on Android uses physical window pixels. The Vulkan
-             * image is composed into the full game root, even when the child
-             * TextureView has a render-resolution buffer or a temporary transform.
-             * Mapping the launcher cursor against that child View rectangle was the
-             * remaining source of the exact, repeatable visual/hover split. Use one
-             * authoritative pair: full game root for drawing and Minecraft's
-             * configured SDL window-coordinate size for input. The TextureView pixel
-             * buffer can differ when resolution scaling is enabled.
+             * SDL coordinates are still mapped against the physical Minecraft surface,
+             * not necessarily the full Activity root. Portrait (Centered Game View)
+             * deliberately makes that surface a smaller landscape rectangle inside a
+             * portrait window, so drawing against the root puts the software cursor in
+             * the black bars even while Minecraft highlights an item in the center.
+             * A normal fullscreen surface resolves to the same full-root bounds as before.
              */
-            boundsLeft = 0f;
-            boundsTop = 0f;
-            boundsWidth = rootWidth;
-            boundsHeight = rootHeight;
+            boundsLeft = viewportBounds.left;
+            boundsTop = viewportBounds.top;
+            boundsWidth = viewportBounds.width();
+            boundsHeight = viewportBounds.height();
             bridgeWidth = Math.max(1f,
                     DroidBridgeSDL3Bootstrap.getSdlCursorCoordinateWidth());
             bridgeHeight = Math.max(1f,
                     DroidBridgeSDL3Bootstrap.getSdlCursorCoordinateHeight());
         } else {
             GameResolutionSettings.DisplayBounds displayBounds =
-                    GameResolutionSettings.resolveDisplayBounds(getContext(), rootWidth, rootHeight);
-            boundsLeft = displayBounds.left;
-            boundsTop = displayBounds.top;
+                    GameResolutionSettings.resolveDisplayBounds(
+                            getContext(), viewportWidth, viewportHeight);
+            boundsLeft = viewportBounds.left + displayBounds.left;
+            boundsTop = viewportBounds.top + displayBounds.top;
             boundsWidth = displayBounds.width;
             boundsHeight = displayBounds.height;
         }
@@ -385,12 +469,15 @@ public final class GameCursorOverlay extends View {
         drawX = clamp(drawX, boundsLeft, boundsLeft + Math.max(0f, boundsWidth - 1f));
         drawY = clamp(drawY, boundsTop, boundsTop + Math.max(0f, boundsHeight - 1f));
 
-        if (sdlWindowActive) {
+        if (sdlWindowActive && InputEventDiagnosticLogger.isEnabled()) {
             long now = SystemClock.uptimeMillis();
             if (now - lastSdlGeometryLogUptimeMs >= 1000L) {
                 lastSdlGeometryLogUptimeMs = now;
                 ca.dnamobile.droidbridgelauncher.logs.LauncherLogManager.append(
                         "DroidBridgeSDL3Cursor: root=" + rootWidth + "x" + rootHeight
+                                + " viewport=" + Math.round(viewportBounds.left) + ","
+                                + Math.round(viewportBounds.top) + "+"
+                                + viewportWidth + "x" + viewportHeight
                                 + " cursorSpace=" + bridgeWidth + "x" + bridgeHeight
                                 + " render=" + DroidBridgeSDL3Bootstrap.getSdlLogicalWidth()
                                 + "x" + DroidBridgeSDL3Bootstrap.getSdlLogicalHeight()
@@ -399,7 +486,8 @@ public final class GameCursorOverlay extends View {
             }
         }
 
-        boolean centeredHotspot = MouseCursorBitmapUtils.usesCenteredHotspot(loadedCursorStyle);
+        boolean centeredHotspot = !useAndroidDefaultPointerVisual
+                && MouseCursorBitmapUtils.usesCenteredHotspot(loadedCursorStyle);
         int left = centeredHotspot
                 ? Math.round(drawX - (cursorWidth / 2f))
                 : Math.round(drawX);
@@ -408,6 +496,43 @@ public final class GameCursorOverlay extends View {
                 : Math.round(drawY);
         cursorDrawable.setBounds(left, top, left + cursorWidth, top + cursorHeight);
         cursorDrawable.invalidateSelf();
+    }
+
+    @NonNull
+    private RectF resolveViewportBounds(int rootWidth, int rootHeight) {
+        RectF full = new RectF(0f, 0f, Math.max(1, rootWidth), Math.max(1, rootHeight));
+        ViewGroup parent = overlayParent;
+        View target = viewportTarget;
+        if (parent == null || target == null || target.getWidth() <= 1 || target.getHeight() <= 1) {
+            return full;
+        }
+
+        try {
+            if (parent.getDisplay() != null && target.getDisplay() != null
+                    && parent.getDisplay().getDisplayId() != target.getDisplay().getDisplayId()) {
+                return full;
+            }
+
+            int[] parentLocation = new int[2];
+            int[] targetLocation = new int[2];
+            parent.getLocationOnScreen(parentLocation);
+            target.getLocationOnScreen(targetLocation);
+
+            float left = targetLocation[0] - parentLocation[0];
+            float top = targetLocation[1] - parentLocation[1];
+            float right = left + target.getWidth();
+            float bottom = top + target.getHeight();
+
+            left = clamp(left, 0f, full.right);
+            top = clamp(top, 0f, full.bottom);
+            right = clamp(right, left, full.right);
+            bottom = clamp(bottom, top, full.bottom);
+            if (right - left > 1f && bottom - top > 1f) {
+                return new RectF(left, top, right, bottom);
+            }
+        } catch (Throwable ignored) {
+        }
+        return full;
     }
 
     private void hideCursorUntilLauncherOwnsInputAgain() {

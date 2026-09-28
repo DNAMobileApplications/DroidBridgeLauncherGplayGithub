@@ -13,7 +13,7 @@
 package ca.dnamobile.droidbridgelauncher.controls;
 
 import android.app.Activity;
-import android.app.AlertDialog;
+import androidx.appcompat.app.AlertDialog;
 import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.content.pm.PackageManager;
@@ -32,6 +32,7 @@ import java.util.List;
 import java.util.Locale;
 
 import ca.dnamobile.droidbridgelauncher.BuildConfig;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 public final class ControlsMain {
     private ControlsMain() {
     }
@@ -68,10 +69,48 @@ public final class ControlsMain {
                 }
             }
 
-            return false;
+            // Google Play App Signing signs the APK delivered to users with the Play app
+            // signing certificate, which is intentionally different from the developer's
+            // upload certificate in many projects. A release build that accepts only the
+            // upload certificate therefore blocks the genuine Play Store build when the
+            // launcher activity opens. Trust a signature-mismatched build only when Android
+            // reports Google Play itself as the installer; sideloaded builds still require
+            // one of the configured certificate hashes above.
+            return isInstalledFromGooglePlay(context);
+        } catch (Throwable ignored) {
+            // If certificate inspection itself fails, retain the same Play-distribution
+            // escape hatch instead of killing a legitimate Play-installed release.
+            return isInstalledFromGooglePlay(context);
+        }
+    }
+
+    private static boolean isInstalledFromGooglePlay(@NonNull Context context) {
+        try {
+            PackageManager packageManager = context.getPackageManager();
+            String packageName = context.getPackageName();
+
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                android.content.pm.InstallSourceInfo source =
+                        packageManager.getInstallSourceInfo(packageName);
+                if (source != null) {
+                    if (isGooglePlayPackage(source.getInstallingPackageName())
+                            || isGooglePlayPackage(source.getInitiatingPackageName())
+                            || isGooglePlayPackage(source.getOriginatingPackageName())) {
+                        return true;
+                    }
+                }
+            }
+
+            @SuppressWarnings("deprecation")
+            String installer = packageManager.getInstallerPackageName(packageName);
+            return isGooglePlayPackage(installer);
         } catch (Throwable ignored) {
             return false;
         }
+    }
+
+    private static boolean isGooglePlayPackage(@Nullable String packageName) {
+        return "com.android.vending".equals(packageName);
     }
     public static boolean blockIfInvalidSignature(@NonNull Activity activity) {
         if (isExpectedSignature(activity)) {
@@ -116,7 +155,7 @@ public final class ControlsMain {
             }
 
             try {
-                new AlertDialog.Builder(activity)
+                new MaterialAlertDialogBuilder(activity)
                         .setTitle(BLOCK_TITLE)
                         .setMessage(BLOCK_MESSAGE)
                         .setCancelable(false)

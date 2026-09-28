@@ -58,6 +58,7 @@ import ca.dnamobile.droidbridgelauncher.feature.log.Logging;
 import ca.dnamobile.droidbridgelauncher.instance.LauncherInstance;
 import ca.dnamobile.droidbridgelauncher.modmanager.CurseForgeApiClient;
 import ca.dnamobile.droidbridgelauncher.modmanager.CurseForgeInstallManager;
+import ca.dnamobile.droidbridgelauncher.modmanager.DatapackWorldTargetPicker;
 import ca.dnamobile.droidbridgelauncher.modmanager.ModManagerContentType;
 import ca.dnamobile.droidbridgelauncher.modmanager.ModManagerSource;
 import ca.dnamobile.droidbridgelauncher.modmanager.ModManagerVersionResolver;
@@ -73,6 +74,7 @@ import ca.dnamobile.droidbridgelauncher.ui.version.CleanroomMigrationDialog;
 import ca.dnamobile.droidbridgelauncher.utils.AppOrientationHelper;
 import ca.dnamobile.droidbridgelauncher.utils.FullscreenUtils;
 import ca.dnamobile.droidbridgelauncher.utils.path.PathManager;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 public final class ContentProjectDetailsActivity extends AppCompatActivity {
     private static final int TAB_DESCRIPTION = 0;
@@ -457,7 +459,7 @@ public final class ContentProjectDetailsActivity extends AppCompatActivity {
         listParams.topMargin = dp(4);
         layout.addView(versionList, listParams);
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(layout)
                 .setNegativeButton(android.R.string.cancel, null)
                 .create();
@@ -1133,7 +1135,7 @@ public final class ContentProjectDetailsActivity extends AppCompatActivity {
         container.addView(preview, params);
         NetworkImageLoader.load(preview, url, getFallbackIcon());
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setTitle("Screenshot " + (position + 1) + " of " + total)
                 .setView(container)
                 .setNegativeButton("Close", null)
@@ -1209,9 +1211,24 @@ public final class ContentProjectDetailsActivity extends AppCompatActivity {
         }
 
         File gameDirectory = new File(gameDirectoryPath);
+        if (contentType == ModManagerContentType.DATAPACKS) {
+            DatapackWorldTargetPicker.choose(this, gameDirectory,
+                    targetDirectory -> installNormalVersionIntoTarget(project, version, targetDirectory));
+            return;
+        }
+        installNormalVersionIntoTarget(project, version, null);
+    }
+
+    private void installNormalVersionIntoTarget(
+            @NonNull ModrinthProject project,
+            @NonNull ModrinthVersion version,
+            @Nullable File targetDirectoryOverride
+    ) {
+        File gameDirectory = new File(gameDirectoryPath);
         Logging.i("ContentInstall", "Starting " + resolveSource(project).getDisplayName() + " " + contentType.name().toLowerCase(Locale.US)
                 + " install: " + project.title + " version=" + version.versionNumber
-                + " mc=" + gameVersionId + " loader=" + loader + " gameDir=" + gameDirectory.getAbsolutePath());
+                + " mc=" + gameVersionId + " loader=" + loader + " gameDir=" + gameDirectory.getAbsolutePath()
+                + (targetDirectoryOverride == null ? "" : " target=" + targetDirectoryOverride.getAbsolutePath()));
         textStatus.setText(getString(R.string.content_browser_install_started, project.title));
         ModrinthInstallManager.Listener listener = new ModrinthInstallManager.Listener() {
             @Override
@@ -1251,6 +1268,7 @@ public final class ContentProjectDetailsActivity extends AppCompatActivity {
                         contentType,
                         project,
                         version,
+                        targetDirectoryOverride,
                         listener
                 );
             } else {
@@ -1261,6 +1279,7 @@ public final class ContentProjectDetailsActivity extends AppCompatActivity {
                         contentType,
                         project,
                         version,
+                        targetDirectoryOverride,
                         listener
                 );
             }
@@ -1395,6 +1414,8 @@ public final class ContentProjectDetailsActivity extends AppCompatActivity {
                 return R.drawable.ic_content_mod_24;
             case RESOURCEPACKS:
                 return R.drawable.ic_content_resourcepack_24;
+            case DATAPACKS:
+                return R.drawable.ic_content_datapack_24;
             case SHADERPACKS:
                 return R.drawable.ic_content_shaderpack_24;
             case MODS:
@@ -1416,7 +1437,9 @@ public final class ContentProjectDetailsActivity extends AppCompatActivity {
             case MODPACKS:
                 return "Modpack";
             case RESOURCEPACKS:
-                return "Resource Pack";
+                return ModManagerContentType.usesLegacyTexturePacks(gameVersionId) ? "Texture Pack" : "Resource Pack";
+            case DATAPACKS:
+                return "Data Pack";
             case SHADERPACKS:
                 return "Shader Pack";
             case MODS:

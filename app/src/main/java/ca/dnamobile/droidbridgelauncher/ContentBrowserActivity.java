@@ -74,10 +74,12 @@ import ca.dnamobile.droidbridgelauncher.modmanager.ModManagerVersionResolver;
 import ca.dnamobile.droidbridgelauncher.modmanager.CurseForgeApiClient;
 import ca.dnamobile.droidbridgelauncher.modmanager.CurseForgeInstallManager;
 import ca.dnamobile.droidbridgelauncher.modmanager.CurseForgeApiKeyProvider;
+import ca.dnamobile.droidbridgelauncher.modmanager.DatapackWorldTargetPicker;
 import ca.dnamobile.droidbridgelauncher.modmanager.ModrinthApiClient;
 import ca.dnamobile.droidbridgelauncher.modmanager.ModrinthInstallManager;
 import ca.dnamobile.droidbridgelauncher.modmanager.ModpackInstallManager;
 import ca.dnamobile.droidbridgelauncher.modmanager.ModpackSearchApiClient;
+import ca.dnamobile.droidbridgelauncher.modmanager.ModpackFavouritesStore;
 import ca.dnamobile.droidbridgelauncher.modmanager.ModrinthProject;
 import ca.dnamobile.droidbridgelauncher.modmanager.NetworkImageLoader;
 
@@ -89,6 +91,7 @@ import ca.dnamobile.droidbridgelauncher.ui.version.CleanroomMigrationDialog;
 import ca.dnamobile.droidbridgelauncher.utils.AppOrientationHelper;
 import ca.dnamobile.droidbridgelauncher.utils.FullscreenUtils;
 import ca.dnamobile.droidbridgelauncher.utils.path.PathManager;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 public final class ContentBrowserActivity extends AppCompatActivity {
     public static final String EXTRA_PROJECT_ID = "ca.dnamobile.droidbridgelauncher.extra.PROJECT_ID";
@@ -116,6 +119,8 @@ public final class ContentBrowserActivity extends AppCompatActivity {
     private TabLayout tabContentTypes;
     private View layoutContentTypeTabsContainer;
     private View layoutContentFilterChips;
+    private View layoutModpackBrowseModeTabs;
+    private MaterialButtonToggleGroup modpackBrowseModeToggleGroup;
     private RecyclerView recyclerContentProjects;
     private MaterialButton buttonSortContent;
     @Nullable
@@ -144,6 +149,7 @@ public final class ContentBrowserActivity extends AppCompatActivity {
     private ModManagerContentType selectedType = ModManagerContentType.MODS;
     private ContentSort selectedSort = ContentSort.DOWNLOADS;
     private String selectedModpackMinecraftVersionFilter = "";
+    private boolean showModpackFavourites = false;
     @Nullable
     private ArrayList<String> cachedReleaseMinecraftVersions;
     @Nullable
@@ -186,6 +192,7 @@ public final class ContentBrowserActivity extends AppCompatActivity {
         setupHeader();
         setupSourceToggle();
         setupTabs();
+        setupModpackBrowseModeToggle();
         setupSearch();
         setupSortDropdown();
         setupRecycler();
@@ -266,6 +273,8 @@ public final class ContentBrowserActivity extends AppCompatActivity {
         tabContentTypes = findViewById(R.id.tabContentTypes);
         layoutContentTypeTabsContainer = findViewById(R.id.layoutContentTypeTabsContainer);
         layoutContentFilterChips = findViewById(R.id.layoutContentFilterChips);
+        layoutModpackBrowseModeTabs = findViewById(R.id.layoutModpackBrowseModeTabs);
+        modpackBrowseModeToggleGroup = findViewById(R.id.toggleModpackBrowseMode);
         recyclerContentProjects = findViewById(R.id.recyclerContentProjects);
         buttonSortContent = findViewById(R.id.buttonSortContent);
         buttonPagePreviousTop = findViewById(R.id.buttonPagePreviousTop);
@@ -385,7 +394,7 @@ public final class ContentBrowserActivity extends AppCompatActivity {
         listParams.topMargin = dp(10);
         root.addView(versionList, listParams);
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
                 .setView(root)
                 .setNegativeButton(android.R.string.cancel, null)
                 .create();
@@ -445,6 +454,7 @@ public final class ContentBrowserActivity extends AppCompatActivity {
             // Do not use ModManagerContentType.values() here because that re-adds Modpacks.
             visibleTabTypes.add(ModManagerContentType.MODS);
             visibleTabTypes.add(ModManagerContentType.RESOURCEPACKS);
+            visibleTabTypes.add(ModManagerContentType.DATAPACKS);
             visibleTabTypes.add(ModManagerContentType.SHADERPACKS);
 
             if (selectedType == ModManagerContentType.MODPACKS || !visibleTabTypes.contains(selectedType)) {
@@ -491,8 +501,33 @@ public final class ContentBrowserActivity extends AppCompatActivity {
         });
     }
 
+    private void setupModpackBrowseModeToggle() {
+        boolean visible = isBrowseModpacksOnlyMode();
+        if (layoutModpackBrowseModeTabs != null) {
+            layoutModpackBrowseModeTabs.setVisibility(visible ? View.VISIBLE : View.GONE);
+        }
+        if (!visible || modpackBrowseModeToggleGroup == null) {
+            showModpackFavourites = false;
+            return;
+        }
+
+        showModpackFavourites = false;
+        modpackBrowseModeToggleGroup.check(R.id.buttonModpackAll);
+        modpackBrowseModeToggleGroup.addOnButtonCheckedListener((group, checkedId, isChecked) -> {
+            if (!isChecked) return;
+            boolean favourites = checkedId == R.id.buttonModpackFavourites;
+            if (showModpackFavourites == favourites) return;
+            showModpackFavourites = favourites;
+            currentPage = 0;
+            clearPendingSearch();
+            loadContent(true);
+        });
+    }
+
     private void setupSearch() {
-        editSearch.setHint(getSearchHint(selectedType));
+        editSearch.setHint(showModpackFavourites && selectedType == ModManagerContentType.MODPACKS
+                ? getString(R.string.content_browser_search_favourites_hint)
+                : getSearchHint(selectedType));
         editSearch.setImeOptions(EditorInfo.IME_ACTION_SEARCH);
         editSearch.setSingleLine(true);
         configureSearchClearButton();
@@ -548,7 +583,7 @@ public final class ContentBrowserActivity extends AppCompatActivity {
             if (sort == selectedSort) checkedIndex = i;
         }
 
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle(selectedType == ModManagerContentType.MODPACKS ? "Sort Modpacks" : "Sort Content")
                 .setSingleChoiceItems(labels, checkedIndex, (dialog, which) -> {
                     dialog.dismiss();
@@ -624,7 +659,7 @@ public final class ContentBrowserActivity extends AppCompatActivity {
         }
 
         String[] labels = choices.toArray(new String[0]);
-        new AlertDialog.Builder(this)
+        new MaterialAlertDialogBuilder(this)
                 .setTitle("Minecraft Version")
                 .setSingleChoiceItems(labels, checkedIndex, (dialog, which) -> {
                     dialog.dismiss();
@@ -700,7 +735,7 @@ public final class ContentBrowserActivity extends AppCompatActivity {
 
     private void showMinecraftVersionLoadingDialog() {
         dismissMinecraftVersionLoadingDialog();
-        minecraftVersionLoadingDialog = new AlertDialog.Builder(this)
+        minecraftVersionLoadingDialog = new MaterialAlertDialogBuilder(this)
                 .setTitle("Loading Minecraft Versions")
                 .setMessage("Fetching release versions...")
                 .setCancelable(true)
@@ -889,7 +924,9 @@ public final class ContentBrowserActivity extends AppCompatActivity {
 
     private void loadContent(boolean resetPage, boolean scrollToTopWhenLoaded) {
         normalizeSortForSelectedType();
-        editSearch.setHint(getSearchHint(selectedType));
+        editSearch.setHint(showModpackFavourites && selectedType == ModManagerContentType.MODPACKS
+                ? getString(R.string.content_browser_search_favourites_hint)
+                : getSearchHint(selectedType));
         updateSearchClearButtonVisibility();
         updateSectionLabel();
         updateFilterChips();
@@ -903,6 +940,7 @@ public final class ContentBrowserActivity extends AppCompatActivity {
         ModManagerContentType requestedType = selectedType;
         ContentSource requestedSource = selectedSource;
         ContentSort requestedSort = selectedSort;
+        boolean requestedFavourites = requestedType == ModManagerContentType.MODPACKS && showModpackFavourites;
         String requestedModpackGameVersion = getEffectiveModpackGameVersionFilter(requestedSort);
         showResultSummary(getString(R.string.content_browser_loading_source, getSelectedSourceLabel()));
         updatePaginationControls();
@@ -913,18 +951,26 @@ public final class ContentBrowserActivity extends AppCompatActivity {
                 int total;
 
                 if (requestedType == ModManagerContentType.MODPACKS) {
-                    ModpackSearchApiClient.SearchResult result = ModpackSearchApiClient.search(
-                            this,
-                            requestedSource == ContentSource.CURSEFORGE ? ModManagerSource.CURSEFORGE : ModManagerSource.MODRINTH,
-                            query,
-                            requestedModpackGameVersion,
-                            loader,
-                            PAGE_SIZE,
-                            offset,
-                            requestedSort.apiKey
-                    );
-                    hits = result.hits;
-                    total = result.totalHits;
+                    ModManagerSource provider = requestedSource == ContentSource.CURSEFORGE
+                            ? ModManagerSource.CURSEFORGE
+                            : ModManagerSource.MODRINTH;
+                    if (requestedFavourites) {
+                        hits = loadFavouriteModpacks(provider, query, loader);
+                        total = hits.size();
+                    } else {
+                        ModpackSearchApiClient.SearchResult result = ModpackSearchApiClient.search(
+                                this,
+                                provider,
+                                query,
+                                requestedModpackGameVersion,
+                                loader,
+                                PAGE_SIZE,
+                                offset,
+                                requestedSort.apiKey
+                        );
+                        hits = result.hits;
+                        total = result.totalHits;
+                    }
                     applyClientSideSortIfNeeded(hits, requestedType, requestedSort);
                 } else if (requestedSource == ContentSource.CURSEFORGE) {
                     CurseForgeApiClient.SearchResult result = new CurseForgeApiClient(this).searchProjects(
@@ -975,6 +1021,33 @@ public final class ContentBrowserActivity extends AppCompatActivity {
         thread.start();
     }
 
+    @NonNull
+    private ArrayList<ModrinthProject> loadFavouriteModpacks(
+            @NonNull ModManagerSource source,
+            @NonNull String query,
+            @Nullable String requestedLoader
+    ) {
+        ArrayList<ModrinthProject> hits = new ArrayList<>();
+        for (ModpackFavouritesStore.FavouriteRecord record : ModpackFavouritesStore.list(this, source)) {
+            try {
+                ModrinthProject project = ModpackSearchApiClient.resolveFavourite(this, source, record, requestedLoader);
+                if (matchesFavouriteQuery(project, query)) hits.add(project);
+            } catch (Throwable throwable) {
+                Logging.e("ModpackFavourites", "Unable to resolve favourite " + record.title + " from " + source.getDisplayName(), throwable);
+            }
+        }
+        return hits;
+    }
+
+    private boolean matchesFavouriteQuery(@NonNull ModrinthProject project, @NonNull String query) {
+        String needle = query.trim().toLowerCase(Locale.US);
+        if (needle.isEmpty()) return true;
+        String author = project.author == null ? "" : project.author;
+        return (project.title + " " + project.description + " " + author + " " + project.slug)
+                .toLowerCase(Locale.US)
+                .contains(needle);
+    }
+
     private void applyClientSideSortIfNeeded(
             @NonNull ArrayList<ModrinthProject> hits,
             @NonNull ModManagerContentType type,
@@ -994,7 +1067,6 @@ public final class ContentBrowserActivity extends AppCompatActivity {
             Collections.sort(hits, (left, right) -> Long.compare(right.downloads, left.downloads));
         }
 
-        pinFeaturedModpacksFirst(hits);
     }
 
     private void pinFeaturedModpacksFirst(@NonNull ArrayList<ModrinthProject> hits) {
@@ -1109,6 +1181,16 @@ public final class ContentBrowserActivity extends AppCompatActivity {
     }
 
     private void updatePaginationControls() {
+        if (selectedType == ModManagerContentType.MODPACKS && showModpackFavourites) {
+            setPaginationButtonEnabled(buttonPagePreviousTop, false);
+            setPaginationButtonEnabled(buttonPagePreviousBottom, false);
+            setPaginationButtonEnabled(buttonPageNextTop, false);
+            setPaginationButtonEnabled(buttonPageNextBottom, false);
+            String indicator = getString(R.string.content_browser_page_indicator, 1, 1);
+            setPaginationIndicatorText(textPageIndicatorTop, indicator);
+            setPaginationIndicatorText(textPageIndicatorBottom, indicator);
+            return;
+        }
         int totalPages = getTotalPages(totalHits);
         boolean hasPrevious = currentPage > 0;
         boolean hasNext = currentPage + 1 < totalPages;
@@ -1136,12 +1218,23 @@ public final class ContentBrowserActivity extends AppCompatActivity {
 
     private void updateSectionLabel() {
         if (textContentTitle == null) return;
-        textContentTitle.setText(selectedType == ModManagerContentType.MODPACKS ? "Modpacks" : getTabTitle(selectedType));
+
+        // The global Browse Modpacks screen already says Browse Modpacks in the header and
+        // has All Modpacks / Favourites directly above this controls row. Repeating
+        // "Modpacks" beside the sort dropdown wastes scarce portrait width, so keep this
+        // small section label only for per-instance Mods / Resource Packs / Shaders.
+        if (isBrowseModpacksOnlyMode()) {
+            textContentTitle.setVisibility(View.GONE);
+            return;
+        }
+
+        textContentTitle.setVisibility(View.VISIBLE);
+        textContentTitle.setText(getTabTitle(selectedType));
     }
 
     private void updateFilterChips() {
         // The active Minecraft version and loader are already shown in the top toolbar
-        // beside the lock button. Showing the same values again below the sort/view row
+        // beside the lock button. Showing the same values again below the sort row
         // made the content browser feel duplicated and cluttered, especially on the
         // Mods/Resource Packs/Shaders screen. Keep the chip views bound for older layout
         // compatibility, but keep the whole row hidden.
@@ -1157,58 +1250,57 @@ public final class ContentBrowserActivity extends AppCompatActivity {
     }
 
     private void showProjectMenu(@NonNull View anchor, @NonNull ModrinthProject project) {
-        LinearLayout root = LauncherDialogStyle.createDialogRoot(
-                this,
-                project.title == null || project.title.trim().isEmpty() ? "Content options" : project.title,
-                "Choose what you want to do with this item."
-        );
+        // Use Material's native list-dialog layout here rather than hand-built TextView cards.
+        // It automatically follows the selected DroidBridge theme and handles portrait,
+        // landscape, font scaling and short screens without squishing/cropping the actions.
+        ArrayList<String> labels = new ArrayList<>();
+        ArrayList<Runnable> actions = new ArrayList<>();
 
-        AlertDialog[] dialogRef = new AlertDialog[1];
-        root.addView(createProjectMenuRow(getString(R.string.content_browser_install), () -> {
-            if (dialogRef[0] != null) dialogRef[0].dismiss();
-            confirmInstall(project);
-        }));
-        root.addView(createProjectMenuRow("View Details", () -> {
-            if (dialogRef[0] != null) dialogRef[0].dismiss();
-            openProjectDetails(project);
-        }));
-        root.addView(createProjectMenuRow(getString(R.string.content_browser_open_website), () -> {
-            if (dialogRef[0] != null) dialogRef[0].dismiss();
-            openProjectWebsite(project);
-        }));
+        if (selectedType == ModManagerContentType.MODPACKS) {
+            boolean currentlyFavourite = ModpackFavouritesStore.isFavourite(this, project);
+            labels.add(getString(currentlyFavourite
+                    ? R.string.content_browser_remove_favourite
+                    : R.string.content_browser_add_favourite));
+            actions.add(() -> {
+                ModpackFavouritesStore.setFavourite(this, project, !currentlyFavourite);
+                Toast.makeText(
+                        this,
+                        currentlyFavourite
+                                ? getString(R.string.content_browser_favourite_removed)
+                                : getString(R.string.content_browser_favourite_added),
+                        Toast.LENGTH_SHORT
+                ).show();
+                if (showModpackFavourites) loadContent(true);
+                else adapter.notifyDataSetChanged();
+            });
+        }
 
-        AlertDialog dialog = new AlertDialog.Builder(this)
-                .setView(root)
+        if (!isProjectInstalled(project)) {
+            labels.add(getString(R.string.content_browser_install));
+            actions.add(() -> confirmInstall(project));
+        }
+
+        labels.add("View Details");
+        actions.add(() -> openProjectDetails(project));
+
+        labels.add(getString(R.string.content_browser_open_website));
+        actions.add(() -> openProjectWebsite(project));
+
+        CharSequence[] items = labels.toArray(new CharSequence[0]);
+        AlertDialog dialog = new MaterialAlertDialogBuilder(this)
+                .setTitle(project.title == null || project.title.trim().isEmpty()
+                        ? "Content options"
+                        : project.title)
+                .setItems(items, (unused, which) -> {
+                    if (which >= 0 && which < actions.size()) actions.get(which).run();
+                })
                 .setNegativeButton(android.R.string.cancel, null)
                 .create();
-        dialogRef[0] = dialog;
         dialog.setOnShowListener(unused -> LauncherDialogStyle.styleDialogChrome(this, dialog));
+        dialog.setOnDismissListener(unused -> FullscreenUtils.enableImmersive(this));
         dialog.show();
         LauncherDialogStyle.styleDialogChrome(this, dialog);
-    }
-
-    @NonNull
-    private View createProjectMenuRow(@NonNull String label, @NonNull Runnable action) {
-        TextView row = new TextView(this);
-        row.setText(label);
-        row.setTextSize(18);
-        row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setTextColor(LauncherDialogStyle.COLOR_TEXT_PRIMARY);
-        row.setPadding(dp(16), dp(14), dp(16), dp(14));
-        row.setBackground(LauncherDialogStyle.roundedDrawable(
-                this,
-                LauncherDialogStyle.COLOR_CARD_BG,
-                LauncherDialogStyle.COLOR_CARD_STROKE,
-                16
-        ));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(
-                ViewGroup.LayoutParams.MATCH_PARENT,
-                ViewGroup.LayoutParams.WRAP_CONTENT
-        );
-        params.topMargin = dp(8);
-        row.setLayoutParams(params);
-        row.setOnClickListener(view -> action.run());
-        return row;
+        FullscreenUtils.enableImmersive(this);
     }
 
     private void confirmInstall(@NonNull ModrinthProject project) {
@@ -1244,8 +1336,18 @@ public final class ContentBrowserActivity extends AppCompatActivity {
 
     private void installProject(@NonNull ModrinthProject project) {
         File gameDirectory = new File(gameDirectoryPath);
+        if (selectedType == ModManagerContentType.DATAPACKS) {
+            DatapackWorldTargetPicker.choose(this, gameDirectory, targetDirectory -> installProjectIntoTarget(project, targetDirectory));
+            return;
+        }
+        installProjectIntoTarget(project, null);
+    }
+
+    private void installProjectIntoTarget(@NonNull ModrinthProject project, @Nullable File targetDirectoryOverride) {
+        File gameDirectory = new File(gameDirectoryPath);
         Logging.i("ContentInstall", "Starting " + project.source.getDisplayName() + " " + selectedType.name().toLowerCase(Locale.US) + " install: " + project.title
-                + " mc=" + gameVersionId + " loader=" + loader + " gameDir=" + gameDirectory.getAbsolutePath());
+                + " mc=" + gameVersionId + " loader=" + loader + " gameDir=" + gameDirectory.getAbsolutePath()
+                + (targetDirectoryOverride == null ? "" : " target=" + targetDirectoryOverride.getAbsolutePath()));
         Toast.makeText(this, getString(R.string.content_browser_install_started, project.title), Toast.LENGTH_SHORT).show();
 
         if (selectedType == ModManagerContentType.MODPACKS) {
@@ -1291,6 +1393,7 @@ public final class ContentBrowserActivity extends AppCompatActivity {
                         loader,
                         selectedType,
                         project,
+                        targetDirectoryOverride,
                         installListener
                 );
             } else {
@@ -1300,6 +1403,7 @@ public final class ContentBrowserActivity extends AppCompatActivity {
                         loader,
                         selectedType,
                         project,
+                        targetDirectoryOverride,
                         installListener
                 );
             }
@@ -1442,7 +1546,7 @@ public final class ContentBrowserActivity extends AppCompatActivity {
 
     private void showModpackVersionLoadingDialog(@NonNull String title) {
         dismissModpackVersionLoadingDialog();
-        modpackVersionLoadingDialog = new AlertDialog.Builder(this)
+        modpackVersionLoadingDialog = new MaterialAlertDialogBuilder(this)
                 .setTitle("Loading Versions")
                 .setMessage("Fetching available versions for " + title + "...")
                 .setCancelable(true)
@@ -1512,7 +1616,7 @@ public final class ContentBrowserActivity extends AppCompatActivity {
         listParams.topMargin = dp(4);
         layout.addView(minecraftVersionList, listParams);
 
-        AlertDialog minecraftVersionDialog = new AlertDialog.Builder(this)
+        AlertDialog minecraftVersionDialog = new MaterialAlertDialogBuilder(this)
                 .setView(layout)
                 .setNegativeButton(android.R.string.cancel, null)
                 .create();
@@ -1576,7 +1680,7 @@ public final class ContentBrowserActivity extends AppCompatActivity {
         listParams.topMargin = dp(4);
         layout.addView(versionList, listParams);
 
-        AlertDialog packVersionDialog = new AlertDialog.Builder(this)
+        AlertDialog packVersionDialog = new MaterialAlertDialogBuilder(this)
                 .setView(layout)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setNeutralButton("Minecraft Versions", null)
@@ -1709,7 +1813,11 @@ public final class ContentBrowserActivity extends AppCompatActivity {
             case MODPACKS:
                 return "Modpacks";
             case RESOURCEPACKS:
-                return getString(R.string.content_browser_tab_resourcepacks);
+                return ModManagerContentType.usesLegacyTexturePacks(gameVersionId)
+                        ? getString(R.string.content_browser_tab_texturepacks)
+                        : getString(R.string.content_browser_tab_resourcepacks);
+            case DATAPACKS:
+                return getString(R.string.content_browser_tab_datapacks);
             case SHADERPACKS:
                 return getString(R.string.content_browser_tab_shaders);
             case MODS:
@@ -1724,7 +1832,11 @@ public final class ContentBrowserActivity extends AppCompatActivity {
             case MODPACKS:
                 return "Search modpacks";
             case RESOURCEPACKS:
-                return getString(R.string.content_browser_search_resourcepacks);
+                return ModManagerContentType.usesLegacyTexturePacks(gameVersionId)
+                        ? getString(R.string.content_browser_search_texturepacks)
+                        : getString(R.string.content_browser_search_resourcepacks);
+            case DATAPACKS:
+                return getString(R.string.content_browser_search_datapacks);
             case SHADERPACKS:
                 return getString(R.string.content_browser_search_shaders);
             case MODS:
@@ -1739,7 +1851,11 @@ public final class ContentBrowserActivity extends AppCompatActivity {
             case MODPACKS:
                 return "modpacks";
             case RESOURCEPACKS:
-                return getString(R.string.content_browser_resourcepacks_plural);
+                return ModManagerContentType.usesLegacyTexturePacks(gameVersionId)
+                        ? getString(R.string.content_browser_texturepacks_plural)
+                        : getString(R.string.content_browser_resourcepacks_plural);
+            case DATAPACKS:
+                return getString(R.string.content_browser_datapacks_plural);
             case SHADERPACKS:
                 return getString(R.string.content_browser_shaders_plural);
             case MODS:
@@ -1762,6 +1878,14 @@ public final class ContentBrowserActivity extends AppCompatActivity {
                 || categoryContains(project, "resourcepack")
                 || categoryContains(project, "resourcepacks")) {
             return ModManagerContentType.RESOURCEPACKS;
+        }
+        if ("datapack".equals(projectType)
+                || "datapacks".equals(projectType)
+                || categoryContains(project, "datapack")
+                || categoryContains(project, "datapacks")
+                || categoryContains(project, "data-pack")
+                || categoryContains(project, "data-packs")) {
+            return ModManagerContentType.DATAPACKS;
         }
         if ("shader".equals(projectType)
                 || "shaderpack".equals(projectType)
@@ -1963,6 +2087,8 @@ public final class ContentBrowserActivity extends AppCompatActivity {
                 return R.drawable.ic_content_mod_24;
             case RESOURCEPACKS:
                 return R.drawable.ic_content_resourcepack_24;
+            case DATAPACKS:
+                return R.drawable.ic_content_datapack_24;
             case SHADERPACKS:
                 return R.drawable.ic_content_shaderpack_24;
             case MODS:
@@ -2806,8 +2932,14 @@ public final class ContentBrowserActivity extends AppCompatActivity {
             ModrinthProject item = items.get(position);
             ModManagerContentType itemType = resolveProjectDisplayType(item, boundType);
             bindProjectIcon(holder.icon, item, itemType);
-            holder.name.setText(item.title);
-            holder.author.setText(getString(R.string.content_browser_project_author, getProjectAuthorDisplayName(item)));
+            boolean favourite = boundType == ModManagerContentType.MODPACKS
+                    && ModpackFavouritesStore.isFavourite(ContentBrowserActivity.this, item);
+            holder.name.setText((favourite ? "★ " : "") + item.title);
+            String authorLine = getString(R.string.content_browser_project_author, getProjectAuthorDisplayName(item));
+            if (boundType == ModManagerContentType.MODPACKS && ModpackFavouritesStore.isDeveloperPick(item)) {
+                authorLine = getString(R.string.content_browser_developer_pick) + " • " + authorLine;
+            }
+            holder.author.setText(authorLine);
             holder.description.setText(item.description);
             holder.tags.setText(formatTags(item.categories));
             holder.downloads.setText(formatNumber(item.downloads));

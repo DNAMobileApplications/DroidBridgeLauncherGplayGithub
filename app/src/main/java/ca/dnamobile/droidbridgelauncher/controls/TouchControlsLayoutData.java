@@ -270,15 +270,34 @@ public final class TouchControlsLayoutData {
                 JSONObject drawer = drawers.optJSONObject(i);
                 if (drawer == null) continue;
                 JSONObject properties = drawer.optJSONObject("properties");
-                TouchControlData drawerControl = null;
+                TouchControlData drawerControl;
                 if (properties != null) {
                     drawerControl = TouchControlData.fromDroidBridgeControl(properties, legacyVersion, safeDensity);
                     normalizeLegacyFixedPosition(drawerControl, properties, legacyVersion, safeLegacyWidth, safeLegacyHeight);
+                } else {
+                    drawerControl = TouchControlData.drawer(
+                            drawer.optString("name", "Drawer"),
+                            32f,
+                            32f,
+                            64f,
+                            48f
+                    );
                 }
+
+                int drawerOrientation = readDrawerOrientation(drawer);
+                drawerControl.action = TouchControlActions.DRAWER;
+                drawerControl.keyCode = 0;
+                drawerControl.setKeyCodes(new int[0]);
+                drawerControl.toggle = false;
+                drawerControl.drawerOrientation = drawerOrientationName(drawerOrientation);
+                drawerControl.drawerOpenByDefault = drawer.optBoolean(
+                        "drawerOpenByDefault",
+                        drawer.optBoolean("isOpen", false)
+                );
+                data.controls.add(drawerControl);
 
                 JSONArray subButtons = drawer.optJSONArray("buttonProperties");
                 if (subButtons != null) {
-                    int drawerOrientation = readDrawerOrientation(drawer);
                     for (int j = 0; j < subButtons.length(); j++) {
                         JSONObject sub = subButtons.optJSONObject(j);
                         if (sub != null) {
@@ -294,6 +313,7 @@ public final class TouchControlsLayoutData {
                             }
                             normalizeLegacyFixedPosition(control, sub, legacyVersion, safeLegacyWidth, safeLegacyHeight);
                             applyImportedDrawerPlacement(control, drawerControl, drawerOrientation, j);
+                            control.drawerParentId = drawerControl.id;
                             data.controls.add(control);
                         }
                     }
@@ -568,9 +588,6 @@ public final class TouchControlsLayoutData {
                 || "pojavlauncher".equals(normalized)
                 || "zalith".equals(normalized)
                 || "zalithlauncher".equals(normalized)
-                || "mojo".equals(normalized)
-                || "mojolauncher".equals(normalized)
-                || "mjlauncher".equals(normalized)
                 || "amethyst".equals(normalized)) {
             return PROFILE_OTHER_LAUNCHER;
         }
@@ -656,7 +673,7 @@ public final class TouchControlsLayoutData {
     ) {
         if (legacyVersion > 2) return;
 
-        // Pojav/Mojo/Amethyst convert v1/v2 fixed positions into screen-relative
+        // compatible third-party launchers convert v1/v2 fixed positions into screen-relative
         // expressions during import. This preserves the authored placement when the
         // control layout is opened on a different resolution or aspect ratio.
         if ((control.rawX == null || control.rawX.trim().isEmpty()) && source.has("x")) {
@@ -694,6 +711,18 @@ public final class TouchControlsLayoutData {
         return 1;
     }
 
+    @NonNull
+    private static String drawerOrientationName(int orientation) {
+        switch (orientation) {
+            case 0: return "down";
+            case 1: return "left";
+            case 2: return "up";
+            case 3: return "right";
+            case 4: return "free";
+            default: return "right";
+        }
+    }
+
     private static void applyImportedDrawerPlacement(
             @NonNull TouchControlData child,
             TouchControlData parent,
@@ -702,9 +731,9 @@ public final class TouchControlsLayoutData {
     ) {
         if (parent == null || orientation == 4) return;
 
-        // DroidBridge does not currently keep Pojav drawer groups in its native JSON
-        // model. Import non-FREE drawers as their expanded button row/column so every
-        // child remains usable and occupies the exact position Pojav computes.
+        // Preserve Pojav/Zalith's non-FREE expanded geometry while retaining the
+        // native drawer relationship. The drawer now owns child visibility at runtime,
+        // but each child still occupies the exact position the source launcher computes.
         child.width = parent.width;
         child.height = parent.height;
 
@@ -743,7 +772,7 @@ public final class TouchControlsLayoutData {
     }
 
     private static void normalizePojavFamilyVersion(@NonNull TouchControlsLayoutData data, int legacyVersion) {
-        // Pojav/Mojo/Amethyst normalize tall v6/v7 joysticks to a square while
+        // compatible third-party launchers normalize tall v6/v7 joysticks to a square while
         // preserving the old height contribution inside dynamic formulas.
         if (legacyVersion == 6 || legacyVersion == 7) {
             for (TouchControlData control : data.controls) {
@@ -860,8 +889,6 @@ public final class TouchControlsLayoutData {
         String name = data.name == null ? "" : data.name.trim().toLowerCase(Locale.ROOT);
         boolean importedName = name.contains("pojav")
                 || name.contains("zalith")
-                || name.contains("mojo")
-                || name.contains("mjlauncher")
                 || name.contains("amethyst")
                 || !data.importedFileName.trim().isEmpty();
         if (!importedName) return false;

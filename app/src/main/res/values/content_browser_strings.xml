@@ -10,18 +10,20 @@
     <string name="content_browser_source_curseforge">CurseForge</string>
     <string name="content_browser_tab_mods">Mods</string>
     <string name="content_browser_tab_resourcepacks">Resource Packs</string>
+    <string name="content_browser_tab_texturepacks">Texture Packs</string>
     <string name="content_browser_tab_datapacks">Data Packs</string>
     <string name="content_browser_tab_shaders">Shaders</string>
     <string name="content_browser_mods_plural">mods</string>
     <string name="content_browser_resourcepacks_plural">resource packs</string>
+    <string name="content_browser_texturepacks_plural">texture packs</string>
     <string name="content_browser_datapacks_plural">data packs</string>
     <string name="content_browser_shaders_plural">shaders</string>
     <string name="content_browser_search_mods">Search mods…</string>
     <string name="content_browser_search_resourcepacks">Search resource packs…</string>
+    <string name="content_browser_search_texturepacks">Search texture packs…</string>
     <string name="content_browser_search_datapacks">Search data packs…</string>
     <string name="content_browser_search_shaders">Search shaders…</string>
     <string name="content_browser_sort_downloads">Sort by: Downloads</string>
-    <string name="content_browser_view_count">View: 20</string>
     <string name="content_browser_result_summary">%1$d %2$s from %3$s</string>
     <string name="content_browser_project_icon_description">Project icon</string>
     <string name="content_browser_project_author">by %1$s ↗</string>
@@ -56,4 +58,12 @@
     <string name="content_project_details_install_version_title">Install %1$s %2$s?</string>
     <string name="content_project_details_install_version_message">This version will be installed for Minecraft %1$s / %2$s. Required dependencies will be installed automatically.</string>
     <string name="content_project_details_version_meta">%1$s · %2$s · %3$s</string>
+    <string name="content_browser_modpack_all">All Modpacks</string>
+    <string name="content_browser_modpack_favourites">Favourites</string>
+    <string name="content_browser_add_favourite">Add to Favourites</string>
+    <string name="content_browser_remove_favourite">Remove from Favourites</string>
+    <string name="content_browser_developer_pick">★ DroidBridge Developer Pick</string>
+    <string name="content_browser_search_favourites_hint">Search favourites…</string>
+    <string name="content_browser_favourite_added">Added to Favourites</string>
+    <string name="content_browser_favourite_removed">Removed from Favourites</string>
 </resources>

@@ -80,7 +80,6 @@
         android:background="@drawable/bg_ingame_settings_button"
         android:contentDescription="@string/game_button_overlay_settings"
         android:padding="12dp"
-        android:src="@drawable/ic_settings_24"
-        android:tint="#FFFFFFFF" />
+        android:src="@drawable/ic_ingame_settings_24" />
 
 </FrameLayout>

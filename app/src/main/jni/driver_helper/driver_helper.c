@@ -73,6 +73,12 @@ bool checkAdrenoGraphics() {
     return is_adreno;
 }
 
+static volatile int g_droidbridge_kopper_turnip_ready = 0;
+
+__attribute__((visibility("default"))) int droidbridge_kopper_turnip_is_ready(void) {
+    return g_droidbridge_kopper_turnip_ready;
+}
+
 static bool db_env_enabled(const char* name) {
     const char* value = getenv(name);
     return value != NULL && value[0] != '\0' && strcmp(value, "0") != 0
@@ -80,6 +86,11 @@ static bool db_env_enabled(const char* name) {
 }
 
 void* loadTurnipVulkan() {
+    printf("AdrenoSupp-v80: DroidBridge source helper active kopperNamespace=%d forceTurnip=%s driverPath=%s\n",
+           db_env_enabled("DROIDBRIDGE_KOPPER_FORCE_NAMESPACE_VULKAN") ? 1 : 0,
+           getenv("DROIDBRIDGE_LOAD_TURNIP") != NULL ? getenv("DROIDBRIDGE_LOAD_TURNIP") : "<unset>",
+           getenv("DRIVER_PATH") != NULL ? getenv("DRIVER_PATH") : "<unset>");
+    fflush(stdout);
     /*
      * v60: fixed C string escaping from v59 and kept explicit Turnip loading.
      * If Java selected bundled Turnip/Zink, do not depend only on the tiny
@@ -89,6 +100,11 @@ void* loadTurnipVulkan() {
     bool forcedTurnip = db_env_enabled("DROIDBRIDGE_LOAD_TURNIP")
             || db_env_enabled("DROIDBRIDGE_LOAD_TURNIP")
             || db_env_enabled("DROIDBRIDGE_USE_CUSTOM_TURNIP");
+    const bool kopperNamespaceVulkan = db_env_enabled("DROIDBRIDGE_KOPPER_FORCE_NAMESPACE_VULKAN");
+    if (kopperNamespaceVulkan) {
+        g_droidbridge_kopper_turnip_ready = 0;
+        unsetenv("DROIDBRIDGE_KOPPER_TURNIP_READY");
+    }
     if (!forcedTurnip && !checkAdrenoGraphics()) {
         printf("AdrenoSupp-v68: Adreno probe failed and Turnip was not forced.\n");
         return NULL;
@@ -147,17 +163,72 @@ void* loadTurnipVulkan() {
 
     linkerhookPassHandles(turnip_driver_handle, android_dlopen_ext, android_get_exported_namespace);
 
-    void* libvulkan = linker_ns_dlopen_unique_named(cache_dir, "libvulkan.so", "libdbrvlk.so", RTLD_LOCAL | RTLD_NOW);
+    void* libvulkan = NULL;
+    if (kopperNamespaceVulkan) {
+        /*
+         * v14: Keep the private-loader/Turnip hook from v13, but materialize
+         * the clone under the filename libvulkan.so in a dedicated directory.
+         * The clone's SONAME remains unique (libdbrvlk.so). This handles Mesa
+         * payloads which open libvulkan.so themselves instead of consuming
+         * VULKAN_PTR: namespace lookup now lands on this same Turnip-hooked
+         * loader rather than Qualcomm's system Vulkan loader.
+         */
+        const char* kopper_alias_dir = getenv("DROIDBRIDGE_KOPPER_VULKAN_ALIAS_DIR");
+        if (kopper_alias_dir == NULL || kopper_alias_dir[0] == '\0') {
+            printf("AdrenoSupp-v84: Kopper Vulkan alias dir is missing; refusing Qualcomm fallback.\n");
+        } else {
+            libvulkan = linker_ns_dlopen_alias_file(
+                    kopper_alias_dir,
+                    "libvulkan.so",
+                    "libvulkan.so",
+                    "libdbrvlk.so",
+                    RTLD_LOCAL | RTLD_NOW);
+        }
+        if (libvulkan != NULL) {
+            printf("AdrenoSupp-v84: Kopper Turnip ready using alias-visible private Vulkan loader dir=%s ptr=%p\n",
+                   kopper_alias_dir, libvulkan);
+        } else {
+            const char* alias_error = dlerror();
+            printf("AdrenoSupp-v84: alias-visible private Vulkan loader creation failed: %s; refusing Qualcomm fallback.\n",
+                   alias_error != NULL ? alias_error : "unknown linker error");
+        }
+    } else {
+        libvulkan = linker_ns_dlopen_unique(cache_dir, "libvulkan.so", RTLD_LOCAL | RTLD_NOW);
+        if (libvulkan != NULL) {
+            printf("AdrenoSupp-v83: Turnip ready using FCL-style private Vulkan loader from %s, ptr=%p\n", native_dir, libvulkan);
+        }
+    }
+
     if (!libvulkan) {
-        printf("AdrenoSupp-v68: failed to load.\n");
+        if (kopperNamespaceVulkan) {
+            g_droidbridge_kopper_turnip_ready = 0;
+            unsetenv("DROIDBRIDGE_KOPPER_TURNIP_READY");
+        }
+        printf("AdrenoSupp-v80: failed to create Turnip-bound Vulkan loader.\n");
+        fflush(stdout);
         dlclose(dl_android);
         dlclose(linkerhook);
         dlclose(turnip_driver_handle);
         return NULL;
     }
 
-    printf("AdrenoSupp-v68: Turnip ready using libdbrvlk.so Vulkan loader alias from %s, ptr=%p\n", native_dir, libvulkan);
+    if (kopperNamespaceVulkan) {
+        g_droidbridge_kopper_turnip_ready = 1;
+        setenv("DROIDBRIDGE_KOPPER_TURNIP_READY", "1", 1);
+        printf("AdrenoSupp-v84: authoritative Kopper Turnip readiness=1 loader=%p alias=%s\n",
+               libvulkan, getenv("DROIDBRIDGE_KOPPER_VULKAN_ALIAS_DIR") != NULL ? getenv("DROIDBRIDGE_KOPPER_VULKAN_ALIAS_DIR") : "<unset>");
+        fflush(stdout);
+    }
     return libvulkan;
+}
+
+/*
+ * Explicit Kopper ABI entry point. Do not rely on the caller/env publication
+ * order to choose the legacy aliased loader versus the original-soname loader.
+ */
+__attribute__((visibility("default"))) void* loadTurnipVulkanKopper(void) {
+    setenv("DROIDBRIDGE_KOPPER_FORCE_NAMESPACE_VULKAN", "1", 1);
+    return loadTurnipVulkan();
 }
 
 #endif

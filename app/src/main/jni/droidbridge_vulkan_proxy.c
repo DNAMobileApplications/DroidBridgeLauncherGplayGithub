@@ -11,6 +11,8 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
 
 typedef struct VkInstance_T* DB_VkInstance;
 typedef struct VkDevice_T* DB_VkDevice;
@@ -21,6 +23,24 @@ extern DB_PFN_vkVoidFunction droidbridge_vulkan_compat_get_instance_proc_addr(
 extern DB_PFN_vkVoidFunction droidbridge_vulkan_compat_get_device_proc_addr(
         DB_VkDevice device, const char* name);
 extern int droidbridge_vulkan_compat_prepare_real_loader(void* realLoaderHandle);
+extern void* maybe_load_vulkan(void);
+
+static int db_proxy_env_enabled(const char* name) {
+    const char* value = getenv(name);
+    return value != NULL && value[0] != '\0'
+            && strcmp(value, "0") != 0
+            && strcmp(value, "false") != 0
+            && strcmp(value, "FALSE") != 0;
+}
+
+static int db_proxy_kopper_custom_turnip(void) {
+    const char* renderer = getenv("DROIDBRIDGE_RENDERER");
+    if (renderer == NULL || renderer[0] == '\0') renderer = getenv("POJAV_RENDERER");
+    return renderer != NULL
+            && strcmp(renderer, "opengles3_desktopgl_zink_kopper") == 0
+            && db_proxy_env_enabled("DROIDBRIDGE_KOPPER_FORCE_NAMESPACE_VULKAN")
+            && !db_proxy_env_enabled("DROIDBRIDGE_USE_SYSTEM_VULKAN");
+}
 
 static int g_proxy_instance_logged = 0;
 static int g_proxy_device_logged = 0;
@@ -35,31 +55,55 @@ static int g_real_loader_ready = 0;
  * global command lookup instead of returning NULL for vkCreateInstance.
  */
 static void droidbridge_vulkan_proxy_prepare_real_loader_once(void) {
-    dlerror();
-    void* handle = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-    if (handle == NULL) {
-        const char* error = dlerror();
+    void* handle = NULL;
+    const int kopper_custom = db_proxy_kopper_custom_turnip();
+
+    if (kopper_custom) {
+        /*
+         * LWJGL 3.4 can load Vulkan before DroidBridge's ndlopen hook is installed.
+         * For Kopper, bootstrap libdroidbridge_runtime's Turnip-bound loader here
+         * instead of opening Android's Qualcomm system loader directly.
+         */
+        handle = maybe_load_vulkan();
+        if (handle == NULL) {
+            fprintf(stderr,
+                    "DroidBridgeVulkanCompat: Kopper early proxy could not bootstrap Turnip; refusing system Vulkan fallback\n");
+            fflush(stderr);
+            return;
+        }
         fprintf(stderr,
-                "DroidBridgeVulkanCompat: proxy failed to open real Vulkan loader error=%s\n",
-                error != NULL ? error : "unknown");
+                "DroidBridgeVulkanCompat: Kopper early proxy received Turnip-bound loader handle=%p\n",
+                handle);
         fflush(stderr);
-        return;
+    } else {
+        dlerror();
+        handle = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+        if (handle == NULL) {
+            const char* error = dlerror();
+            fprintf(stderr,
+                    "DroidBridgeVulkanCompat: proxy failed to open real Vulkan loader error=%s\n",
+                    error != NULL ? error : "unknown");
+            fflush(stderr);
+            return;
+        }
     }
 
     if (!droidbridge_vulkan_compat_prepare_real_loader(handle)) {
         fprintf(stderr,
-                "DroidBridgeVulkanCompat: proxy could not prepare real Vulkan loader handle=%p\n",
-                handle);
+                "DroidBridgeVulkanCompat: proxy could not prepare real Vulkan loader handle=%p kopper=%d\n",
+                handle,
+                kopper_custom);
         fflush(stderr);
-        dlclose(handle);
+        if (!kopper_custom) dlclose(handle);
         return;
     }
 
     g_real_loader_handle = handle;
     g_real_loader_ready = 1;
     fprintf(stderr,
-            "DroidBridgeVulkanCompat: proxy bootstrapped real Vulkan loader handle=%p\n",
-            handle);
+            "DroidBridgeVulkanCompat: proxy bootstrapped real Vulkan loader handle=%p kopper=%d\n",
+            handle,
+            kopper_custom);
     fflush(stderr);
 }
 

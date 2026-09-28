@@ -61,6 +61,16 @@ public final class TouchControlData {
     public float strokeWidth = 2f;
     public int strokeColor = 0x99FFFFFF;
     public int backgroundColor = 0x66000000;
+    public static final String IMAGE_MODE_BACKGROUND = "background";
+    public static final String IMAGE_MODE_REPLACE = "replace";
+    /** Optional user-selected image rendered inside this control. */
+    @Nullable public String imageUri;
+    /** "background" keeps the button text/stroke; "replace" renders the image only. */
+    @NonNull public String imageMode = IMAGE_MODE_BACKGROUND;
+    /** User image transform controls used by the touch-control editor. */
+    public float imageScalePercent = 100f;
+    public float imageOffsetXPercent = 0f;
+    public float imageOffsetYPercent = 0f;
     public boolean toggle;
     public boolean visibleInGame = true;
     public boolean visibleInMenu = true;
@@ -80,6 +90,13 @@ public final class TouchControlData {
     public boolean joystickAbsolute;
     public boolean joystickForwardLock;
     public float joystickDeadzonePercent = 16f;
+
+    /** ID of the drawer control that owns this control, or null when ungrouped. */
+    @Nullable public String drawerParentId;
+    /** Preserved Pojav/Zalith drawer orientation. Runtime visibility does not depend on it. */
+    @NonNull public String drawerOrientation = "right";
+    /** When true, this drawer starts expanded when a profile is first loaded. */
+    public boolean drawerOpenByDefault;
 
     @Nullable public String rawX;
     @Nullable public String rawY;
@@ -135,6 +152,22 @@ public final class TouchControlData {
     }
 
     @NonNull
+    public static TouchControlData drawer(@NonNull String label, float x, float y, float width, float height) {
+        TouchControlData data = new TouchControlData();
+        data.label = label;
+        data.action = TouchControlActions.DRAWER;
+        data.keyCode = 0;
+        data.setKeyCodes(new int[0]);
+        data.x = x;
+        data.y = y;
+        data.width = width;
+        data.height = height;
+        data.visibleInGame = true;
+        data.visibleInMenu = true;
+        return data;
+    }
+
+    @NonNull
     public TouchControlData copy() {
         TouchControlData copy = new TouchControlData();
         copy.id = UUID.randomUUID().toString();
@@ -155,6 +188,11 @@ public final class TouchControlData {
         copy.strokeWidth = strokeWidth;
         copy.strokeColor = strokeColor;
         copy.backgroundColor = backgroundColor;
+        copy.imageUri = imageUri;
+        copy.imageMode = imageMode;
+        copy.imageScalePercent = imageScalePercent;
+        copy.imageOffsetXPercent = imageOffsetXPercent;
+        copy.imageOffsetYPercent = imageOffsetYPercent;
         copy.toggle = toggle;
         copy.visibleInGame = visibleInGame;
         copy.visibleInMenu = visibleInMenu;
@@ -165,6 +203,9 @@ public final class TouchControlData {
         copy.joystickAbsolute = joystickAbsolute;
         copy.joystickForwardLock = joystickForwardLock;
         copy.joystickDeadzonePercent = joystickDeadzonePercent;
+        copy.drawerParentId = drawerParentId;
+        copy.drawerOrientation = drawerOrientation;
+        copy.drawerOpenByDefault = drawerOpenByDefault;
         copy.rawX = rawX;
         copy.rawY = rawY;
         copy.positionAnchorX = positionAnchorX;
@@ -197,6 +238,11 @@ public final class TouchControlData {
         json.put("strokeWidth", strokeWidth);
         json.put("strokeColor", strokeColor);
         json.put("backgroundColor", backgroundColor);
+        if (imageUri != null && !imageUri.trim().isEmpty()) json.put("imageUri", imageUri.trim());
+        json.put("imageMode", normalizeImageMode(imageMode));
+        json.put("imageScalePercent", clampImageScalePercent(imageScalePercent));
+        json.put("imageOffsetXPercent", clampImageOffsetPercent(imageOffsetXPercent));
+        json.put("imageOffsetYPercent", clampImageOffsetPercent(imageOffsetYPercent));
         json.put("toggle", toggle);
         json.put("visibleInGame", visibleInGame);
         json.put("visibleInMenu", visibleInMenu);
@@ -207,6 +253,13 @@ public final class TouchControlData {
         json.put("joystickAbsolute", joystickAbsolute);
         json.put("joystickForwardLock", joystickForwardLock);
         json.put("joystickDeadzonePercent", joystickDeadzonePercent);
+        if (drawerParentId != null && !drawerParentId.trim().isEmpty()) {
+            json.put("drawerParentId", drawerParentId.trim());
+        }
+        if (TouchControlActions.DRAWER.equals(action)) {
+            json.put("drawerOrientation", normalizeDrawerOrientation(drawerOrientation));
+            json.put("drawerOpenByDefault", drawerOpenByDefault);
+        }
         if (rawX != null) json.put("rawX", rawX);
         if (rawY != null) json.put("rawY", rawY);
         String normalizedAnchorX = normalizeHorizontalPositionAnchor(positionAnchorX);
@@ -238,6 +291,11 @@ public final class TouchControlData {
         data.strokeWidth = (float) json.optDouble("strokeWidth", data.strokeWidth);
         data.strokeColor = json.optInt("strokeColor", data.strokeColor);
         data.backgroundColor = json.optInt("backgroundColor", json.optInt("bgColor", data.backgroundColor));
+        data.imageUri = optNullableString(json, "imageUri", null);
+        data.imageMode = normalizeImageMode(json.optString("imageMode", data.imageMode));
+        data.imageScalePercent = clampImageScalePercent((float) json.optDouble("imageScalePercent", data.imageScalePercent));
+        data.imageOffsetXPercent = clampImageOffsetPercent((float) json.optDouble("imageOffsetXPercent", data.imageOffsetXPercent));
+        data.imageOffsetYPercent = clampImageOffsetPercent((float) json.optDouble("imageOffsetYPercent", data.imageOffsetYPercent));
         data.toggle = json.optBoolean("toggle", json.optBoolean("isToggle", data.toggle));
         data.visibleInGame = json.optBoolean("visibleInGame", json.optBoolean("displayInGame", data.visibleInGame));
         data.visibleInMenu = json.optBoolean("visibleInMenu", json.optBoolean("displayInMenu", data.visibleInMenu));
@@ -252,6 +310,9 @@ public final class TouchControlData {
         data.joystickAbsolute = json.optBoolean("joystickAbsolute", json.optBoolean("absolute", data.joystickAbsolute));
         data.joystickForwardLock = json.optBoolean("joystickForwardLock", json.optBoolean("forwardLock", data.joystickForwardLock));
         data.joystickDeadzonePercent = clampJoystickDeadzonePercent((float) json.optDouble("joystickDeadzonePercent", json.optDouble("deadzone", json.optDouble("deadzonePercent", data.joystickDeadzonePercent))));
+        data.drawerParentId = optNullableString(json, "drawerParentId", optNullableString(json, "drawerId", null));
+        data.drawerOrientation = normalizeDrawerOrientation(json.optString("drawerOrientation", data.drawerOrientation));
+        data.drawerOpenByDefault = json.optBoolean("drawerOpenByDefault", json.optBoolean("drawerInitiallyOpen", false));
         data.rawX = optNullableString(json, "rawX", optNullableString(json, "dynamicX", null));
         data.rawY = optNullableString(json, "rawY", optNullableString(json, "dynamicY", null));
         readPositionAnchors(data, json);
@@ -295,7 +356,7 @@ public final class TouchControlData {
 
         // Pojav-family JSON stores cornerRadius as a percentage of half the
         // shortest button side, whereas DroidBridge stores an absolute dp radius.
-        // Convert at import so the visible shape matches Zalith/Amethyst/Mojo.
+        // Convert at import so the visible shape matches compatible third-party launchers.
         float legacyCornerRadiusPercent = json.has("cornerRadius")
                 ? (float) json.optDouble("cornerRadius", 0d)
                 : (json.optBoolean("isRound", false) ? 35f : 0f);
@@ -436,6 +497,17 @@ public final class TouchControlData {
         int[] result = new int[Math.min(MAX_ACTION_SLOTS, codes.size())];
         for (int i = 0; i < result.length; i++) result[i] = codes.get(i);
         return result;
+    }
+
+    @NonNull
+    public static String normalizeDrawerOrientation(@Nullable String orientation) {
+        if (orientation == null) return "right";
+        String value = orientation.trim().toLowerCase(Locale.ROOT);
+        if ("down".equals(value) || "left".equals(value) || "up".equals(value)
+                || "right".equals(value) || "free".equals(value)) {
+            return value;
+        }
+        return "right";
     }
 
     private static float clamp01(float value) {
@@ -634,6 +706,21 @@ public final class TouchControlData {
             return POSITION_ANCHOR_BOTTOM;
         }
         return null;
+    }
+
+    @NonNull
+    public static String normalizeImageMode(@Nullable String mode) {
+        return IMAGE_MODE_REPLACE.equalsIgnoreCase(mode) ? IMAGE_MODE_REPLACE : IMAGE_MODE_BACKGROUND;
+    }
+
+    public static float clampImageScalePercent(float value) {
+        if (Float.isNaN(value) || Float.isInfinite(value)) return 100f;
+        return Math.max(25f, Math.min(300f, value));
+    }
+
+    public static float clampImageOffsetPercent(float value) {
+        if (Float.isNaN(value) || Float.isInfinite(value)) return 0f;
+        return Math.max(-100f, Math.min(100f, value));
     }
 
     @Nullable

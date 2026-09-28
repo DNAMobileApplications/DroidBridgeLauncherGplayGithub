@@ -20,6 +20,7 @@ public final class LibPath {
 
     private static File COMPONENTS_DIR;
     private static File SUPPORT_COMPONENTS_DIR;
+    private static File OTHER_LOGIN_DIR;
 
     public static File CACIO_8;
     public static File CACIO_17;
@@ -30,6 +31,9 @@ public final class LibPath {
 
     public static File DROIDBRIDGE_LIB_PATCHER;
     public static File OPTIFINE_RENAMER;
+
+    public static File AUTHLIB_INJECTOR;
+    public static File NIDE_8_AUTH;
 
     public static File JAVA_SANDBOX_POLICY;
     public static File LOG4J_XML_1_7;
@@ -46,6 +50,8 @@ public final class LibPath {
          * launcher from starting.
          */
         SUPPORT_COMPONENTS_DIR = safeFilesDir();
+        OTHER_LOGIN_DIR = new File(SUPPORT_COMPONENTS_DIR, "other_login");
+
         CACIO_8 = new File(SUPPORT_COMPONENTS_DIR, "caciocavallo");
         CACIO_17 = new File(SUPPORT_COMPONENTS_DIR, "caciocavallo17");
         CACIO_17_AGENT = new File(CACIO_17, "cacio-agent.jar");
@@ -55,6 +61,9 @@ public final class LibPath {
 
         DROIDBRIDGE_LIB_PATCHER = new File(COMPONENTS_DIR, "DroidBridgeLibPatcher.jar");
         OPTIFINE_RENAMER = new File(COMPONENTS_DIR, "OptiFineRenamer.jar");
+
+        AUTHLIB_INJECTOR = new File(OTHER_LOGIN_DIR, "authlib-injector.jar");
+        NIDE_8_AUTH = new File(OTHER_LOGIN_DIR, "nide8auth.jar");
 
         JAVA_SANDBOX_POLICY = new File(COMPONENTS_DIR, "java_sandbox.policy");
         LOG4J_XML_1_7 = new File(COMPONENTS_DIR, "log4j-rce-patch-1.7.xml");

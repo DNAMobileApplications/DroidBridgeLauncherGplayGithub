@@ -116,9 +116,29 @@ public final class GraphicsBackendHelper {
             Boolean forcedVsync = InstanceLaunchSettings.GRAPHICS_API_VULKAN.equals(backend)
                     ? LauncherPreferences.isVulkanVsyncEnabled(context)
                     : null;
-            writeBackendValue(optionsFile, backend, forcedVsync, true);
+
+            /*
+             * Minecraft 26.3 final serializes the built-in Graphics API preference as a
+             * normal raw options.txt enum value (for example:
+             * preferredGraphicsBackend:vulkan). The older 26.2 helper intentionally used
+             * a quoted JSON-style value. Keeping that quoted form on 26.3 makes the option
+             * fail decoding and Minecraft falls back to OpenGL even though DroidBridge has
+             * already selected/loaded the System Vulkan driver.
+             *
+             * Keep 26.2 byte-for-byte compatible with the existing launcher behavior and
+             * switch only 26.3+ to the final game's raw enum representation.
+             */
+            boolean rawBackendOptionValue = isMinecraft263OrNewerVersion(effectiveVersion);
+            writeBackendValue(
+                    optionsFile,
+                    backend,
+                    forcedVsync,
+                    true,
+                    rawBackendOptionValue
+            );
             Logging.i(TAG, "Forced Minecraft 26.2+ graphics backend=" + backend
                     + " (preferredGraphicsBackend + graphicsBackend)"
+                    + " encoding=" + (rawBackendOptionValue ? "raw-26.3+" : "quoted-26.2")
                     + " startedCleanly=true"
                     + (forcedVsync != null ? " enableVsync=" + forcedVsync : "")
                     + " for Minecraft " + effectiveVersion
@@ -187,6 +207,12 @@ public final class GraphicsBackendHelper {
         return version[0] > 26 || (version[0] == 26 && version[1] >= 2);
     }
 
+    private static boolean isMinecraft263OrNewerVersion(@NonNull String rawVersion) {
+        int[] version = findLastDottedVersion(rawVersion.trim().toLowerCase(Locale.ROOT));
+        if (version == null) return false;
+        return version[0] > 26 || (version[0] == 26 && version[1] >= 3);
+    }
+
     @Nullable
     private static int[] findLastDottedVersion(@NonNull String value) {
         int[] last = null;
@@ -226,7 +252,8 @@ public final class GraphicsBackendHelper {
             @NonNull File optionsFile,
             @NonNull String backend,
             @Nullable Boolean forcedVsync,
-            boolean clearStaleStartupRecovery
+            boolean clearStaleStartupRecovery,
+            boolean rawBackendOptionValue
     ) throws Exception {
         File parent = optionsFile.getParentFile();
         if (parent != null && !parent.exists() && !parent.mkdirs()) {
@@ -248,10 +275,10 @@ public final class GraphicsBackendHelper {
         for (int i = 0; i < lines.size(); i++) {
             String line = lines.get(i);
             if (line.startsWith(PREFERRED_BACKEND_KEY + ":")) {
-                lines.set(i, formatBackendOptionLine(PREFERRED_BACKEND_KEY, backend));
+                lines.set(i, formatBackendOptionLine(PREFERRED_BACKEND_KEY, backend, rawBackendOptionValue));
                 replacedPreferred = true;
             } else if (line.startsWith(LEGACY_BACKEND_KEY + ":")) {
-                lines.set(i, formatBackendOptionLine(LEGACY_BACKEND_KEY, backend));
+                lines.set(i, formatBackendOptionLine(LEGACY_BACKEND_KEY, backend, rawBackendOptionValue));
                 replacedLegacy = true;
             } else if (forcedVsync != null && line.startsWith(VSYNC_KEY + ":")) {
                 lines.set(i, VSYNC_KEY + ":" + forcedVsync);
@@ -267,10 +294,10 @@ public final class GraphicsBackendHelper {
         // key was only updated after Minecraft had launched once and created it,
         // which is why Vulkan/OpenGL appeared as Default on a brand-new instance.
         if (!replacedPreferred) {
-            lines.add(formatBackendOptionLine(PREFERRED_BACKEND_KEY, backend));
+            lines.add(formatBackendOptionLine(PREFERRED_BACKEND_KEY, backend, rawBackendOptionValue));
         }
         if (!replacedLegacy) {
-            lines.add(formatBackendOptionLine(LEGACY_BACKEND_KEY, backend));
+            lines.add(formatBackendOptionLine(LEGACY_BACKEND_KEY, backend, rawBackendOptionValue));
         }
         if (forcedVsync != null && !replacedVsync) {
             lines.add(VSYNC_KEY + ":" + forcedVsync);
@@ -294,8 +321,12 @@ public final class GraphicsBackendHelper {
     @NonNull
     private static String formatBackendOptionLine(
             @NonNull String key,
-            @NonNull String backend
+            @NonNull String backend,
+            boolean rawBackendOptionValue
     ) {
+        if (rawBackendOptionValue) {
+            return key + ":" + backend;
+        }
         return key + ":\"" + backend + "\"";
     }
 

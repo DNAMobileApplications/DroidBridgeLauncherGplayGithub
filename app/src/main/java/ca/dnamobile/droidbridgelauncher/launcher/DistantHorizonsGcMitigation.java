@@ -13,6 +13,7 @@
 package ca.dnamobile.droidbridgelauncher.launcher;
 
 import android.content.Context;
+import android.content.SharedPreferences;
 import android.os.Build;
 
 import androidx.annotation.NonNull;
@@ -22,6 +23,7 @@ import java.io.File;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
+import java.util.zip.ZipFile;
 
 import ca.dnamobile.droidbridgelauncher.feature.log.Logging;
 import ca.dnamobile.droidbridgelauncher.settings.MemoryAllocationUtils;
@@ -40,6 +42,21 @@ public final class DistantHorizonsGcMitigation {
 
     public static final int ZGC_RECOMMENDED_MIN_TOTAL_RAM_MB = 6 * 1024;
     public static final int ZGC_RECOMMENDED_MIN_CPU_CORES = 6;
+
+    private static final String ZGC_PROBE_PREFS = "droidbridge_zgc_probe";
+    private static final int ZGC_PROBE_SCHEMA = 3;
+
+    // Only present when the external bin/java probe could not make a reliable
+    // decision (for example Android killed it with SIGSYS).  The real Minecraft
+    // VMLauncher path then proves itself by surviving this short startup window.
+    public static final String ZGC_STARTUP_GUARD_PROPERTY = "droidbridge.zgc.startup.guard";
+    private static final String ZGC_STARTUP_GUARD_ARG_PREFIX =
+            "-D" + ZGC_STARTUP_GUARD_PROPERTY + "=";
+    private static final long ZGC_STARTUP_GUARD_DELAY_MS = 6_000L;
+
+    private static final int PROBE_FAIL = 0;
+    private static final int PROBE_PASS = 1;
+    private static final int PROBE_INCONCLUSIVE = -1;
 
     private DistantHorizonsGcMitigation() {
     }
@@ -72,6 +89,32 @@ public final class DistantHorizonsGcMitigation {
                 messages.add("Fell back to G1GC because ZGC requires Java 17+ and a 64-bit runtime/device.");
             }
 
+            String startupGuardKey = null;
+            if (InstanceLaunchSettings.GC_MODE_ZGC.equals(effectiveMode)) {
+                String maxHeapArg = findJvmArgWithPrefix(plan.getJvmArgs(), "-Xmx");
+                ZgcProbeDecision probeDecision = getOrRunZgcProbe(
+                        context,
+                        plan.getRuntimeDirectory(),
+                        runtimeMajor,
+                        maxHeapArg
+                );
+                messages.add("ZGC probe " + (probeDecision.cached ? "cache" : "run")
+                        + ": " + probeDecision.verdictName()
+                        + "; " + probeDecision.summary);
+
+                if (probeDecision.verdict == PROBE_FAIL) {
+                    effectiveMode = InstanceLaunchSettings.GC_MODE_G1GC;
+                    messages.add("Fell back to G1GC because ZGC was conclusively rejected by the selected runtime or a previous real VMLauncher startup did not survive.");
+                } else if (probeDecision.verdict == PROBE_INCONCLUSIVE) {
+                    // Android can SIGSYS an exec'ed bin/java even on devices that
+                    // run ZGC correctly through the actual VMLauncher/JLI path.
+                    // Keep the requested ZGC for this launch and let the persisted
+                    // real-VM startup guard decide for the next one.
+                    startupGuardKey = probeDecision.cacheKey;
+                    messages.add("ZGC external probe was inconclusive; keeping ZGC and arming the real VMLauncher startup guard.");
+                }
+            }
+
             ArrayList<String> args = new ArrayList<>(plan.getJvmArgs());
             int removed = removeConflictingGcArgs(args);
 
@@ -86,6 +129,9 @@ public final class DistantHorizonsGcMitigation {
                             + runtimeMajor + ".");
                 } else {
                     messages.add("Applied ZGC for Distant Horizons on Java " + runtimeMajor + ".");
+                }
+                if (startupGuardKey != null) {
+                    insertBeforeClasspath(args, ZGC_STARTUP_GUARD_ARG_PREFIX + startupGuardKey);
                 }
             } else {
                 insertBeforeClasspath(args, "-XX:+UseG1GC");
@@ -170,11 +216,255 @@ public final class DistantHorizonsGcMitigation {
         );
     }
 
+    @NonNull
+    private static ZgcProbeDecision getOrRunZgcProbe(
+            @NonNull Context context,
+            @NonNull File runtimeDirectory,
+            int runtimeMajor,
+            @Nullable String maxHeapArg
+    ) {
+        String cacheKey = buildZgcProbeCacheKey(runtimeDirectory, runtimeMajor, maxHeapArg);
+        SharedPreferences prefs = context.getSharedPreferences(ZGC_PROBE_PREFS, Context.MODE_PRIVATE);
+        String cachedValue = prefs.getString(cacheKey, null);
+
+        if (cachedValue != null) {
+            if (cachedValue.startsWith("pass|")) {
+                return new ZgcProbeDecision(
+                        PROBE_PASS,
+                        true,
+                        cacheKey,
+                        cachedSummary(cachedValue, "real/runtime ZGC pass")
+                );
+            }
+            if (cachedValue.startsWith("fail|")) {
+                return new ZgcProbeDecision(
+                        PROBE_FAIL,
+                        true,
+                        cacheKey,
+                        cachedSummary(cachedValue, "real/runtime ZGC failure")
+                );
+            }
+            if (cachedValue.startsWith("pending|")) {
+                String summary = "previous real VMLauncher ZGC startup did not survive the "
+                        + ZGC_STARTUP_GUARD_DELAY_MS + " ms startup guard; "
+                        + cachedSummary(cachedValue, "pending launch");
+                // A pending marker can only survive when the Android process dies
+                // before the guard thread can confirm HotSpot startup.  Persist the
+                // failure so the very next launch automatically uses G1GC.
+                prefs.edit().putString(cacheKey, "fail|" + summary).commit();
+                return new ZgcProbeDecision(PROBE_FAIL, true, cacheKey, summary);
+            }
+        }
+
+        JavaGameLauncher.ZgcProbeResult probe = JavaGameLauncher.probeZgcSupport(
+                context,
+                runtimeDirectory,
+                runtimeMajor,
+                maxHeapArg
+        );
+
+        String summary = "runtime=" + runtimeDirectory.getName()
+                + ", heap=" + (maxHeapArg == null ? "launcher-default" : maxHeapArg)
+                + ", mode=" + probe.launchMode
+                + ", exit=" + probe.exitCode
+                + ", detail=" + sanitizeProbeDetail(probe.detail);
+
+        if (probe.supported) {
+            prefs.edit().putString(cacheKey, "pass|" + summary).commit();
+            return new ZgcProbeDecision(PROBE_PASS, false, cacheKey, summary);
+        }
+        if (probe.conclusive) {
+            prefs.edit().putString(cacheKey, "fail|" + summary).commit();
+            return new ZgcProbeDecision(PROBE_FAIL, false, cacheKey, summary);
+        }
+
+        // Do not cache an external-process failure as a ZGC failure.  Android's
+        // SIGSYS/seccomp behavior is launch-path-specific.  The real-VM guard is
+        // what converts an actual VMLauncher startup crash into a cached fallback.
+        return new ZgcProbeDecision(PROBE_INCONCLUSIVE, false, cacheKey, summary);
+    }
+
+    @NonNull
+    private static String cachedSummary(@NonNull String cachedValue, @NonNull String fallback) {
+        int split = cachedValue.indexOf('|');
+        if (split < 0 || split + 1 >= cachedValue.length()) return fallback;
+        return cachedValue.substring(split + 1);
+    }
+
+    @NonNull
+    private static String buildZgcProbeCacheKey(
+            @NonNull File runtimeDirectory,
+            int runtimeMajor,
+            @Nullable String maxHeapArg
+    ) {
+        File javaBinary = new File(runtimeDirectory, "bin/java");
+        String fingerprint = Build.FINGERPRINT == null ? "unknown" : Build.FINGERPRINT;
+        String raw = "v" + ZGC_PROBE_SCHEMA
+                + "|" + fingerprint
+                + "|api=" + Build.VERSION.SDK_INT
+                + "|runtime=" + runtimeDirectory.getAbsolutePath()
+                + "|major=" + runtimeMajor
+                + "|javaMtime=" + javaBinary.lastModified()
+                + "|javaSize=" + javaBinary.length()
+                + "|heap=" + (maxHeapArg == null ? "default" : maxHeapArg);
+        return "probe_" + Integer.toHexString(raw.hashCode());
+    }
+
+    @Nullable
+    private static String findJvmArgWithPrefix(@NonNull List<String> args, @NonNull String prefix) {
+        for (String arg : args) {
+            if (arg != null && arg.startsWith(prefix)) {
+                return arg;
+            }
+        }
+        return null;
+    }
+
+    @Nullable
+    private static String findStartupGuardKey(@NonNull LaunchPlan plan) {
+        String arg = findJvmArgWithPrefix(plan.getJvmArgs(), ZGC_STARTUP_GUARD_ARG_PREFIX);
+        if (arg == null || arg.length() <= ZGC_STARTUP_GUARD_ARG_PREFIX.length()) return null;
+        return arg.substring(ZGC_STARTUP_GUARD_ARG_PREFIX.length());
+    }
+
+    /**
+     * Called immediately before VMLauncher/JLI starts the real Minecraft VM.
+     * The marker is intentionally persisted before entering HotSpot. If ZGC
+     * aborts the Android process during VM initialization, the marker survives
+     * and the next launch falls back to G1GC automatically.
+     */
+    public static void armRealVmStartupGuardIfNeeded(
+            @NonNull Context context,
+            @NonNull LaunchPlan plan
+    ) {
+        final String cacheKey = findStartupGuardKey(plan);
+        if (cacheKey == null) return;
+
+        final Context appContext = context.getApplicationContext() != null
+                ? context.getApplicationContext()
+                : context;
+        final SharedPreferences prefs = appContext.getSharedPreferences(ZGC_PROBE_PREFS, Context.MODE_PRIVATE);
+        final long armedAt = System.currentTimeMillis();
+        prefs.edit().putString(
+                cacheKey,
+                "pending|armed=" + armedAt + ", real VMLauncher/JLI ZGC trial"
+        ).commit();
+
+        Logging.i(TAG, "ZGC real-VM startup guard armed key=" + cacheKey
+                + " delayMs=" + ZGC_STARTUP_GUARD_DELAY_MS);
+
+        Thread guard = new Thread(() -> {
+            try {
+                Thread.sleep(ZGC_STARTUP_GUARD_DELAY_MS);
+                String current = prefs.getString(cacheKey, null);
+                if (current != null && current.startsWith("pending|")) {
+                    prefs.edit().putString(
+                            cacheKey,
+                            "pass|real VMLauncher/JLI ZGC survived "
+                                    + ZGC_STARTUP_GUARD_DELAY_MS + " ms"
+                    ).commit();
+                    Logging.i(TAG, "ZGC real-VM startup guard PASS key=" + cacheKey);
+                }
+            } catch (Throwable throwable) {
+                Logging.e(TAG, "ZGC real-VM startup guard thread failed", throwable);
+            }
+        }, "DroidBridge-ZGC-StartupGuard");
+        guard.setDaemon(true);
+        guard.start();
+    }
+
+    /**
+     * Completes a still-pending guard if VMLauncher returns before the delayed
+     * confirmation thread. A normal exit proves HotSpot/ZGC initialized; an
+     * immediate non-zero return is conservatively cached as a ZGC startup fail.
+     */
+    public static void completeRealVmStartupGuardIfNeeded(
+            @NonNull Context context,
+            @NonNull LaunchPlan plan,
+            int exitCode
+    ) {
+        String cacheKey = findStartupGuardKey(plan);
+        if (cacheKey == null) return;
+
+        SharedPreferences prefs = context.getSharedPreferences(ZGC_PROBE_PREFS, Context.MODE_PRIVATE);
+        String current = prefs.getString(cacheKey, null);
+        if (current == null || !current.startsWith("pending|")) return;
+
+        if (exitCode == 0) {
+            prefs.edit().putString(cacheKey, "pass|real VMLauncher/JLI ZGC exited normally").commit();
+            Logging.i(TAG, "ZGC real-VM startup guard PASS on normal exit key=" + cacheKey);
+        } else {
+            prefs.edit().putString(
+                    cacheKey,
+                    "fail|real VMLauncher/JLI returned before startup guard with exit=" + exitCode
+            ).commit();
+            Logging.i(TAG, "ZGC real-VM startup guard FAIL on early exit key=" + cacheKey
+                    + " exit=" + exitCode);
+        }
+    }
+
+    @NonNull
+    private static String sanitizeProbeDetail(@Nullable String detail) {
+        if (detail == null || detail.trim().isEmpty()) return "none";
+        String compact = detail.replace('\n', ' ').replace('\r', ' ').trim();
+        while (compact.contains("  ")) compact = compact.replace("  ", " ");
+        return compact.length() > 240 ? compact.substring(0, 240) + "..." : compact;
+    }
+
+    private static final class ZgcProbeDecision {
+        final int verdict;
+        final boolean cached;
+        @NonNull final String cacheKey;
+        @NonNull final String summary;
+
+        ZgcProbeDecision(
+                int verdict,
+                boolean cached,
+                @NonNull String cacheKey,
+                @NonNull String summary
+        ) {
+            this.verdict = verdict;
+            this.cached = cached;
+            this.cacheKey = cacheKey;
+            this.summary = summary;
+        }
+
+        @NonNull
+        String verdictName() {
+            if (verdict == PROBE_PASS) return "PASS";
+            if (verdict == PROBE_FAIL) return "FAIL";
+            return "INCONCLUSIVE";
+        }
+    }
+
     public static boolean hasDistantHorizons(@NonNull File gameDir) {
-        return hasModJar(gameDir, "distanthorizons")
+        if (hasModJar(gameDir, "distanthorizons")
                 || hasModJar(gameDir, "distant-horizons")
                 || hasModJar(gameDir, "distant_horizons")
-                || hasModJar(gameDir, "distant horizons");
+                || hasModJar(gameDir, "distant horizons")) {
+            return true;
+        }
+
+        // DH's self-updater may replace the jar with a filename that no longer
+        // contains the mod name.  Match the exact public API class so renamed
+        // official jars still receive the GC compatibility path.
+        for (File modsDir : getCandidateModsDirs(gameDir)) {
+            File[] files = modsDir.listFiles();
+            if (files == null) continue;
+            for (File file : files) {
+                if (!file.isFile() || !file.getName().toLowerCase(Locale.ROOT).endsWith(".jar")) {
+                    continue;
+                }
+                try (ZipFile zip = new ZipFile(file)) {
+                    if (zip.getEntry("com/seibel/distanthorizons/api/DhApi.class") != null) {
+                        return true;
+                    }
+                } catch (Throwable ignored) {
+                    // A broken/unreadable unrelated mod jar must never block launch.
+                }
+            }
+        }
+        return false;
     }
 
     @NonNull
@@ -253,6 +543,7 @@ public final class DistantHorizonsGcMitigation {
                 || arg.equals("-XX:-UseZGC")
                 || arg.equals("-XX:+ZGenerational")
                 || arg.equals("-XX:-ZGenerational")
+                || arg.startsWith(ZGC_STARTUP_GUARD_ARG_PREFIX)
                 || arg.startsWith("-XX:G1")
                 || arg.startsWith("-XX:Z");
     }
@@ -289,7 +580,9 @@ public final class DistantHorizonsGcMitigation {
     private static void logMessages(@NonNull ArrayList<String> messages) {
         String summary = null;
         for (String message : messages) {
-            if (message.startsWith("Failed:") || message.startsWith("Fell back")) {
+            if (message.startsWith("Failed:")
+                    || message.startsWith("Fell back")
+                    || message.startsWith("ZGC probe")) {
                 Logging.i(TAG, message);
             }
             if (message.startsWith("Distant Horizons=true;")) {

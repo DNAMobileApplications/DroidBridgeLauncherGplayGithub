@@ -60,6 +60,7 @@ import java.util.EnumMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 // Dialog that handles the controller and button mappings including mouse dpi etc
 public final class GamepadMappingDialog {
@@ -320,7 +321,41 @@ public final class GamepadMappingDialog {
         touchLayoutSpinner.setAdapter(touchLayoutAdapter);
         touchLayoutSpinner.setSelection(Math.max(0, Math.min(selectedLayoutIndex, touchLayouts.size() - 1)), false);
         overlayCard.addView(touchLayoutSpinner, matchWrapWithTopMargin(activity, 2));
-        addSmallHint(activity, overlayCard, "Switch the active on-screen touch layout while the game is running. This keeps the same dialog design and only changes the selected layout.");
+        addSmallHint(activity, overlayCard, "Switch the active on-screen touch layout while the game is running. Selecting another layout applies it immediately and closes this dialog; Save is not required.");
+
+        // Touch-layout changes are runtime profile switches, not staged mapping edits.
+        // Apply them immediately so the running game updates without requiring Save.
+        final String initiallySelectedTouchLayoutPath = touchLayouts
+                .get(Math.max(0, Math.min(selectedLayoutIndex, touchLayouts.size() - 1)))
+                .getAbsolutePath();
+        touchLayoutSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override
+            public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (position < 0 || position >= touchLayouts.size()) return;
+
+                File selected = touchLayouts.get(position);
+                String nextPath = selected.getAbsolutePath();
+                String currentPath = ControlsPreferences.getSelectedLayoutPath(activity);
+                String effectiveCurrentPath = currentPath == null
+                        ? initiallySelectedTouchLayoutPath
+                        : currentPath;
+                if (nextPath.equals(effectiveCurrentPath)) return;
+
+                ControlsPreferences.setSelectedLayoutPath(activity, nextPath);
+                notifySettingsChanged(activity, listener);
+                InputEventDiagnosticLogger.mark(
+                        "GamepadMappingDialog switchedTouchLayout=" + selected.getName());
+
+                AlertDialog currentDialog = activeDialog;
+                if (currentDialog != null && currentDialog.isShowing()) {
+                    currentDialog.dismiss();
+                }
+            }
+
+            @Override
+            public void onNothingSelected(AdapterView<?> parent) {
+            }
+        });
 
         TextView virtualMouseSpeedLabel = addVirtualMouseSpeedControl(
                 activity,
@@ -477,7 +512,7 @@ public final class GamepadMappingDialog {
             notifySettingsChanged(activity, listener);
         });
 
-        AlertDialog dialog = new AlertDialog.Builder(activity)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(activity)
                 .setView(scrollView)
                 .setPositiveButton("Save", (dialogInterface, which) -> {
                     saved[0] = true;
@@ -1282,7 +1317,7 @@ public final class GamepadMappingDialog {
                 ViewGroup.LayoutParams.WRAP_CONTENT
         ));
 
-        AlertDialog numberDialog = new AlertDialog.Builder(activity)
+        AlertDialog numberDialog = new MaterialAlertDialogBuilder(activity)
                 .setTitle(title)
                 .setView(container)
                 .setPositiveButton("Apply", null)

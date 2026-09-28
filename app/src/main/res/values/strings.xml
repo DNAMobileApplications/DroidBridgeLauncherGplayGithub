@@ -5,7 +5,7 @@
     <string name="status_signed_in">Microsoft account: %1$s</string>
     <string name="button_sign_in">Sign in</string>
     <string name="button_sign_out">Sign out</string>
-    <string name="msg_configure_client_id">Microsoft sign-in is not included in this public source snapshot.</string>
+    <string name="msg_configure_client_id">Microsoft sign-in is missing its OAuth client ID. Add MICROSOFT_CLIENT_ID to local.properties or use the DroidBridge default client ID in app/build.gradle.</string>
     <string name="msg_sign_in_success">Sign-in completed.</string>
     <string name="msg_sign_out_success">Signed out.</string>
     <string name="version_section_title">Minecraft versions</string>
@@ -40,6 +40,14 @@
     <string name="msg_version_install_complete_named">Vanilla %1$s installed. You can launch it now.</string>
     <string name="msg_launcher_folder_location">Launcher game folder: %1$s</string>
     <string name="button_share_logs">Share Logs</string>
+    <string name="share_logs_dialog_title">Share Logs</string>
+    <string name="share_logs_latest_option">Minecraft latestlog.txt</string>
+    <string name="share_logs_launcher_option">DroidBridge launcherlogs.txt</string>
+    <string name="share_logs_android_chooser_title">Share DroidBridge log</string>
+    <string name="share_logs_dialog_setting_on">Share Logs selection dialog: On</string>
+    <string name="share_logs_dialog_setting_off">Share Logs selection dialog: Off</string>
+    <string name="share_logs_dialog_setting_summary">When enabled, Share Logs asks whether to share Minecraft latestlog.txt or DroidBridge launcherlogs.txt. Turn this off to always share latestlog.txt immediately.</string>
+    <string name="share_logs_share_failed">Unable to share the log file.</string>
     <string name="button_launch">Install / Launch selected version</string>
     <string name="launch_log_title">Launch log</string>
     <string name="msg_launch_requires_login">Sign in before online launch.</string>
@@ -85,6 +93,7 @@ Available device storage: %1$s</string>
     <string name="component_installer_missing_dialog_title">Components are still missing</string>
     <string name="component_installer_missing_dialog_message">The failed items were skipped so DroidBridge would not remain stuck on the installation screen. Try reinstalling the missing components before launching a Minecraft version that requires them.</string>
     <string name="component_installer_troubleshooting">If installation still fails, clear DroidBridge’s cache, restart the phone, and try again. Make sure the device has at least 1 GB of free storage before reinstalling components.</string>
+    <string name="splash_screen_authlib_injector">Unpacks authlib-injector and nide8auth into the launcher game home.</string>
     <string name="splash_screen_cacio">Unpacks the Cacio/Caciocavallo desktop compatibility files.</string>
     <string name="splash_screen_lwjgl">Unpacks LWJGL classes and natives into the app-private files directory.</string>
     <string name="splash_screen_components">Unpacks launcher support jars and patch files into the app data components directory.</string>
@@ -168,7 +177,7 @@ Available device storage: %1$s</string>
     <string name="game_settings_button_position_reset_toast">Floating button position reset.</string>
     <string name="settings_renderer_ignore_notch_on">Ignore display notch: On</string>
     <string name="settings_renderer_ignore_notch_off">Ignore display notch: Off</string>
-    <string name="settings_renderer_ignore_notch_summary">Ignores the camera cutout on certain devices.</string>
+    <string name="settings_renderer_ignore_notch_summary">Keeps Minecraft and touch controls inside the safe display area so they do not render under the camera cutout/notch.</string>
     <string name="button_pick_mobileglues_folder">Pick MG folder</string>
     <string name="renderer_plugin_storage_message">%1$s needs the MobileGlues folder selected before launch.\n\nPick the MG folder so the launcher can write the MobileGlues config here:\n%2$s</string>
     <string name="preparing_launcher_components">Preparing launcher components...</string>

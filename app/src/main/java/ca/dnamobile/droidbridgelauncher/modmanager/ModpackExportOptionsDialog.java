@@ -37,6 +37,7 @@ import java.io.File;
 import java.util.Locale;
 
 import ca.dnamobile.droidbridgelauncher.modmanager.ModpackExportManager;
+import com.google.android.material.dialog.MaterialAlertDialogBuilder;
 
 public final class ModpackExportOptionsDialog {
     private static final int COLOR_DIALOG_BG = Color.rgb(30, 34, 42);
@@ -102,7 +103,7 @@ public final class ModpackExportOptionsDialog {
         ));
 
         TextView info = new TextView(activity);
-        info.setText("Choose what goes into this export. Required manifest and Minecraft loader metadata stay locked. Modified Modrinth files are bundled as overrides automatically so imports do not fail with SHA-1 mismatches.");
+        info.setText("Choose what goes into this export. Required manifest, loader metadata, and instance configuration stay locked so edited mod settings are not lost. Modified Modrinth files are bundled as overrides automatically so imports do not fail with SHA-1 mismatches.");
         info.setTextSize(TypedValue.COMPLEX_UNIT_SP, 14);
         info.setTextColor(COLOR_TEXT_SECONDARY);
         info.setLineSpacing(0f, 1.08f);
@@ -128,7 +129,7 @@ public final class ModpackExportOptionsDialog {
 
         LinearLayout contentCard = addCard(activity, root);
         addCardTitle(activity, contentCard, "Content to include");
-        addInfoText(activity, contentCard, "Defaults match the old exporter. Saves are available for private sharing, but stay off by default. If DroidBridge or another tool patched a mod jar, it is exported as an override instead of a stale remote download.");
+        addInfoText(activity, contentCard, "Saves are available for private sharing, but stay off by default. Config/defaultconfigs/KubeJS/scripts and other known mod configuration data are always preserved. If DroidBridge or another tool patched a mod jar, it is exported as an override instead of a stale remote download.");
 
         boolean hasIcon = iconFile != null && iconFile.isFile() && iconFile.length() > 0;
         CheckBox includeIcon = addCheckRow(
@@ -150,10 +151,10 @@ public final class ModpackExportOptionsDialog {
         CheckBox includeResourcePacks = addCheckRow(
                 activity,
                 contentCard,
-                "Resource packs",
-                describeFolder(gameDirectory, "resourcepacks", ".zip"),
+                "Resource / texture packs",
+                describePackFolders(gameDirectory),
                 true,
-                folderExists(gameDirectory, "resourcepacks")
+                folderExists(gameDirectory, "resourcepacks") || folderExists(gameDirectory, "texturepacks")
         );
         CheckBox includeShaderPacks = addCheckRow(
                 activity,
@@ -163,37 +164,11 @@ public final class ModpackExportOptionsDialog {
                 true,
                 folderExists(gameDirectory, "shaderpacks")
         );
-        CheckBox includeConfig = addCheckRow(
+        addLockedRow(
                 activity,
                 contentCard,
-                "Config folder",
-                describeAnyFolder(gameDirectory, "config"),
-                true,
-                folderExists(gameDirectory, "config")
-        );
-        CheckBox includeDefaultConfigs = addCheckRow(
-                activity,
-                contentCard,
-                "Default configs",
-                describeAnyFolder(gameDirectory, "defaultconfigs"),
-                true,
-                folderExists(gameDirectory, "defaultconfigs")
-        );
-        CheckBox includeKubeJs = addCheckRow(
-                activity,
-                contentCard,
-                "KubeJS",
-                describeAnyFolder(gameDirectory, "kubejs"),
-                true,
-                folderExists(gameDirectory, "kubejs")
-        );
-        CheckBox includeScripts = addCheckRow(
-                activity,
-                contentCard,
-                "Scripts",
-                describeAnyFolder(gameDirectory, "scripts"),
-                true,
-                folderExists(gameDirectory, "scripts")
+                "Mod configuration",
+                describeConfigurationData(gameDirectory)
         );
         CheckBox includeOptionsTxt = addCheckRow(
                 activity,
@@ -223,7 +198,7 @@ public final class ModpackExportOptionsDialog {
                 maxContentHeight
         ));
 
-        AlertDialog dialog = new AlertDialog.Builder(activity)
+        AlertDialog dialog = new MaterialAlertDialogBuilder(activity)
                 .setView(scrollView)
                 .setNegativeButton(android.R.string.cancel, null)
                 .setPositiveButton("Export", null)
@@ -239,10 +214,10 @@ public final class ModpackExportOptionsDialog {
                             includeMods.isChecked(),
                             includeResourcePacks.isChecked(),
                             includeShaderPacks.isChecked(),
-                            includeConfig.isChecked(),
-                            includeDefaultConfigs.isChecked(),
-                            includeKubeJs.isChecked(),
-                            includeScripts.isChecked(),
+                            true,
+                            true,
+                            true,
+                            true,
                             includeOptionsTxt.isChecked(),
                             includeSaves.isChecked()
                     ));
@@ -510,6 +485,53 @@ public final class ModpackExportOptionsDialog {
         }
         if (count == 0) return "Folder exists, but no matching files were found";
         return count + " file" + (count == 1 ? "" : "s") + " found";
+    }
+
+    @NonNull
+    private static String describePackFolders(@NonNull File gameDirectory) {
+        int resourceCount = countMatchingFiles(new File(gameDirectory, "resourcepacks"), ".zip");
+        int textureCount = countMatchingFiles(new File(gameDirectory, "texturepacks"), ".zip");
+        int total = resourceCount + textureCount;
+        if (total <= 0) {
+            if (folderExists(gameDirectory, "resourcepacks") || folderExists(gameDirectory, "texturepacks")) {
+                return "Pack folder exists, but no .zip packs were found";
+            }
+            return "Missing from this instance";
+        }
+        if (resourceCount > 0 && textureCount > 0) {
+            return resourceCount + " resource pack" + (resourceCount == 1 ? "" : "s")
+                    + " + " + textureCount + " texture pack" + (textureCount == 1 ? "" : "s") + " found";
+        }
+        if (textureCount > 0) return textureCount + " texture pack" + (textureCount == 1 ? "" : "s") + " found";
+        return resourceCount + " resource pack" + (resourceCount == 1 ? "" : "s") + " found";
+    }
+
+    private static int countMatchingFiles(@NonNull File directory, @NonNull String extension) {
+        if (!directory.isDirectory()) return 0;
+        int count = 0;
+        File[] files = directory.listFiles();
+        if (files == null) return 0;
+        for (File file : files) {
+            if (file.isFile() && !file.isHidden()
+                    && file.getName().toLowerCase(Locale.US).endsWith(extension)) count++;
+        }
+        return count;
+    }
+
+    @NonNull
+    private static String describeConfigurationData(@NonNull File gameDirectory) {
+        String[] folders = {"config", "defaultconfigs", "kubejs", "scripts", "openloader", "global_packs", "paxi", "patchouli_books", "resources"};
+        int existingFolders = 0;
+        int items = 0;
+        for (String folder : folders) {
+            File directory = new File(gameDirectory, folder);
+            if (!directory.isDirectory()) continue;
+            existingFolders++;
+            items += countChildren(directory);
+        }
+        if (existingFolders <= 0) return "No known mod configuration folders found; root config files are still preserved automatically";
+        return existingFolders + " config folder" + (existingFolders == 1 ? "" : "s")
+                + " found (" + items + " top-level item" + (items == 1 ? "" : "s") + "); always included";
     }
 
     @NonNull

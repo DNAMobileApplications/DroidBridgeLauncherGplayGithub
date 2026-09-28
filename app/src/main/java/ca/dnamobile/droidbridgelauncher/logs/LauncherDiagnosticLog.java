@@ -87,30 +87,31 @@ public final class LauncherDiagnosticLog {
         }
 
         File shareDir = new File(activity.getCacheDir(), "shared_logs");
-        File shareFile = new File(shareDir, LOG_FILE_NAME);
+        // Keep the on-disk diagnostic source as launcherlog.txt for compatibility, but
+        // present the attachment using the clearer plural filename requested by the UI.
+        File shareFile = new File(shareDir, "launcherlogs.txt");
 
         try {
             copyFile(logFile, shareFile);
             shareFile.setReadable(true, false);
-            Uri uri = FileProvider.getUriForFile(
+            LauncherLogManager.shareTextAttachment(
                     activity,
-                    activity.getPackageName() + ".fileprovider",
-                    shareFile
+                    shareFile,
+                    "launcherlogs.txt",
+                    "DroidBridge launcherlogs.txt",
+                    activity.getString(R.string.share_logs_android_chooser_title)
             );
-
-            Intent sendIntent = new Intent(Intent.ACTION_SEND);
-            sendIntent.setType("text/plain");
-            sendIntent.putExtra(Intent.EXTRA_STREAM, uri);
-            sendIntent.putExtra(Intent.EXTRA_SUBJECT, "DroidBridge launcherlog.txt");
-            sendIntent.putExtra(Intent.EXTRA_TEXT, "DroidBridge launcherlog.txt");
-            sendIntent.setClipData(ClipData.newUri(activity.getContentResolver(), LOG_FILE_NAME, uri));
-            sendIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-
-            activity.startActivity(Intent.createChooser(sendIntent, activity.getString(R.string.button_share_launcher_logs)));
         } catch (ActivityNotFoundException throwable) {
             Toast.makeText(activity, R.string.launcher_logs_share_failed, Toast.LENGTH_LONG).show();
         } catch (Throwable throwable) {
-            Toast.makeText(activity, throwable.getMessage(), Toast.LENGTH_LONG).show();
+            String message = throwable.getMessage();
+            Toast.makeText(
+                    activity,
+                    message != null && !message.trim().isEmpty()
+                            ? message
+                            : activity.getString(R.string.launcher_logs_share_failed),
+                    Toast.LENGTH_LONG
+            ).show();
         }
     }
 
