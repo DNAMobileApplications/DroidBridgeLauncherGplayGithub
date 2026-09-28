@@ -168,7 +168,7 @@ DroidBridge Launcher provides public legal and notice information for users and 
 | Privacy Policy | [https://dnamobilegaming.com/privacy](https://docs.google.com/document/d/1aGLPa6tECaLEFr5rZxVBWba5CRyW3XFB/edit?usp=sharing&ouid=113792205778833825558&rtpof=true&sd=true) |
 | Terms of Service | [https://www.dnamobilegaming.com/terms](https://docs.google.com/document/d/1fd5fChQocOZ7QEYoTo4FYzOSEe8OEWNg/edit?usp=sharing&ouid=113792205778833825558&rtpof=true&sd=true) |
 | Licensing Information | https://www.dnamobilegaming.com/license |
-| Open Source Notices | [OPEN_SOURCE_NOTICES.md](OPEN_SOURCE_NOTICES.md) |
+| Open Source Notices | [Open Source Notices](https://drive.google.com/file/d/1oRuznCOEX8yhFlTdYK9kboexxYfE-aYH/view?usp=sharing) |
 
 The legal links presented inside the application are intended to direct users to the corresponding public privacy, terms, licensing, and notice information.
 
@@ -220,7 +220,7 @@ DroidBridge Launcher may use, reference, modify, or interoperate with open-sourc
 | GL4ES | MIT unless otherwise stated by the upstream project | https://github.com/ptitSeb/gl4es |
 | AndroidX / Google Material Components / Android platform libraries | Apache-2.0 unless otherwise stated | https://developer.android.com |
 
-See [OPEN_SOURCE_NOTICES.md](OPEN_SOURCE_NOTICES.md), the public licensing information, individual source-file headers, and license files distributed with third-party components for the terms that apply to specific portions of the project.
+See the [Open Source Notices](https://drive.google.com/file/d/1oRuznCOEX8yhFlTdYK9kboexxYfE-aYH/view?usp=sharing), the public licensing information, individual source-file headers, and license files distributed with third-party components for the terms that apply to specific portions of the project.
 
 ## Privacy
 
@@ -252,16 +252,16 @@ Translations must preserve the meaning of legal notices and must not imply that 
 ### Build steps
 
 ```bash
-git clone https://github.com/DNAMobileApplications/DroidBridgeLauncher.git
-cd DroidBridgeLauncher
+git clone https://github.com/DNAMobileApplications/DroidBridgeLauncherGplayGithub.git
+cd DroidBridgeLauncherGplayGithub
 ./gradlew assembleDebug
 ```
 
 On Windows:
 
 ```bat
-git clone https://github.com/DNAMobileApplications/DroidBridgeLauncher.git
-cd DroidBridgeLauncher
+git clone https://github.com/DNAMobileApplications/DroidBridgeLauncherGplayGithub.git
+cd DroidBridgeLauncherGplayGithub
 gradlew.bat assembleDebug
 ```
 
